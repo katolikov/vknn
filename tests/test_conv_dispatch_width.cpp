@@ -176,12 +176,22 @@ TEST(ConvDispatchWidth, ConvRegSpecAlwaysCarriesTheLaneWidth) {
 TEST(ConvDispatchWidth, ForcedConvRegPipelineWidthMatchesItsDispatchWidth) {
     for (int64_t laneWidth: kLaneWidths)
     {
-        const std::vector<uint32_t> spec    = convRegSpecConstants(kConvRegDefaultOcbBlocks, kConvRegDefaultPixelTile, (uint32_t) laneWidth);
-        const int64_t               threads = 1 * 16 * ((56 * 56 + kConvRegDefaultPixelTile - 1) / kConvRegDefaultPixelTile);
+        const std::vector<uint32_t> spec = convRegSpecConstants(kConvRegDefaultOcbBlocks, kConvRegDefaultPixelTile, (uint32_t) laneWidth);
         EXPECT_EQ(spec[kConvRegLaneWidthSpecIndex], (uint32_t) laneWidth);
-        // Lanes launched at the compiled width cover every thread the tile needs.
-        EXPECT_GE(convDispatchGroups(threads, spec[kConvRegLaneWidthSpecIndex]) * (int64_t) spec[kConvRegLaneWidthSpecIndex], threads);
-        EXPECT_EQ(convDispatchGroups(threads, laneWidth), convDispatchGroups(threads, spec[kConvRegLaneWidthSpecIndex]));
+        // The forced dispatch is sized like every other conv_reg dispatch: the kernel decodes the
+        // block group inside a map-sized chunk of pixel tiles and bounds on
+        // groups * chunks * chunk lanes, which a flat tile count falls short of whenever the tiles
+        // do not fill their chunks (a 13x20 map at four pixels per thread has 65 tiles: two
+        // chunks of 33, so 64 groups need 4224 lanes, not 4160).
+        for (int64_t hw: {56 * 56, 13 * 20, 7 * 7})
+        {
+            const int64_t tiles     = (hw + kConvRegDefaultPixelTile - 1) / kConvRegDefaultPixelTile;
+            const int64_t groupsOcb = (64 + kConvRegDefaultOcbBlocks - 1) / kConvRegDefaultOcbBlocks;
+            const int64_t threads   = convChunkedTileLanes(1, groupsOcb, tiles, laneWidth);
+            const int64_t kernelMax = groupsOcb * convTileChunkCount(tiles, laneWidth) * convTileChunk(tiles, laneWidth);
+            EXPECT_GE(convDispatchGroups(threads, spec[kConvRegLaneWidthSpecIndex]) * (int64_t) spec[kConvRegLaneWidthSpecIndex], kernelMax);
+            EXPECT_EQ(convDispatchGroups(threads, laneWidth), convDispatchGroups(threads, spec[kConvRegLaneWidthSpecIndex]));
+        }
     }
 }
 
@@ -479,8 +489,9 @@ TEST(ConvDispatchWidth, PointwiseSplitKFollowsTheMeasuredBoundary) {
     EXPECT_EQ(pwSplitKParts(256, 64, 196), 2);
     EXPECT_TRUE(pwSplitKActive(true, 1, 2048, 256, 49, kAuto));
     EXPECT_EQ(pwSplitKParts(512, 256, 49), 2);
-    // Shallow reductions on small planes: 480->80 @14x14 splits seven ways (120 blocks, 16 per
-    // part), 240->80 @14x14 three ways, 128->64 @14x14 two ways, a 480->20 squeeze seven ways.
+    // Shallow reductions on small planes: 480->80 @14x14 splits seven ways (120 blocks, the depth
+    // floor's cap), 240->80 @14x14 three ways, 128->64 @14x14 two ways, a 480->20 squeeze seven
+    // ways.
     EXPECT_TRUE(pwSplitKActive(true, 1, 480, 20, 196, kAuto));
     EXPECT_EQ(pwSplitKParts(120, 20, 196), 7);
     EXPECT_TRUE(pwSplitKActive(true, 1, 240, 20, 196, kAuto));
@@ -498,6 +509,9 @@ TEST(ConvDispatchWidth, PointwiseSplitKFollowsTheMeasuredBoundary) {
     EXPECT_FALSE(pwSplitKActive(true, 1, 512, 512, 49, kAuto));
     EXPECT_FALSE(pwSplitKActive(true, 1, 1024, 128, 196, kAuto));
     EXPECT_FALSE(pwSplitKActive(true, 1, 1024, 128, 144, kAuto));
+    // An empty plane never splits (nothing to reduce, no thread count to divide by).
+    EXPECT_FALSE(pwSplitKActive(true, 1, 2048, 128, 0, kAuto));
+    EXPECT_FALSE(pwSplitKActive(true, 1, 2048, 0, 49, kAuto));
     // Off disables the path; fp32 storage and batches never split.
     EXPECT_FALSE(pwSplitKActive(true, 1, 2048, 128, 49, (int) Mode::Off));
     EXPECT_FALSE(pwSplitKActive(false, 1, 2048, 128, 49, kAuto));

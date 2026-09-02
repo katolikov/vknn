@@ -1633,8 +1633,11 @@ namespace vknn {
                         // record() divides by has to be the width the pipeline is compiled at.
                         reg        = true;
                         int64_t HW = y.h * y.w;
-                        total      = x.n * Coutb * ((HW + kConvRegDefaultPixelTile - 1) / kConvRegDefaultPixelTile);
-                        pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), convRegSpecConstants(kConvRegDefaultOcbBlocks, kConvRegDefaultPixelTile, laneWidth));
+                        // Sized like every other conv_reg dispatch: the kernel decodes the block
+                        // group inside a map-sized chunk of pixel tiles, and a flat tile count
+                        // falls short of that range whenever the tiles do not fill their chunks.
+                        total = convChunkedTileLanes(x.n, (Coutb + kConvRegDefaultOcbBlocks - 1) / kConvRegDefaultOcbBlocks, (HW + kConvRegDefaultPixelTile - 1) / kConvRegDefaultPixelTile, laneWidth);
+                        pipe  = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), convRegSpecConstants(kConvRegDefaultOcbBlocks, kConvRegDefaultPixelTile, laneWidth));
                     } else
                     {
                         // DirectAuto: the bit-exact direct race picks the baseline (1-pixel direct,

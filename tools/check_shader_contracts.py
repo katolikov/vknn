@@ -152,6 +152,44 @@ def check_shader(name, src):
     return fatals, advisories
 
 
+# 6. Cooperative-transform lane grouping. wino_input4_fp16.comp / wino_out4_fp16.comp decode
+#    their (channel-block, tile) unit from LANES threads and UNITS_PER_GROUP units per workgroup,
+#    and the host sizes the dispatch from kWinoF43TransformLanes / kWinoF43TransformUnitsPerGroup
+#    in src/core/wino_f63.h (winoTransformGroups). A drift between the two launches a grid the
+#    shader decodes differently: units at the end of every workgroup go unwritten, silently.
+TRANSFORM_LANE_KERNELS = ("wino_input4_fp16.comp", "wino_out4_fp16.comp")
+TRANSFORM_LANE_CONSTANTS = (("LANES", "kWinoF43TransformLanes"), ("UNITS_PER_GROUP", "kWinoF43TransformUnitsPerGroup"))
+
+
+def _host_constant(header_src, name):
+    m = re.search(r"constexpr\s+int\s+%s\s*=\s*(\d+)\s*;" % re.escape(name), header_src)
+    return int(m.group(1)) if m else None
+
+
+def check_transform_lane_constants(sources, shaders_dir):
+    header = os.path.join(os.path.dirname(os.path.abspath(shaders_dir)), "src", "core", "wino_f63.h")
+    if not os.path.isfile(header):
+        return ["%s not found; cannot check the cooperative-transform lane constants" % header]
+    with open(header, encoding="utf-8") as f:
+        header_src = f.read()
+    fatals = []
+    for kernel in TRANSFORM_LANE_KERNELS:
+        src = sources.get(kernel)
+        if src is None:
+            fatals.append("%s missing; the host dispatches it (winoTransformGroups)" % kernel)
+            continue
+        for macro, host_name in TRANSFORM_LANE_CONSTANTS:
+            m = re.search(r"^#define\s+%s\s+(\d+)" % macro, src, re.M)
+            host = _host_constant(header_src, host_name)
+            if m is None or host is None:
+                fatals.append("%s: cannot find #define %s or %s in wino_f63.h" % (kernel, macro, host_name))
+            elif int(m.group(1)) != host:
+                fatals.append("%s: #define %s %s disagrees with %s = %d in src/core/wino_f63.h; the host "
+                              "sizes the transform dispatch from the header, the shader decodes with the macro"
+                              % (kernel, macro, m.group(1), host_name, host))
+    return fatals
+
+
 def main():
     ap = argparse.ArgumentParser(description="VKNN shader-contract lint (ADR-0011)")
     ap.add_argument("--shaders", default=SHADERS_DEFAULT, help="shaders dir (default: this tree)")
@@ -176,6 +214,7 @@ def main():
         all_fatals += f_
         all_advisories += a_
     all_fatals += check_precision_pairs(sources)
+    all_fatals += check_transform_lane_constants(sources, args.shaders)
 
     print("check_shader_contracts: scanned %d shaders (%d fp32/fp16 pairs)"
           % (len(comps), sum(1 for n in sources if n.endswith("_fp16.comp")
@@ -191,7 +230,7 @@ def main():
     if all_fatals or (args.strict and all_advisories):
         sys.exit(1)
     if not all_advisories:
-        print("PASS — all shaders satisfy the store16 / pair-lane-count / VKNN_NO_RTE / gid-recovery contracts")
+        print("PASS — all shaders satisfy the store16 / pair-lane-count / VKNN_NO_RTE / gid-recovery / transform-lane contracts")
     else:
         print("PASS — no fatal contract violations (advisories above; --strict to enforce)")
 

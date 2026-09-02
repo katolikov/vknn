@@ -27,10 +27,13 @@ namespace vknn {
     // Measured boundary: 128->64 @14x14 wins 17%, 128->128 @14x14 ties, 256->128 @14x14 wins
     // 25%, 256->256 @14x14 ties, 512->256 @14x14 wins 16%, 480->80 @14x14 wins 52%.
     inline constexpr int64_t kPwSplitKOutputsPerInputBlock = 128;
-    // Channel floor: 64->64 @14x14 loses to the single pass even inside the ratio.
+    // Channel floor under the ratio rule: below it the ratio only admits planes of a few dozen
+    // outputs, where a single thread per output is already the whole dispatch and the pair's
+    // second dispatch is pure cost.
     inline constexpr int64_t kPwSplitKMinCin = 64;
     // Thread target of the partial pass (384 waves of 64 lanes), which sets how many ways the
-    // reduction splits: measured best at 4 parts for 6272-8192 outputs and 2 at 12544-12800.
+    // reduction splits: four parts at 6272 outputs, three at 8192, two at 12544-12800 (measured
+    // best at 4, 4 and 2; the 8192 plane is within noise of either).
     inline constexpr int64_t kPwSplitKTargetThreads = 24576;
     // Each part keeps at least this many (input channel-block, tap) steps, so a shallow reduction
     // on a tiny plane is not cut into slivers whose reduce pass outweighs the parallelism (240->80
@@ -60,6 +63,10 @@ namespace vknn {
             return false;
         }
         const int64_t outputs = Coutb * OHW;
+        if (outputs <= 0)
+        {
+            return false; // an empty plane has nothing to split (and no thread count to divide by)
+        }
         const int64_t Cinb    = (Cin + 3) / 4;
         return outputs <= kPwSplitKMaxOutputs && outputs <= Cinb * kPwSplitKOutputsPerInputBlock;
     }
