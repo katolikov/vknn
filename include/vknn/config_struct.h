@@ -3,6 +3,7 @@
 #pragma once
 #include "vknn/backend_kind.h"
 #include "vknn/hint.h"
+#include "vknn/power.h"
 #include "vknn/precision.h"
 #include "vknn/priority.h"
 #include "vknn/shape.h"
@@ -27,6 +28,20 @@ namespace vknn {
         /// tier (VK_KHR/EXT_global_priority). Scheduling only — never changes numerical output; inert on a
         /// device without a global-priority extension.
         Priority priority = Priority::Normal;
+
+        /// GPU power policy (Vulkan backend). Normal is the driver default: the GPU idles between runs
+        /// and, on a device that power-collapses its GPU after ~50-70 ms without a submission, every
+        /// intermittent run (camera frames tens to hundreds of ms apart) starts at the bottom DVFS step
+        /// and ramps for tens of ms. High submits one trivial keep-alive dispatch on the compute queue
+        /// every GpuKeepAlive::kGpuKeepAliveIntervalMs (30 ms) while the queue would otherwise be idle,
+        /// so the clock never parks between runs; the heartbeat is skipped whenever real work is in
+        /// flight or was submitted within the last interval, so it never contends with inference. Cost:
+        /// the GPU holds its active clock for as long as the session lives -- a sustained
+        /// milliwatt-class idle draw at the top clock, charged against the thermal budget the CPU
+        /// shares -- so it is off by default and meant for a caller that infers intermittently, not
+        /// for a back-to-back benchmark loop (which never idles long enough to park). Never changes
+        /// numerical output; inert on the CPU backend.
+        Power power = Power::Normal;
 
         /// Declared concrete shapes for graph inputs on the ONNX-load path (createFromOnnx), keyed by
         /// input tensor name. An input listed here has its dynamic (negative) dims resolved from the

@@ -28,11 +28,53 @@ namespace vknn {
     } // namespace
 
     // ============================ VulkanBackend ============================
-    VulkanBackend::VulkanBackend(const Config &cfg) {
+    VulkanBackend::VulkanBackend(const Config &cfg): power_(cfg.power) {
         ctx_ = std::make_unique<vk::VulkanContext>(cfg.priority);
         if (ctx_->initialized())
         {
             runner_ = std::make_unique<vk::CommandRunner>(*ctx_);
+        }
+    }
+
+    VulkanBackend::~VulkanBackend() {
+        // The heartbeat thread submits on the compute queue and owns a pipeline, a buffer and a command
+        // pool on ctx_'s device: joined and released here, before any member (runner_, the pools, ctx_
+        // last) goes away.
+        keepAlive_.reset();
+    }
+
+    void VulkanBackend::flushCacheAndScratch() {
+        if ((wcache_ && wcache_->dirty()) || (cache_ && cache_->currentBytes() != savedPipelineBytes_))
+        {
+            saveCaches();
+        }
+        weightStaging_.reset();
+    }
+
+    void VulkanBackend::startKeepAlive() {
+        if (power_ != Power::High || !available())
+        {
+            return;
+        }
+        if (!keepAlive_)
+        {
+            try
+            { keepAlive_ = std::make_unique<vk::GpuKeepAlive>(*ctx_); } catch (const std::exception &e)
+            {
+                // Policy only: a device that cannot host the heartbeat runs exactly as under Normal.
+                VKNN_WARN << "power high: GPU keep-alive unavailable on this device (" << e.what() << "); running without it";
+                power_ = Power::Normal;
+                return;
+            }
+            VKNN_INFO << "power high: GPU keep-alive on (one " << keepAlive_->laneWidth() << "-lane heartbeat after every " << vk::GpuKeepAlive::kGpuKeepAliveIntervalMs << " ms of compute-queue idle)";
+        }
+        keepAlive_->start();
+    }
+
+    void VulkanBackend::pauseKeepAlive() {
+        if (keepAlive_)
+        {
+            keepAlive_->stop();
         }
     }
 
@@ -479,6 +521,9 @@ namespace vknn {
     }
 
     std::unique_ptr<Segment> VulkanBackend::compileSegment(const std::vector<int> &idx, Graph &g, const Config &cfg) {
+        // The segment's prepare runs the autotune probes, which time the queue: no heartbeat may land
+        // between two probe submits. flushNewCacheWork restarts it once the plan is built.
+        pauseKeepAlive();
         auto s           = std::make_unique<VulkanSegment>(idx, g, cfg, this);
         s->backend       = this;
         s->compiledGraph = &g;

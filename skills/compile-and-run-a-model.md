@@ -53,8 +53,10 @@ adb shell /data/local/tmp/vxrt/vknn_run_io model.vxm /data/local/tmp/vxrt/out in
 ```
 
 `vknn_run_io` flags: `--backend vulkan|cpu`, `--precision low|normal|high`, `--priority low|normal|high`,
+`--power normal|high` (idle-time GPU keep-alive for intermittent inference),
 `--tuning none|fast|heavy`, `--winograd auto|on|off`, `--no-cache`, `--cache DIR`, `--keep-weights`,
-`--timing`, `--profile`, `--repeat N`, `--bucket N` (run plan bucket N of a multi-bucket model, default 0),
+`--timing`, `--profile`, `--repeat N`, `--gap-ms N` (sleep between repeats: the intermittent regime),
+`--bucket N` (run plan bucket N of a multi-bucket model, default 0),
 `--cpu-threads N`, `--fp32-tensors NAMES`, `--dump NAMES`, `--disable-vk-ops NAMES`,
 `--max-submit-nodes N` / `--max-submit-bindings N` (watchdog/TDR mitigation), `--layer-dump` /
 `--layer-dump-dir DIR`, `--debug-segments`, plus the GPU-pass off switches `--no-flat`,

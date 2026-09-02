@@ -64,6 +64,14 @@ Methodology: VKNN stages come from a small timer using the public API (`loadGrap
 from `MNNV2Basic.out` (the `Resize` cost = create session, `Run Avg` = inference). Both warm, 12+ runs,
 GPU cooled between measurements.
 
+A cooled protocol measures the **parked / ramping regime**: after the cool-down the GPU has
+power-collapsed, so the timed run pays the clock ramp exactly as an intermittent caller (camera frames
+tens to hundreds of ms apart) does. `vknn_run_io --repeat N --gap-ms G` reproduces that intermittent
+regime directly — a sleep of `G` ms between iterations, each still printing its own `--timing` line —
+and adding `--power high` shows what the idle-time keep-alive (`Config::power`, [config.md](config.md))
+recovers in it. A back-to-back loop never idles long enough to park, so `--power high` changes nothing
+there, and every cross-engine number in this document is measured with it off.
+
 ## VKNN vs MNN's absolute best (OpenCL, HEAVY-tuned)
 
 MNN's true best is the min over its **OpenCL** (HEAVY-tuned), **CPU-4-thread**, and Vulkan backends.

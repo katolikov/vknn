@@ -1,5 +1,6 @@
 #include "vk_command.h"
 #include <chrono>
+#include <mutex>
 
 namespace vknn { namespace vk {
 
@@ -7,6 +8,21 @@ namespace vknn { namespace vk {
         // Fence wait with no deadline: the compute submissions here are always awaited to completion,
         // and a genuinely hung GPU surfaces as a driver-side device-lost rather than a client timeout.
         constexpr uint64_t kFenceWaitForever = UINT64_MAX;
+
+        // Brackets one real submission for the keep-alive's idle gate (VulkanContext::noteQueueSubmit /
+        // noteQueueComplete): in flight from before the vkQueueSubmit call until its fence signals, and
+        // released on the exception path too, so a failed submit cannot leave the queue marked busy.
+        struct QueueWorkScope {
+            explicit QueueWorkScope(VulkanContext &ctx): ctx_(ctx) {
+                ctx_.noteQueueSubmit();
+            }
+            ~QueueWorkScope() {
+                ctx_.noteQueueComplete();
+            }
+            QueueWorkScope(const QueueWorkScope &)            = delete;
+            QueueWorkScope &operator=(const QueueWorkScope &) = delete;
+            VulkanContext  &ctx_;
+        };
     } // namespace
 
     void computeBarrier(const VulkanContext &ctx, VkCommandBuffer cmd) {
@@ -117,8 +133,14 @@ namespace vknn { namespace vk {
         VkSubmitInfo si {VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
         si.pCommandBuffers    = &cmd;
-        auto t0               = std::chrono::high_resolution_clock::now();
-        VK_CHECK(vkQueueSubmit(ctx_.computeQueue(), 1, &si, fence_));
+        QueueWorkScope work(ctx_);
+        auto           t0 = std::chrono::high_resolution_clock::now();
+        {
+            // The queue is externally synchronized and the keep-alive heartbeat shares it: the lock spans
+            // the submit call alone, so the fence wait below never holds the other submitter up.
+            std::lock_guard<std::mutex> queueLock(ctx_.queueMutex());
+            VK_CHECK(vkQueueSubmit(ctx_.computeQueue(), 1, &si, fence_));
+        }
         auto tSubmitted = std::chrono::high_resolution_clock::now();
         VK_CHECK(vkWaitForFences(ctx_.device(), 1, &fence_, VK_TRUE, kFenceWaitForever));
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -137,8 +159,12 @@ namespace vknn { namespace vk {
             infos[i].commandBufferCount = 1;
             infos[i].pCommandBuffers    = &cmds[i];
         }
-        auto t0 = std::chrono::high_resolution_clock::now();
-        VK_CHECK(vkQueueSubmit(ctx_.computeQueue(), count, infos.data(), fence_));
+        QueueWorkScope work(ctx_);
+        auto           t0 = std::chrono::high_resolution_clock::now();
+        {
+            std::lock_guard<std::mutex> queueLock(ctx_.queueMutex());
+            VK_CHECK(vkQueueSubmit(ctx_.computeQueue(), count, infos.data(), fence_));
+        }
         auto tSubmitted = std::chrono::high_resolution_clock::now();
         VK_CHECK(vkWaitForFences(ctx_.device(), 1, &fence_, VK_TRUE, kFenceWaitForever));
         auto t1 = std::chrono::high_resolution_clock::now();

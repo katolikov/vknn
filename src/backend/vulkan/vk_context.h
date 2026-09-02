@@ -3,11 +3,21 @@
 #include "core/dispatch_tally.h"
 #include "vk_common.h"
 #include "vknn/priority.h"
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
 
 namespace vknn { namespace vk {
+
+    /// Monotonic clock in nanoseconds: the time base of the queue-activity stamps the keep-alive
+    /// heartbeat reads (VulkanContext::lastQueueWorkSteadyNs).
+    inline int64_t steadyNowNs() noexcept {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
 
     /// Performance-relevant capabilities probed from the physical device at runtime, so the
     /// engine adapts to whatever GPU it actually runs on.
@@ -158,6 +168,37 @@ namespace vknn { namespace vk {
             return memProps_;
         }
 
+        /// Serializes every vkQueueSubmit on the compute queue. A VkQueue is externally synchronized,
+        /// and the queue has two submitters once Config::power is High: the CommandRunner (every
+        /// segment run, one-shot upload/copy, and autotune probe) and the GpuKeepAlive heartbeat
+        /// thread. Held for the vkQueueSubmit call alone, never across a fence wait, so one submitter
+        /// can delay the other by at most a single submit call.
+        std::mutex &queueMutex() noexcept {
+            return queueMutex_;
+        }
+
+        /// Real-work bookkeeping for the keep-alive's idle gate, written by the CommandRunner around
+        /// every submission it makes and read by the heartbeat thread. noteQueueSubmit() runs before
+        /// the vkQueueSubmit call and noteQueueComplete() after its fence signals, so "busy" spans a
+        /// submission's whole GPU lifetime, not just the call. The heartbeat's own submissions are not
+        /// noted: only real work resets the idle clock.
+        void noteQueueSubmit() noexcept {
+            queueWorkInFlight_.fetch_add(1, std::memory_order_relaxed);
+            lastQueueWorkNs_.store(steadyNowNs(), std::memory_order_relaxed);
+        }
+        void noteQueueComplete() noexcept {
+            lastQueueWorkNs_.store(steadyNowNs(), std::memory_order_relaxed);
+            queueWorkInFlight_.fetch_sub(1, std::memory_order_relaxed);
+        }
+        /// steadyNowNs() stamp of the latest real submission or completion; 0 until the first one.
+        int64_t lastQueueWorkSteadyNs() const noexcept {
+            return lastQueueWorkNs_.load(std::memory_order_relaxed);
+        }
+        /// Real submissions issued and not yet fence-signalled.
+        int queueWorkInFlight() const noexcept {
+            return queueWorkInFlight_.load(std::memory_order_relaxed);
+        }
+
         /// Compute-dispatch counter for everything recorded through this device's pipelines.
         /// ComputePipeline::dispatch is the single site that notes into it, and the segment that
         /// owns the recording drives the per-node attribution (see DispatchTally). One counter per
@@ -195,6 +236,9 @@ namespace vknn { namespace vk {
         std::vector<const char *>        enabledDeviceExts_;
         Priority                         priority_ = Priority::Normal;
         DispatchTally                    dispatchTally_;
+        std::mutex                       queueMutex_;
+        std::atomic<int64_t>             lastQueueWorkNs_ {0};
+        std::atomic<int>                 queueWorkInFlight_ {0};
     };
 
 }} // namespace vknn::vk
