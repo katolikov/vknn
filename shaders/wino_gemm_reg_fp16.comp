@@ -62,17 +62,49 @@ void main() {
   // Straight k loop over the whole Cinb range: per k the block's 4 U vec4s load once and stay in
   // registers across the RM tiles; each tile then costs one V load + four widened fmas, the same
   // in-register multiply the LDS kernel runs on its staged copies.
-  for (int k = 0; k < Cinb; ++k) {
+  // Two input channel-blocks per trip: both blocks' U rows and V tiles are requested before
+  // either block's fmas, doubling the loads a thread keeps in flight. A deep 16-tile GEMM (512
+  // channels at 7x7) streams an 8 MB U from DRAM through 256 workgroups, and the outstanding
+  // loads, not the arithmetic, set how close it runs to that stream. Each output's fma sequence
+  // is unchanged: block k's four lanes, then block k+1's, k ascending.
+  int kPair = Cinb & ~1;
+  for (int k = 0; k < kPair; k += 2) {
     int uRow = uBase + k * NC4;
     vec4 u0 = vec4(ubuf[uRow + 0]);
     vec4 u1 = vec4(ubuf[uRow + 1]);
     vec4 u2 = vec4(ubuf[uRow + 2]);
     vec4 u3 = vec4(ubuf[uRow + 3]);
+    vec4 u4 = vec4(ubuf[uRow + 4]);
+    vec4 u5 = vec4(ubuf[uRow + 5]);
+    vec4 u6 = vec4(ubuf[uRow + 6]);
+    vec4 u7 = vec4(ubuf[uRow + 7]);
     int vRow = vBaseP + k * pc.nT;
     for (int r = 0; r < RM; ++r) {
       int m = m0 + tIdM + r * MDIM;
       // A tile past nT reads nothing (keeps the load in-bounds) and its accumulator is never
       // stored; the LDS kernel zero-pads the same entries.
+      bool live = m < pc.nT;
+      vec4 a = live ? vec4(vbuf[vRow + m]) : vec4(0.0);
+      vec4 b = live ? vec4(vbuf[vRow + pc.nT + m]) : vec4(0.0);
+      acc[r] = fma(vec4(a.x), u0, acc[r]);
+      acc[r] = fma(vec4(a.y), u1, acc[r]);
+      acc[r] = fma(vec4(a.z), u2, acc[r]);
+      acc[r] = fma(vec4(a.w), u3, acc[r]);
+      acc[r] = fma(vec4(b.x), u4, acc[r]);
+      acc[r] = fma(vec4(b.y), u5, acc[r]);
+      acc[r] = fma(vec4(b.z), u6, acc[r]);
+      acc[r] = fma(vec4(b.w), u7, acc[r]);
+    }
+  }
+  if (kPair < Cinb) { // odd block count: the last block alone
+    int uRow = uBase + kPair * NC4;
+    vec4 u0 = vec4(ubuf[uRow + 0]);
+    vec4 u1 = vec4(ubuf[uRow + 1]);
+    vec4 u2 = vec4(ubuf[uRow + 2]);
+    vec4 u3 = vec4(ubuf[uRow + 3]);
+    int vRow = vBaseP + kPair * pc.nT;
+    for (int r = 0; r < RM; ++r) {
+      int m = m0 + tIdM + r * MDIM;
       vec4 a = (m < pc.nT) ? vec4(vbuf[vRow + m]) : vec4(0.0);
       acc[r] = fma(vec4(a.x), u0, acc[r]);
       acc[r] = fma(vec4(a.y), u1, acc[r]);

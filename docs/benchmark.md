@@ -290,6 +290,15 @@ Four further changes, all output-byte-identical to v1.4.0 per model at every tun
   F(2,3) where its four times fewer tiles would no longer fill the GEMM's smallest M tile, so a
   7x7 map runs 16 F(2,3) tiles instead of 4 F(4,3) tiles at 75% padding), and the bit-neutral tile
   race carries RM = 2 beside 4 and 8, the tile a 16-tile map fills exactly.
+  A per-thread N micro-tile (2 or 4 output channel-blocks per thread, raced beside the M tiles)
+  is a measured negative result on the primary device: it loses on every ResNet-50 shape (512x512
+  @ 7x7 0.33-0.41 vs 0.27 ms, 256x256 @ 14x14 0.20-0.28 vs 0.19), fewer waves costing more than
+  the U reuse buys, so the body keeps one channel-block per thread. What does move the deep
+  shapes is memory-level parallelism: the body's K loop runs two input channel-blocks per trip,
+  requesting both blocks' U rows and V tiles before either block's fmas (the per-output fma
+  sequence is unchanged, so the race stays bit-neutral). A 16-tile GEMM at 512 channels streams
+  an 8 MB U from DRAM and is set by the loads a thread keeps in flight: 512x512 @ 7x7 0.272 ->
+  0.248 ms, 256x256 @ 14x14 0.191 -> 0.180, 128x128 @ 28x28 0.113 -> 0.099 (3-pass race times).
 - **Outer-product tap contraction.** Every group-1 conv kernel (direct, register-tiled, row-halo,
   compact stem, LDS-halo, 1-D, split-K, the pointwise family and the Winograd GEMM) folds a tap
   as `acc = fma(vec4(in.c), w[c], acc)` over the four input lanes, with the weight pack holding a
