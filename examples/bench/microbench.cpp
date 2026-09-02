@@ -7,8 +7,10 @@
 // not wired into inference; the winning widths get productionized in Stage 1.
 //
 // Manifest line (whitespace-separated; '#' comment lines and blanks ignored):
-//   label spv N Cin H W Cout KH KW SH SW PT PL DH DW OCB LSX iters warmup verify
+//   label spv N Cin H W Cout KH KW SH SW PT PL DH DW OCB LSX iters warmup verify [WTILE]
 // OCB is baked into the .spv (one variant per width); the harness needs it only to size the dispatch.
+// WTILE (optional, default 1) is the output pixels one thread computes, again baked into the .spv and
+// used only to size the dispatch: a register-tiled kernel launches HW/WTILE threads per channel group.
 #include "backend/vulkan/vk_buffer.h"
 #include "backend/vulkan/vk_context.h"
 #include <algorithm>
@@ -51,7 +53,7 @@ static std::vector<uint32_t> loadSpv(const std::string &path) {
 
 // float -> IEEE fp16 bit pattern (via the native __fp16 rounding).
 static inline uint16_t f2h(float x) noexcept {
-    __fp16   h = (__fp16) x;
+    __fp16 h = (__fp16) x;
     uint16_t o;
     std::memcpy(&o, &h, 2);
     return o;
@@ -77,6 +79,7 @@ struct PC {
 struct Run {
     std::string label, spv;
     int         N, Cin, H, W, Cout, KH, KW, SH, SW, PT, PL, DH, DW, OCB, LSX, iters, warmup, verify;
+    int         WTILE = 1;
 };
 
 int main(int argc, char **argv) {
@@ -115,6 +118,10 @@ int main(int argc, char **argv) {
         if (!(is >> r.label >> r.spv >> r.N >> r.Cin >> r.H >> r.W >> r.Cout >> r.KH >> r.KW >> r.SH >> r.SW >> r.PT >> r.PL >> r.DH >> r.DW >> r.OCB >> r.LSX >> r.iters >> r.warmup >> r.verify))
         {
             continue;
+        }
+        if (!(is >> r.WTILE) || r.WTILE < 1)
+        {
+            r.WTILE = 1;
         }
 
         // Channel-block geometry: NC4HW4 packs channels in groups of 4, so Cin/Cout round up to whole
@@ -254,7 +261,7 @@ int main(int argc, char **argv) {
         vkUpdateDescriptorSets(ctx.device(), 4, wds, 0, nullptr);
 
         // --- dispatch geometry (mirror the engine's 2D split when gx overflows maxWorkGroupCount[0]) ---
-        uint64_t totalThreads = (uint64_t) r.N * ocGroups * OH * OW;
+        uint64_t totalThreads = (uint64_t) r.N * ocGroups * (((uint64_t) OH * OW + r.WTILE - 1) / r.WTILE);
         uint32_t gtotal       = (uint32_t) ((totalThreads + lsx - 1) / lsx);
         uint32_t gx = gtotal, gy = 1;
         uint32_t maxc0 = caps.maxWorkGroupCount[0] ? caps.maxWorkGroupCount[0] : 65535u;

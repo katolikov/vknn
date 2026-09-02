@@ -33,12 +33,16 @@
 #define CONV_COMPACT_WTILE_SPEC 1
 #define CONV_COMPACT_SW_SPEC 2
 #define CONV_COMPACT_CIN_SPEC 3
-#define CONV_COMPACT_LANE_WIDTH_SPEC 4
+#define CONV_COMPACT_TILES_PER_WG_SPEC 4
+#define CONV_COMPACT_LANE_WIDTH_SPEC 5
+#define CONV_COMPACT_DECLARED_TILES_PER_WG 16
 #define CONV_COMPACT_DECLARED_LANE_WIDTH 64
 layout(constant_id = CONV_COMPACT_OCB_SPEC) const int OCB_BLK = 1; // output channel-blocks (of 4 oc) computed per thread
 layout(constant_id = CONV_COMPACT_WTILE_SPEC) const int WTILE = 4; // output pixels per thread, consecutive along W
 layout(constant_id = CONV_COMPACT_SW_SPEC) const int SW_SPEC = 1;  // horizontal stride (sizes the row segment)
 layout(constant_id = CONV_COMPACT_CIN_SPEC) const int CIN = 1;     // input channels, 1..3
+// Column-tiles per workgroup (the row kernel's 2-D wave footprint; see conv3x3_row).
+layout(constant_id = CONV_COMPACT_TILES_PER_WG_SPEC) const int TILES_PER_WG = CONV_COMPACT_DECLARED_TILES_PER_WG;
 layout(local_size_x = CONV_COMPACT_DECLARED_LANE_WIDTH, local_size_x_id = CONV_COMPACT_LANE_WIDTH_SPEC) in;
 #define KEXT 3
 #define KTAPS (KEXT * KEXT)
@@ -58,12 +62,19 @@ void main() {
   int HW = pc.OH * pc.OW;
   int nTX = (pc.OW + WTILE - 1) / WTILE;
   int ocbGroups = (Coutb + OCB_BLK - 1) / OCB_BLK;
+  // Workgroup decode as in conv3x3_row: the block group inside the row-block, a 2-D wave footprint.
+  int nTXg = (nTX + TILES_PER_WG - 1) / TILES_PER_WG;
+  int rowsPerWg = int(gl_WorkGroupSize.x) / TILES_PER_WG;
+  int nOYg = (pc.OH + rowsPerWg - 1) / rowsPerWg;
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x + uint(pc.gidBase);
-  if (gid >= uint(pc.N * ocbGroups * pc.OH * nTX)) return;
-  int tx = int(gid) % nTX;
-  int oy = (int(gid) / nTX) % pc.OH;
-  int ocbg = (int(gid) / (nTX * pc.OH)) % ocbGroups;
-  int n = int(gid) / (nTX * pc.OH * ocbGroups);
+  if (gid >= uint(pc.N * ocbGroups * nOYg * nTXg * int(gl_WorkGroupSize.x))) return;
+  int lane = int(gid % gl_WorkGroupSize.x);
+  int grp = int(gid / gl_WorkGroupSize.x);
+  int tx = (grp % nTXg) * TILES_PER_WG + lane % TILES_PER_WG;
+  int ocbg = (grp / nTXg) % ocbGroups;
+  int oy = ((grp / (nTXg * ocbGroups)) % nOYg) * rowsPerWg + lane / TILES_PER_WG;
+  int n = grp / (nTXg * ocbGroups * nOYg);
+  if (tx >= nTX || oy >= pc.OH) return;
   int ocb0 = ocbg * OCB_BLK;
   int ox0 = tx * WTILE;
   int ixBase = ox0 * SW_SPEC - pc.PL;

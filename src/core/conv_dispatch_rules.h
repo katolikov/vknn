@@ -65,40 +65,68 @@ namespace vknn {
 
     /// Specialization-constant slots of the 3x3 row-halo conv kernel (shaders/conv3x3_row*.comp):
     /// 0 = OCB_BLK, 1 = WTILE, 2 = SW_SPEC (the horizontal stride, which sizes the register row
-    /// segment), 3 = local_size_x_id, the workgroup width. Same contract as conv_reg: the host states
-    /// every slot, so the kernel's declared width never stands in for the device-resolved one.
-    constexpr size_t kConvRowOcbSpecIndex       = 0;
-    constexpr size_t kConvRowPixelTileSpecIndex = 1;
-    constexpr size_t kConvRowStrideSpecIndex    = 2;
-    constexpr size_t kConvRowLaneWidthSpecIndex = 3;
-    constexpr size_t kConvRowSpecSlots          = 4;
+    /// segment), 3 = TILES_PER_WG (column-tiles per workgroup, the wave's 2-D footprint), 4 =
+    /// local_size_x_id, the workgroup width. Same contract as conv_reg: the host states every slot,
+    /// so the kernel's declared width never stands in for the device-resolved one.
+    constexpr size_t kConvRowOcbSpecIndex        = 0;
+    constexpr size_t kConvRowPixelTileSpecIndex  = 1;
+    constexpr size_t kConvRowStrideSpecIndex     = 2;
+    constexpr size_t kConvRowTilesPerWgSpecIndex = 3;
+    constexpr size_t kConvRowLaneWidthSpecIndex  = 4;
+    constexpr size_t kConvRowSpecSlots           = 5;
 
-    inline std::vector<uint32_t> convRowSpecConstants(uint32_t ocbBlocks, uint32_t pixelTile, uint32_t strideW, uint32_t laneWidth) {
+    /// The row kernel's wave footprint is stated as output ROWS per workgroup; the kernel takes the
+    /// complementary column-tile count, laneWidth / rows, so a footprint is valid on every device
+    /// whose width the row count divides. kConvRowFootprintRows lists the raced footprints in the
+    /// order their choice codes (kChoiceFootprintShift in the conv op) enumerate them: 4 rows (a
+    /// 16-tile-wide patch at 64 lanes; measured best on strided 3x3), 2 rows (32 tiles; best on
+    /// stride 1), 1 row (the plain one-row strip).
+    constexpr uint32_t kConvRowFootprintRows[]      = {4, 2, 1};
+    constexpr size_t   kConvRowFootprintCount       = sizeof(kConvRowFootprintRows) / sizeof(kConvRowFootprintRows[0]);
+    constexpr uint32_t kConvRowFootprintStridedCode = 0; // 4 rows: the compact stem's footprint at stride >= 2
+    constexpr uint32_t kConvRowFootprintUnitCode    = 1; // 2 rows: the compact stem's footprint at stride 1
+
+    /// Column-tiles per workgroup for a footprint code at a lane width; 0 when the row count does
+    /// not divide the width (the caller must not dispatch such a pipeline).
+    constexpr uint32_t convRowTilesPerWorkgroup(uint32_t footprintCode, uint32_t laneWidth) {
+        return (footprintCode < kConvRowFootprintCount && laneWidth % kConvRowFootprintRows[footprintCode] == 0) ? laneWidth / kConvRowFootprintRows[footprintCode] : 0;
+    }
+
+    /// Workgroups the row kernel dispatches for one output map: every (column-tile block,
+    /// output-channel block group, row block, batch) tuple is one workgroup of `laneWidth` lanes.
+    constexpr int64_t convRowWorkgroups(int64_t batch, int64_t ocbGroups, int64_t outH, int64_t outW, uint32_t pixelTile, uint32_t tilesPerWg, uint32_t laneWidth) {
+        return (tilesPerWg == 0 || laneWidth == 0) ? 0 : batch * ocbGroups * ((outH + (laneWidth / tilesPerWg) - 1) / (laneWidth / tilesPerWg)) * (((outW + pixelTile - 1) / pixelTile + tilesPerWg - 1) / tilesPerWg);
+    }
+
+    inline std::vector<uint32_t> convRowSpecConstants(uint32_t ocbBlocks, uint32_t pixelTile, uint32_t strideW, uint32_t tilesPerWg, uint32_t laneWidth) {
         std::vector<uint32_t> spec(kConvRowSpecSlots);
-        spec[kConvRowOcbSpecIndex]       = ocbBlocks;
-        spec[kConvRowPixelTileSpecIndex] = pixelTile;
-        spec[kConvRowStrideSpecIndex]    = strideW;
-        spec[kConvRowLaneWidthSpecIndex] = laneWidth;
+        spec[kConvRowOcbSpecIndex]        = ocbBlocks;
+        spec[kConvRowPixelTileSpecIndex]  = pixelTile;
+        spec[kConvRowStrideSpecIndex]     = strideW;
+        spec[kConvRowTilesPerWgSpecIndex] = tilesPerWg;
+        spec[kConvRowLaneWidthSpecIndex]  = laneWidth;
         return spec;
     }
 
     /// Specialization-constant slots of the compact-input 3x3 conv kernel
     /// (shaders/conv3x3_cin_lt4*.comp): the row-halo slots 0..2, then 3 = CIN (the 1..3 input
-    /// channels it gathers from the dense plane) and 4 = local_size_x_id, the workgroup width.
-    constexpr size_t kConvCompactOcbSpecIndex       = kConvRowOcbSpecIndex;
-    constexpr size_t kConvCompactPixelTileSpecIndex = kConvRowPixelTileSpecIndex;
-    constexpr size_t kConvCompactStrideSpecIndex    = kConvRowStrideSpecIndex;
-    constexpr size_t kConvCompactCinSpecIndex       = 3;
-    constexpr size_t kConvCompactLaneWidthSpecIndex = 4;
-    constexpr size_t kConvCompactSpecSlots          = 5;
+    /// channels it gathers from the dense plane), 4 = TILES_PER_WG and 5 = local_size_x_id.
+    constexpr size_t kConvCompactOcbSpecIndex        = kConvRowOcbSpecIndex;
+    constexpr size_t kConvCompactPixelTileSpecIndex  = kConvRowPixelTileSpecIndex;
+    constexpr size_t kConvCompactStrideSpecIndex     = kConvRowStrideSpecIndex;
+    constexpr size_t kConvCompactCinSpecIndex        = 3;
+    constexpr size_t kConvCompactTilesPerWgSpecIndex = 4;
+    constexpr size_t kConvCompactLaneWidthSpecIndex  = 5;
+    constexpr size_t kConvCompactSpecSlots           = 6;
 
-    inline std::vector<uint32_t> convCompactSpecConstants(uint32_t ocbBlocks, uint32_t pixelTile, uint32_t strideW, uint32_t inputChannels, uint32_t laneWidth) {
+    inline std::vector<uint32_t> convCompactSpecConstants(uint32_t ocbBlocks, uint32_t pixelTile, uint32_t strideW, uint32_t inputChannels, uint32_t tilesPerWg, uint32_t laneWidth) {
         std::vector<uint32_t> spec(kConvCompactSpecSlots);
-        spec[kConvCompactOcbSpecIndex]       = ocbBlocks;
-        spec[kConvCompactPixelTileSpecIndex] = pixelTile;
-        spec[kConvCompactStrideSpecIndex]    = strideW;
-        spec[kConvCompactCinSpecIndex]       = inputChannels;
-        spec[kConvCompactLaneWidthSpecIndex] = laneWidth;
+        spec[kConvCompactOcbSpecIndex]        = ocbBlocks;
+        spec[kConvCompactPixelTileSpecIndex]  = pixelTile;
+        spec[kConvCompactStrideSpecIndex]     = strideW;
+        spec[kConvCompactCinSpecIndex]        = inputChannels;
+        spec[kConvCompactTilesPerWgSpecIndex] = tilesPerWg;
+        spec[kConvCompactLaneWidthSpecIndex]  = laneWidth;
         return spec;
     }
 

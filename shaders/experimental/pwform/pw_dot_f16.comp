@@ -1,0 +1,25 @@
+#version 450
+#include "common_head.glsl"
+void main() {
+  int Cinb = (pc.Cin + 3) / 4, Coutb = (pc.Cout + 3) / 4, HW = pc.OH * pc.OW;
+  int nTiles = (HW + WTILE - 1) / WTILE, ocbGroups = (Coutb + OCB - 1) / OCB;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.N * ocbGroups * nTiles)) return;
+  int tile = int(gid) % nTiles, og = (int(gid) / nTiles) % ocbGroups, n = int(gid) / (nTiles * ocbGroups);
+  int p0 = tile * WTILE, ocb0 = og * OCB;
+  f16vec4 acc[OCB][WTILE]; int wrowj[OCB];
+  for (int j = 0; j < OCB; ++j) { wrowj[j] = min(ocb0 + j, Coutb - 1) * 4 * Cinb; f16vec4 b = bias[min(ocb0 + j, Coutb - 1)]; for (int p = 0; p < WTILE; ++p) acc[j][p] = b; }
+  for (int icb = 0; icb < Cinb; ++icb) {
+    int sbase = (n * Cinb + icb) * HW;
+    for (int j = 0; j < OCB; ++j) {
+      f16vec4 w0 = wt[wrowj[j] + 0 * Cinb + icb], w1 = wt[wrowj[j] + 1 * Cinb + icb];
+      f16vec4 w2 = wt[wrowj[j] + 2 * Cinb + icb], w3 = wt[wrowj[j] + 3 * Cinb + icb];
+      for (int p = 0; p < WTILE; ++p) {
+        f16vec4 inv = src[sbase + min(p0 + p, HW - 1)];
+        acc[j][p].x += dot(inv, w0); acc[j][p].y += dot(inv, w1); acc[j][p].z += dot(inv, w2); acc[j][p].w += dot(inv, w3);
+      }
+    }
+  }
+  for (int j = 0; j < OCB; ++j) { int ocb = ocb0 + j; if (ocb >= Coutb) break; int dbase = (n * Coutb + ocb) * HW;
+    for (int p = 0; p < WTILE; ++p) { int pix = p0 + p; if (pix < HW) dst[dbase + pix] = TO_STORE4(vec4(acc[j][p])); } }
+}

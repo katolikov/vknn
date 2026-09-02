@@ -1,0 +1,73 @@
+#version 450
+#include "k3_head.glsl"
+#if FORM == 0
+#define ACC vec4
+#define LD(x) vec4(x)
+#elif FORM == 1
+#define ACC f16vec4
+#define LD(x) (x)
+#elif FORM == 2
+#define ACC vec4
+#define LD(x) vec4(x)
+#else
+#define ACC f16vec4
+#define LD(x) (x)
+#endif
+void main() {
+  int Cinb = (pc.Cin + 3) / 4, Coutb = (pc.Cout + 3) / 4, HW = pc.OH * pc.OW;
+  int nTX = (pc.OW + PTILE - 1) / PTILE, ocbGroups = (Coutb + OCB_BLK - 1) / OCB_BLK;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  
+#ifndef TX_PER_WG
+#define TX_PER_WG 16
+#endif
+#define ROWS_PER_WG (64 / TX_PER_WG)
+  int nTXg = (nTX + TX_PER_WG - 1) / TX_PER_WG;
+  int nOYg = (pc.OH + ROWS_PER_WG - 1) / ROWS_PER_WG;
+  int lane = int(gid) % 64, grp = int(gid) / 64;
+  int tx = (grp % nTXg) * TX_PER_WG + lane % TX_PER_WG;
+  int oy = ((grp / nTXg) % nOYg) * ROWS_PER_WG + lane / TX_PER_WG;
+  int ocbg = (grp / (nTXg * nOYg)) % ocbGroups, n = grp / (nTXg * nOYg * ocbGroups);
+  if (tx >= nTX || oy >= pc.OH) return;
+  int ocb0 = ocbg * OCB_BLK, ox0 = tx * PTILE, ixBase = ox0 * STRIDE - pc.PL;
+  ACC acc[PTILE][OCB_BLK];
+  int ocStride = Cinb * 9; int wbj[OCB_BLK];
+  for (int j = 0; j < OCB_BLK; ++j) { wbj[j] = min(ocb0 + j, Coutb - 1) * 4 * ocStride; ACC b = (ocb0 + j < Coutb) ? LD(bias[ocb0 + j]) : ACC(0.0); for (int p = 0; p < PTILE; ++p) acc[p][j] = b; }
+  for (int icb = 0; icb < Cinb; ++icb) {
+    int sb = (n * Cinb + icb) * pc.H * pc.W;
+    for (int ky = 0; ky < 3; ++ky) {
+      int iy = oy * pc.SH - pc.PT + ky; bool rowOk = uint(iy) < uint(pc.H); int rowOff = sb + iy * pc.W;
+      ACC row[SEG]; bool colOk[SEG];
+      for (int c = 0; c < SEG; ++c) { int ix = ixBase + c; bool ok = rowOk && uint(ix) < uint(pc.W); colOk[c] = ok; row[c] = ok ? LD(src[rowOff + ix]) : ACC(0.0); }
+      for (int kx = 0; kx < 3; ++kx) {
+        int wtap = (icb * 3 + ky) * 3 + kx;
+        ACC w[OCB_BLK][4];
+        for (int j = 0; j < OCB_BLK; ++j) {
+#if FORM <= 1
+          w[j][0] = LD(wt[wbj[j] + 0 * ocStride + wtap]); w[j][1] = LD(wt[wbj[j] + 1 * ocStride + wtap]);
+          w[j][2] = LD(wt[wbj[j] + 2 * ocStride + wtap]); w[j][3] = LD(wt[wbj[j] + 3 * ocStride + wtap]);
+#else
+          int wb = ((min(ocb0 + j, Coutb - 1) * Cinb + icb) * 9 + (ky * 3 + kx)) * 4;
+          w[j][0] = LD(wt[wb + 0]); w[j][1] = LD(wt[wb + 1]); w[j][2] = LD(wt[wb + 2]); w[j][3] = LD(wt[wb + 3]);
+#endif
+        }
+        for (int p = 0; p < PTILE; ++p) {
+          int c = p * STRIDE + kx;
+          if (colOk[c]) {
+            ACC inv = row[c];
+            for (int j = 0; j < OCB_BLK; ++j) {
+#if FORM <= 1
+              acc[p][j].x += dot(inv, w[j][0]); acc[p][j].y += dot(inv, w[j][1]); acc[p][j].z += dot(inv, w[j][2]); acc[p][j].w += dot(inv, w[j][3]);
+#else
+              acc[p][j] = fma(ACC(inv.x), w[j][0], acc[p][j]); acc[p][j] = fma(ACC(inv.y), w[j][1], acc[p][j]);
+              acc[p][j] = fma(ACC(inv.z), w[j][2], acc[p][j]); acc[p][j] = fma(ACC(inv.w), w[j][3], acc[p][j]);
+#endif
+            }
+          }
+        }
+      }
+    }
+  }
+  for (int j = 0; j < OCB_BLK; ++j) { if (ocb0 + j >= Coutb) continue; int dbase = (n * Coutb + (ocb0 + j)) * HW;
+    for (int p = 0; p < PTILE; ++p) { int ox = ox0 + p; if (ox < pc.OW) dst[dbase + oy * pc.OW + ox] = TO_STORE4(vec4(acc[p][j])); } }
+}

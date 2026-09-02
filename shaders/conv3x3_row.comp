@@ -25,11 +25,17 @@
 #define CONV_ROW_OCB_SPEC 0
 #define CONV_ROW_WTILE_SPEC 1
 #define CONV_ROW_SW_SPEC 2
-#define CONV_ROW_LANE_WIDTH_SPEC 3
+#define CONV_ROW_TILES_PER_WG_SPEC 3
+#define CONV_ROW_LANE_WIDTH_SPEC 4
+#define CONV_ROW_DECLARED_TILES_PER_WG 16
 #define CONV_ROW_DECLARED_LANE_WIDTH 64
 layout(constant_id = CONV_ROW_OCB_SPEC) const int OCB_BLK = 1; // output channel-blocks (of 4 oc) computed per thread
 layout(constant_id = CONV_ROW_WTILE_SPEC) const int WTILE = 4; // output pixels per thread, consecutive along W
 layout(constant_id = CONV_ROW_SW_SPEC) const int SW_SPEC = 1;  // horizontal stride (sizes the row segment)
+// Column-tiles per workgroup: a workgroup covers TILES_PER_WG tiles of LANE_WIDTH / TILES_PER_WG
+// consecutive output rows, so one wave's loads span a 2-D patch of the input rather than one long
+// strip of a single row (raced per shape; both values divide the lane width).
+layout(constant_id = CONV_ROW_TILES_PER_WG_SPEC) const int TILES_PER_WG = CONV_ROW_DECLARED_TILES_PER_WG;
 layout(local_size_x = CONV_ROW_DECLARED_LANE_WIDTH, local_size_x_id = CONV_ROW_LANE_WIDTH_SPEC) in;
 #define COLS ((WTILE - 1) * SW_SPEC + 3)
 layout(std430, binding = 0) readonly buffer Src { vec4 src[]; };
@@ -48,12 +54,22 @@ void main() {
   int HW = pc.OH * pc.OW;
   int nTX = (pc.OW + WTILE - 1) / WTILE;
   int ocbGroups = (Coutb + OCB_BLK - 1) / OCB_BLK;
+  // Workgroup decode. The output-channel block group sits INSIDE the row-block: every group of
+  // one row-block runs back to back, so the input rows a group re-reads are still in cache from
+  // the previous group instead of being streamed from DRAM once per group (the whole input map is
+  // read ocbGroups times either way; only the distance between the reads changes).
+  int nTXg = (nTX + TILES_PER_WG - 1) / TILES_PER_WG;
+  int rowsPerWg = int(gl_WorkGroupSize.x) / TILES_PER_WG;
+  int nOYg = (pc.OH + rowsPerWg - 1) / rowsPerWg;
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x + uint(pc.gidBase);
-  if (gid >= uint(pc.N * ocbGroups * pc.OH * nTX)) return;
-  int tx = int(gid) % nTX;
-  int oy = (int(gid) / nTX) % pc.OH;
-  int ocbg = (int(gid) / (nTX * pc.OH)) % ocbGroups;
-  int n = int(gid) / (nTX * pc.OH * ocbGroups);
+  if (gid >= uint(pc.N * ocbGroups * nOYg * nTXg * int(gl_WorkGroupSize.x))) return;
+  int lane = int(gid % gl_WorkGroupSize.x);
+  int grp = int(gid / gl_WorkGroupSize.x);
+  int tx = (grp % nTXg) * TILES_PER_WG + lane % TILES_PER_WG;
+  int ocbg = (grp / nTXg) % ocbGroups;
+  int oy = ((grp / (nTXg * ocbGroups)) % nOYg) * rowsPerWg + lane / TILES_PER_WG;
+  int n = grp / (nTXg * ocbGroups * nOYg);
+  if (tx >= nTX || oy >= pc.OH) return;
   int ocb0 = ocbg * OCB_BLK;
   int ox0 = tx * WTILE;
   int ixBase = ox0 * SW_SPEC - pc.PL; // input column of tap kx=0 for the tile's first pixel

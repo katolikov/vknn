@@ -660,6 +660,14 @@ namespace vknn {
             // The row-halo kernel's HTILE (output rows per thread) rides in its own field above the flags.
             static constexpr int kChoiceHtileShift = 24;
             static constexpr int kChoiceHtileMask  = 0xf;
+            // The row-halo kernel's wave footprint rides in its own field above the flags: a code into
+            // kConvRowFootprintRows (core/conv_dispatch_rules.h); 0 is the strided default.
+            static constexpr int kChoiceFootprintShift = 21;
+            static constexpr int kChoiceFootprintMask  = 0x3;
+            // A row-halo choice: OCB | WTILE << kChoiceWtileShift | footprint code << kChoiceFootprintShift.
+            static constexpr uint32_t rowChoice(uint32_t ocb, uint32_t wtile, uint32_t footprintCode) {
+                return ocb | (wtile << kChoiceWtileShift) | (footprintCode << kChoiceFootprintShift);
+            }
             // The wide pixel tile raced alongside the default 4; encoded in the WTILE field.
             static constexpr uint32_t kWtileWide = 8;
             // pickOcb results encode conv_reg's tile as OCB | WTILE<<8 (WTILE 0 = the classic 4),
@@ -717,6 +725,15 @@ namespace vknn {
                 if (split != 0 && ((v & kChoice1D) != 0 || (v & 0xff) == 0))
                 {
                     return false; // a split flag rides only on a conv_reg OCB|WTILE encoding
+                }
+                const int footprint = (v >> kChoiceFootprintShift) & kChoiceFootprintMask;
+                if (footprint != 0 && (v & kChoiceRow3x3) == 0)
+                {
+                    return false; // a footprint field belongs to a row-halo choice only
+                }
+                if ((v & kChoiceRow3x3) != 0 && footprint >= (int) kConvRowFootprintCount)
+                {
+                    return false; // a footprint code this build does not race re-races
                 }
                 if ((v & kChoiceRow3x3) != 0 && (split != 0 || (v & kChoice1D) != 0 || (v & 0xff) == 0))
                 {
@@ -1022,21 +1039,38 @@ namespace vknn {
                 std::vector<int> pinnedEntrants; // row-halo tiles: see racePruned's alwaysKeep contract
                 if (row3x3Ok)
                 {
-                    std::vector<uint32_t> rowCands = (env.tuning == Tuning::Heavy) ? std::vector<uint32_t> {1, 2, 1 | (kWtileWide << kChoiceWtileShift), 2 | (kWtileWide << kChoiceWtileShift)} : std::vector<uint32_t> {2, 2 | (kWtileWide << kChoiceWtileShift)};
+                    // Candidates are (OCB, WTILE, footprint): Fast races the default tile at the two
+                    // measured-best footprints (4 rows per workgroup wins strided shapes, 2 rows wins
+                    // stride 1) plus the wide pixel tile; Heavy adds the single-block tiles and the
+                    // one-row strip. A footprint whose row count does not divide this device's lane
+                    // width is skipped rather than dispatched at a width the kernel cannot decode.
+                    std::vector<uint32_t> rowCands = {rowChoice(2, kConv1x1DefaultWTile, 0), rowChoice(2, kConv1x1DefaultWTile, 1), rowChoice(2, kWtileWide, 1)};
+                    if (env.tuning == Tuning::Heavy)
+                    {
+                        for (uint32_t cand: {rowChoice(1, kConv1x1DefaultWTile, 0), rowChoice(1, kConv1x1DefaultWTile, 1), rowChoice(1, kWtileWide, 1), rowChoice(2, kConv1x1DefaultWTile, 2)})
+                        {
+                            rowCands.push_back(cand);
+                        }
+                    }
                     for (uint32_t cand: rowCands)
                     {
-                        uint32_t ocb       = cand & (uint32_t) kChoiceTileMask;
-                        uint32_t wt        = std::max((uint32_t) kConv1x1DefaultWTile, (cand >> kChoiceWtileShift) & (uint32_t) kChoiceTileMask);
-                        int64_t  ocbGroups = (Coutb + ocb - 1) / ocb;
-                        int64_t  tot       = x.n * ocbGroups * y.h * ((y.w + wt - 1) / wt);
+                        const uint32_t ocb        = cand & (uint32_t) kChoiceTileMask;
+                        const uint32_t wt         = std::max((uint32_t) kConv1x1DefaultWTile, (cand >> kChoiceWtileShift) & (uint32_t) kChoiceTileMask);
+                        const uint32_t tilesPerWg = convRowTilesPerWorkgroup((cand >> kChoiceFootprintShift) & (uint32_t) kChoiceFootprintMask, laneWidth);
+                        if (tilesPerWg == 0)
+                        {
+                            continue;
+                        }
+                        const int64_t ocbGroups = (Coutb + ocb - 1) / ocb;
+                        const int64_t tot       = convRowWorkgroups(x.n, ocbGroups, y.h, y.w, wt, tilesPerWg, laneWidth) * laneWidth;
                         // The tile reads COLS columns per (channel-block, ky); tileCost wants that as a
                         // per-tap figure, so amortize the segment over the kernel's kx taps.
                         const double   rowCols = (double) ((wt - 1) * (uint32_t) pc.SW + kRowKernelExtent);
                         vk::KernelCost cost    = tileCost(tot, pc.KH * pc.KW, (double) wt, (double) ocb, rowCols / (double) kRowKernelExtent, 1);
                         pinnedEntrants.push_back((int) entrants.size());
-                        entrants.push_back({(int) cand | kChoiceRow3x3, vk::kTuneRaceMargin, cost, [&, tot, ocb, wt] {
+                        entrants.push_back({(int) cand | kChoiceRow3x3, vk::kTuneRaceMargin, cost, [&, tot, ocb, wt, tilesPerWg] {
                                                 return timeIt(env.pipeline(accKernel(env, "conv3x3_row"), 4 + epi.extraBufs(), sizeof(ConvPC),
-                                                                           convRowSpecConstants(ocb, wt, (uint32_t) pc.SW, laneWidth)),
+                                                                           convRowSpecConstants(ocb, wt, (uint32_t) pc.SW, tilesPerWg, laneWidth)),
                                                               tot, laneWidth);
                                             }});
                     }
@@ -1491,13 +1525,16 @@ namespace vknn {
                     // this routes on layout, not on speed.
                     if (compactIn)
                     {
-                        reg                      = true;
-                        const uint32_t regOcb    = (uint32_t) std::min<int64_t>(Coutb, 2);
-                        const uint32_t regWt     = (uint32_t) kConv1x1DefaultWTile;
-                        int64_t        ocbGroups = (Coutb + regOcb - 1) / regOcb;
-                        total                    = x.n * ocbGroups * y.h * ((y.w + regWt - 1) / regWt);
-                        pipe                     = env.pipeline(accKernel(env, "conv3x3_cin_lt4"), 4 + epi.extraBufs(), sizeof(ConvPC),
-                                                                convCompactSpecConstants(regOcb, regWt, (uint32_t) st[1], (uint32_t) x.c, laneWidth));
+                        reg                   = true;
+                        const uint32_t regOcb = (uint32_t) std::min<int64_t>(Coutb, 2);
+                        const uint32_t regWt  = (uint32_t) kConv1x1DefaultWTile;
+                        // The compact kernel is not raced (it routes on layout), so its footprint is the
+                        // measured rule the row race confirms: 4 rows per workgroup strided, 2 at stride 1.
+                        const uint32_t tilesPerWg = convRowTilesPerWorkgroup(st[1] > 1 ? kConvRowFootprintStridedCode : kConvRowFootprintUnitCode, laneWidth);
+                        int64_t        ocbGroups  = (Coutb + regOcb - 1) / regOcb;
+                        total                     = convRowWorkgroups(x.n, ocbGroups, y.h, y.w, regWt, tilesPerWg, laneWidth) * laneWidth;
+                        pipe = env.pipeline(accKernel(env, "conv3x3_cin_lt4"), 4 + epi.extraBufs(), sizeof(ConvPC),
+                                            convCompactSpecConstants(regOcb, regWt, (uint32_t) st[1], (uint32_t) x.c, tilesPerWg, laneWidth));
                     } else if (pointwise)
                     {
                         // Deep, small-spatial 1x1 convs have too few threads for the register-tiled kernel; use
@@ -1610,13 +1647,15 @@ namespace vknn {
                         } else if ((ocb & kChoiceRow3x3) != 0)
                         {
                             // 3x3 row-halo kernel (autotuned): WTILE pixels along one output row per
-                            // thread, so the gid range counts row-tiles rather than flattened pixels.
-                            reg                = true;
-                            uint32_t regOcb    = (uint32_t) (ocb & kChoiceTileMask);
-                            uint32_t regWt     = std::max((uint32_t) kConv1x1DefaultWTile, (uint32_t) (ocb >> kChoiceWtileShift) & (uint32_t) kChoiceTileMask);
-                            int64_t  ocbGroups = (Coutb + regOcb - 1) / regOcb;
-                            total              = x.n * ocbGroups * y.h * ((y.w + regWt - 1) / regWt);
-                            pipe = env.pipeline(accKernel(env, "conv3x3_row"), 4 + epi.extraBufs(), sizeof(ConvPC), convRowSpecConstants(regOcb, regWt, (uint32_t) st[1], laneWidth));
+                            // thread in a 2-D workgroup footprint, so the gid range counts whole
+                            // workgroups of (column-tile block, block group, row block).
+                            reg                   = true;
+                            const uint32_t regOcb = (uint32_t) (ocb & kChoiceTileMask);
+                            const uint32_t regWt = std::max((uint32_t) kConv1x1DefaultWTile, (uint32_t) (ocb >> kChoiceWtileShift) & (uint32_t) kChoiceTileMask);
+                            const uint32_t tilesPerWg = convRowTilesPerWorkgroup((uint32_t) (ocb >> kChoiceFootprintShift) & (uint32_t) kChoiceFootprintMask, laneWidth);
+                            const int64_t ocbGroups = (Coutb + regOcb - 1) / regOcb;
+                            total                   = convRowWorkgroups(x.n, ocbGroups, y.h, y.w, regWt, tilesPerWg, laneWidth) * laneWidth;
+                            pipe = env.pipeline(accKernel(env, "conv3x3_row"), 4 + epi.extraBufs(), sizeof(ConvPC), convRowSpecConstants(regOcb, regWt, (uint32_t) st[1], tilesPerWg, laneWidth));
                         } else if ((ocb & kChoice1D) != 0)
                         {
                             // sliding-window 1-D kernel (1xK / Kx1; autotuned, won the bit-exact race).

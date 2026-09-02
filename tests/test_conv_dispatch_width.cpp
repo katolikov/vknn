@@ -199,16 +199,65 @@ TEST(ConvDispatchWidth, ConvRowSpecAlwaysCarriesTheLaneWidth) {
             {
                 for (uint32_t strideW: {1u, 2u})
                 {
-                    const std::vector<uint32_t> spec = convRowSpecConstants(ocbBlocks, pixelTile, strideW, (uint32_t) laneWidth);
-                    ASSERT_EQ(spec.size(), kConvRowSpecSlots);
-                    EXPECT_EQ(spec[kConvRowOcbSpecIndex], ocbBlocks);
-                    EXPECT_EQ(spec[kConvRowPixelTileSpecIndex], pixelTile);
-                    EXPECT_EQ(spec[kConvRowStrideSpecIndex], strideW);
-                    EXPECT_EQ(spec[kConvRowLaneWidthSpecIndex], (uint32_t) laneWidth);
+                    for (uint32_t code = 0; code < kConvRowFootprintCount; ++code)
+                    {
+                        const uint32_t              tilesPerWg = convRowTilesPerWorkgroup(code, (uint32_t) laneWidth);
+                        const std::vector<uint32_t> spec       = convRowSpecConstants(ocbBlocks, pixelTile, strideW, tilesPerWg, (uint32_t) laneWidth);
+                        ASSERT_EQ(spec.size(), kConvRowSpecSlots);
+                        EXPECT_EQ(spec[kConvRowOcbSpecIndex], ocbBlocks);
+                        EXPECT_EQ(spec[kConvRowPixelTileSpecIndex], pixelTile);
+                        EXPECT_EQ(spec[kConvRowStrideSpecIndex], strideW);
+                        EXPECT_EQ(spec[kConvRowTilesPerWgSpecIndex], tilesPerWg);
+                        EXPECT_EQ(spec[kConvRowLaneWidthSpecIndex], (uint32_t) laneWidth);
+                    }
                 }
             }
         }
     }
+}
+
+// A footprint states rows per workgroup; the kernel takes column-tiles per workgroup and derives
+// the rows back as laneWidth / tiles, so the pair must round-trip at every raced width.
+TEST(ConvDispatchWidth, ConvRowFootprintRoundTripsThroughTheLaneWidth) {
+    for (int64_t laneWidth: kLaneWidths)
+    {
+        for (uint32_t code = 0; code < kConvRowFootprintCount; ++code)
+        {
+            const uint32_t tiles = convRowTilesPerWorkgroup(code, (uint32_t) laneWidth);
+            ASSERT_GT(tiles, 0u) << "lane width " << laneWidth << " footprint " << code;
+            EXPECT_EQ((uint32_t) laneWidth / tiles, kConvRowFootprintRows[code]);
+            EXPECT_EQ(tiles * kConvRowFootprintRows[code], (uint32_t) laneWidth);
+        }
+    }
+    EXPECT_EQ(convRowTilesPerWorkgroup(kConvRowFootprintCount, 64u), 0u);
+}
+
+// Every output pixel of the map lands in exactly one lane: the workgroup count covers the row
+// blocks and column-tile blocks with no gap, and the last workgroup's padding lanes stay past the
+// map (the kernel's own tx/oy bound retires them).
+TEST(ConvDispatchWidth, ConvRowWorkgroupsCoverTheOutputMap) {
+    for (int64_t laneWidth: kLaneWidths)
+    {
+        for (uint32_t code = 0; code < kConvRowFootprintCount; ++code)
+        {
+            const uint32_t tiles = convRowTilesPerWorkgroup(code, (uint32_t) laneWidth);
+            const uint32_t rows  = kConvRowFootprintRows[code];
+            for (int64_t outH: {1, 7, 180, 360})
+            {
+                for (int64_t outW: {1, 5, 240, 481})
+                {
+                    for (uint32_t pixelTile: {4u, 8u})
+                    {
+                        const int64_t nTX    = (outW + pixelTile - 1) / pixelTile;
+                        const int64_t groups = convRowWorkgroups(1, 2, outH, outW, pixelTile, tiles, (uint32_t) laneWidth);
+                        EXPECT_EQ(groups, 2 * ((outH + rows - 1) / rows) * ((nTX + tiles - 1) / tiles));
+                        EXPECT_GE(groups * (int64_t) laneWidth, 2 * outH * nTX);
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_EQ(convRowWorkgroups(1, 1, 8, 8, 4u, 0u, 64u), 0);
 }
 
 TEST(ConvDispatchWidth, ConvCompactSpecAlwaysCarriesTheLaneWidth) {
@@ -218,12 +267,14 @@ TEST(ConvDispatchWidth, ConvCompactSpecAlwaysCarriesTheLaneWidth) {
         {
             for (uint32_t strideW: {1u, 2u})
             {
-                const std::vector<uint32_t> spec = convCompactSpecConstants(2u, 4u, strideW, inputChannels, (uint32_t) laneWidth);
+                const uint32_t tilesPerWg = convRowTilesPerWorkgroup(strideW > 1 ? kConvRowFootprintStridedCode : kConvRowFootprintUnitCode, (uint32_t) laneWidth);
+                const std::vector<uint32_t> spec = convCompactSpecConstants(2u, 4u, strideW, inputChannels, tilesPerWg, (uint32_t) laneWidth);
                 ASSERT_EQ(spec.size(), kConvCompactSpecSlots);
                 EXPECT_EQ(spec[kConvCompactOcbSpecIndex], 2u);
                 EXPECT_EQ(spec[kConvCompactPixelTileSpecIndex], 4u);
                 EXPECT_EQ(spec[kConvCompactStrideSpecIndex], strideW);
                 EXPECT_EQ(spec[kConvCompactCinSpecIndex], inputChannels);
+                EXPECT_EQ(spec[kConvCompactTilesPerWgSpecIndex], tilesPerWg);
                 EXPECT_EQ(spec[kConvCompactLaneWidthSpecIndex], (uint32_t) laneWidth);
             }
         }
@@ -251,7 +302,8 @@ TEST(ConvDispatchWidth, CompactSpecLeadingSlotsMatchTheRowKernel) {
     EXPECT_EQ(kConvCompactOcbSpecIndex, kConvRowOcbSpecIndex);
     EXPECT_EQ(kConvCompactPixelTileSpecIndex, kConvRowPixelTileSpecIndex);
     EXPECT_EQ(kConvCompactStrideSpecIndex, kConvRowStrideSpecIndex);
-    EXPECT_LT(kConvRowLaneWidthSpecIndex, kConvCompactCinSpecIndex + 1);
+    EXPECT_EQ(kConvCompactCinSpecIndex, kConvRowTilesPerWgSpecIndex);
+    EXPECT_EQ(kConvCompactTilesPerWgSpecIndex, kConvRowLaneWidthSpecIndex);
     EXPECT_EQ(kConvCompactSpecSlots, kConvCompactLaneWidthSpecIndex + 1);
     EXPECT_EQ(kConvRowSpecSlots, kConvRowLaneWidthSpecIndex + 1);
     EXPECT_EQ(kDwRowSpecSlots, kDwRowLaneWidthSpecIndex + 1);

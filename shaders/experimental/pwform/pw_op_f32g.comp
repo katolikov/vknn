@@ -1,0 +1,36 @@
+#version 450
+#include "common_head.glsl"
+void main() {
+  int Cinb = (pc.Cin + 3) / 4, Coutb = (pc.Cout + 3) / 4, HW = pc.OH * pc.OW;
+  int nTiles = (HW + WTILE - 1) / WTILE, ocbGroups = (Coutb + OCB - 1) / OCB;
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.N * ocbGroups * ((nTiles + CHUNK - 1) / CHUNK) * CHUNK)) return;
+#ifndef CHUNK
+#define CHUNK 64
+#endif
+  int nChunks = (nTiles + CHUNK - 1) / CHUNK;
+  int tile = (int(gid) / (CHUNK * ocbGroups)) % nChunks * CHUNK + int(gid) % CHUNK;
+  int og = (int(gid) / CHUNK) % ocbGroups, n = int(gid) / (CHUNK * ocbGroups * nChunks);
+  if (tile >= nTiles) return;
+  int p0 = tile * WTILE, ocb0 = og * OCB;
+  vec4 acc[OCB][WTILE]; int ocbj[OCB];
+  for (int j = 0; j < OCB; ++j) { ocbj[j] = min(ocb0 + j, Coutb - 1); vec4 b = vec4(bias[ocbj[j]]); for (int p = 0; p < WTILE; ++p) acc[j][p] = b; }
+  for (int icb = 0; icb < Cinb; ++icb) {
+    int sbase = (n * Cinb + icb) * HW;
+    int wbase = icb * 4 * Coutb;
+    vec4 inv[WTILE];
+    for (int p = 0; p < WTILE; ++p) inv[p] = vec4(src[sbase + min(p0 + p, HW - 1)]);
+    for (int j = 0; j < OCB; ++j) {
+      vec4 w0 = vec4(wt[wbase + 0 * Coutb + ocbj[j]]), w1 = vec4(wt[wbase + 1 * Coutb + ocbj[j]]);
+      vec4 w2 = vec4(wt[wbase + 2 * Coutb + ocbj[j]]), w3 = vec4(wt[wbase + 3 * Coutb + ocbj[j]]);
+      for (int p = 0; p < WTILE; ++p) {
+        acc[j][p] = fma(vec4(inv[p].x), w0, acc[j][p]);
+        acc[j][p] = fma(vec4(inv[p].y), w1, acc[j][p]);
+        acc[j][p] = fma(vec4(inv[p].z), w2, acc[j][p]);
+        acc[j][p] = fma(vec4(inv[p].w), w3, acc[j][p]);
+      }
+    }
+  }
+  for (int j = 0; j < OCB; ++j) { int ocb = ocb0 + j; if (ocb >= Coutb) break; int dbase = (n * Coutb + ocb) * HW;
+    for (int p = 0; p < WTILE; ++p) { int pix = p0 + p; if (pix < HW) dst[dbase + pix] = TO_STORE4(acc[j][p]); } }
+}
