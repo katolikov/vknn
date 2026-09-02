@@ -10,6 +10,7 @@
 // can return for a device subgroup, not only at the 64 of a wave-64 GPU.
 #pragma once
 #include "vknn/hint.h"
+#include "vknn/nchw.h"
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -182,6 +183,24 @@ namespace vknn {
     /// tiled-GEMM 3-pass, the variant every other refusal in the op falls back to.
     constexpr int resolveWinogradVariant(int hintVariant, int64_t cinBlocks, int64_t fullVariantMaxCinBlocks) {
         return (hintVariant == (int) Mode::FullyFused && cinBlocks > fullVariantMaxCinBlocks) ? (int) Mode::TiledGemm : hintVariant;
+    }
+
+    /// Operand layout of the tiled Winograd GEMM's transformed weights U (shaders/wino_gemm_fp16.comp
+    /// and its register twin wino_gemm_reg_fp16.comp; the conv op's "#winoT" pack): per transform
+    /// position, output channel-block and input channel-block, kNC4Block consecutive vec4s indexed by
+    /// the INPUT channel lane, each one vec4 over the block's kNC4Block OUTPUT channels. The GEMM
+    /// contracts one input channel per fma - acc = fma(vec4(v.lane), U[lane], acc) - so the operand it
+    /// needs per input channel is that output-channel vector, and this pack hands it over as one
+    /// contiguous vec4; a block's whole K row is contiguous ((k, lane) row-major). Output channels
+    /// past Cout inside the last block stay zero, so a partial block's stored M lanes are zero.
+    constexpr int64_t winoGemmUVec4Index(int64_t position, int64_t outBlock, int64_t inBlock, int64_t inLane, int64_t coutBlocks, int64_t cinBlocks) {
+        return ((position * coutBlocks + outBlock) * cinBlocks + inBlock) * kNC4Block + inLane;
+    }
+
+    /// vec4 count of that pack: one per (position, output channel-block, input channel-block, input
+    /// lane) - the size the host allocates and the bound the shaders' addressing stays under.
+    constexpr int64_t winoGemmUVec4Count(int64_t positions, int64_t coutBlocks, int64_t cinBlocks) {
+        return positions * coutBlocks * cinBlocks * kNC4Block;
     }
 
 } // namespace vknn

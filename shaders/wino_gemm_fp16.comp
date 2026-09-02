@@ -1,12 +1,20 @@
 #version 450
-// Winograd F(2x2,3x3) transform-domain matmul as a tiled batched GEMM. A register-blocked,
-// LDS-staged GEMM amortizes the global V/M loads across a workgroup tile (a 1-thread-per-output
-// matmul is memory-bound on that traffic).
+// Winograd transform-domain matmul as a tiled batched GEMM. A register-blocked, LDS-staged GEMM
+// amortizes the global V/M loads across a workgroup tile (a 1-thread-per-output matmul is
+// memory-bound on that traffic). One GEMM per transform position p (16, 36 or 64 of them).
 //
-// For each of the 16 transform positions p:  M[p][tile][oc] = sum_ic V[p][ic][tile] * U[p][oc][ic]
-//   A = V[p]  : [K=Cinb][M=nT]      vec4 over 4 input channels   (from wino_input)
-//   B = U[p]  : [N=Cout][K=Cinb]    vec4 over 4 input channels   (host weight transform)
-//   C = M[p]  : [M=nT][N=Coutb]     vec4 over 4 output channels  (consumed by wino_out)
+// For each position p:  M[p][tile][oc] = sum_ic V[p][ic][tile] * U[p][oc][ic]
+//   A = V[p]  : [K=Cinb][M=nT]             vec4 over 4 input channels   (from wino_input)
+//   B = U[p]  : [N=Coutb][K=Cinb][ic lane] vec4 over 4 OUTPUT channels  (host "#winoT" pack:
+//               winoGemmUVec4Index in core/conv_dispatch_rules.h)
+//   C = M[p]  : [M=nT][N=Coutb]            vec4 over 4 output channels  (consumed by wino_out)
+//
+// The contraction is an outer-product form: per input channel-block k a thread holds its tile's
+// V vec4 a (4 input channels) and the block's 4 U vec4s u0..u3 (one per input channel, each
+// spanning the block's 4 output channels), and folds acc = fma(vec4(a.c), u_c, acc) for c = x, y,
+// z, w. Four fmas per (tile, k) instead of four 4-lane dots: the reduction runs down the
+// accumulator lanes, so no horizontal per-output reduction is issued (the dot form is the
+// bottleneck on the primary device's compiler). Accumulation is fp32.
 //
 // One workgroup (64 threads = 8x8) computes a TILE_M x (TILE_NB output-channel-blocks) output tile
 // for one position. Each thread owns RM tiles x 1 ocb (RM vec4 accumulators). A/B K-chunks are
@@ -16,9 +24,13 @@
 //   RM (id 0)    = 4 or 8 tiles per thread. Bit-neutral — it only remaps threads to outputs; the
 //                  per-output K order is unchanged. 8 doubles the A reuse per B load at higher
 //                  register pressure; which wins is shape/driver-dependent, so it is measured.
-//   ACC16 (id 1) = 1 accumulates f16vec4 with fp16 dots (saves the widening ALU; LDS traffic is
+//   ACC16 (id 1) = 1 accumulates f16vec4 with fp16 fmas (saves the widening ALU; LDS traffic is
 //                  unchanged). This changes the numerics (per-K-chunk fp16 rounding), so it is only
 //                  ever selected by the timing race, never by default: fp16-floor mode only.
+//
+// Per-output operation order — the bit-exactness contract with wino_gemm_reg_fp16.comp, the no-LDS
+// twin tuneWino races against this kernel: k ascending over the whole Cinb range (chunks ascending,
+// kk ascending inside each chunk), and per k the four fmas in lane order x, y, z, w.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
@@ -27,6 +39,7 @@
 layout(constant_id = 0) const int RM = 4;    // tiles per thread (M micro-tile): 4 or 8
 layout(constant_id = 1) const int ACC16 = 0; // 1 = fp16 accumulation (race-selected only)
 
+#define NC4 4       // channels per NC4HW4 block: the lane count of every vec4 operand here
 #define MDIM 8      // threads in M
 #define NDIM 8      // threads in N   (MDIM*NDIM = 64)
 #define RM_MAX 8
@@ -41,11 +54,11 @@ layout(std430, binding = 2) writeonly buffer M { f16vec4 mbuf[]; };
 layout(push_constant) uniform PC { int Cin, Cout, nT; } pc;
 
 shared f16vec4 sA[KWG][MDIM * RM_MAX]; // V tile [k][m], sized for the widest variant (8 KB)
-shared f16vec4 sB[KWG][TILE_NB * 4];   // U tile [k][oc] (4 KB)
+shared f16vec4 sB[KWG][TILE_NB * NC4]; // U tile [k][ocb*NC4 + ic lane], vec4 over 4 oc (4 KB)
 
 void main() {
-  int Cinb = (pc.Cin + 3) / 4;
-  int Coutb = (pc.Cout + 3) / 4;
+  int Cinb = (pc.Cin + NC4 - 1) / NC4;
+  int Coutb = (pc.Cout + NC4 - 1) / NC4;
   int p = int(gl_WorkGroupID.z);
   int m0 = int(gl_WorkGroupID.x) * TILE_M;       // first tile
   int nb0 = int(gl_WorkGroupID.y) * TILE_NB;     // first ocb
@@ -54,8 +67,8 @@ void main() {
   int tIdM = int(lid) % MDIM;   // 0..7
   int tIdN = int(lid) / MDIM;   // 0..7
 
-  int vBaseP = p * Cinb * pc.nT;        // vbuf[(p*Cinb + k)*nT + m]
-  int uBaseP = p * pc.Cout * Cinb;      // ubuf[(p*Cout + oc)*Cinb + k]
+  int vBaseP = p * Cinb * pc.nT;          // vbuf[(p*Cinb + k)*nT + m]
+  int uBaseP = p * Coutb * Cinb * NC4;    // ubuf[((p*Coutb + ocb)*Cinb + k)*NC4 + c]
 
   vec4 acc[RM_MAX];
   f16vec4 hacc[RM_MAX];
@@ -65,47 +78,54 @@ void main() {
   }
 
   for (int k0 = 0; k0 < Cinb; k0 += KWG) {
-    // ---- cooperative load of A (V) [KWG][TILE_M] and B (U) [KWG][TILE_NB*4] ----
+    // ---- cooperative load of A (V) [KWG][TILE_M] and B (U) [KWG][TILE_NB*NC4] ----
     for (int i = int(lid); i < KWG * TILE_M; i += 64) {
       int kk = i / TILE_M, mm = i % TILE_M;
       int k = k0 + kk, m = m0 + mm;
       sA[kk][mm] = (k < Cinb && m < pc.nT) ? vbuf[vBaseP + k * pc.nT + m] : f16vec4(0.0);
     }
-    for (int i = int(lid); i < KWG * TILE_NB * 4; i += 64) {
-      int oo = i / KWG, kk = i % KWG;           // oo: 0..TILE_NB*4-1 (output channel)
-      int k = k0 + kk, oc = nb0 * 4 + oo;
-      sB[kk][oo] = (k < Cinb && oc < pc.Cout) ? ubuf[uBaseP + oc * Cinb + k] : f16vec4(0.0);
+    // One block's KWG*NC4 entries are contiguous in ubuf ((k, c) row-major), so consecutive lanes
+    // take consecutive (kk, c) of one block: a 64-lane pass reads one block's 64 consecutive vec4s.
+    for (int i = int(lid); i < KWG * TILE_NB * NC4; i += 64) {
+      int blk = i / (KWG * NC4);                 // 0..TILE_NB-1: block within the tile
+      int kc = i % (KWG * NC4);
+      int kk = kc / NC4, c = kc % NC4;
+      int k = k0 + kk, ocb = nb0 + blk;
+      sB[kk][blk * NC4 + c] = (k < Cinb && ocb < Coutb) ? ubuf[uBaseP + (ocb * Cinb + k) * NC4 + c] : f16vec4(0.0);
     }
     barrier();
 
     // ---- register-blocked multiply: RM tiles x (1 ocb = 4 oc) per thread ----
     // Default (ACC16 == 0): operands stay f16vec4 in LDS (half the LDS traffic, the GEMM's
-    // bottleneck), but the 4-way dot widens to fp32 in-register so the contraction accumulates in
-    // full precision — matching the fp32 CPU oracle. An fp16 dot(f16vec4,f16vec4) reduces in fp16
-    // (the OpDot result is 16-bit) and injects a per-K-chunk rounding that inflates conv max-abs
-    // error; the widen is register-only (LDS traffic unchanged), and this GEMM is LDS/bandwidth-
-    // bound so the extra fp32 madds hide. ACC16 == 1 keeps the whole contraction in fp16 (the
-    // race-only variant above).
+    // bottleneck) and widen to fp32 in-register, so the contraction accumulates in full precision
+    // — matching the fp32 CPU oracle; the widen is register-only. ACC16 == 1 keeps the whole
+    // contraction in fp16 (the race-only variant above).
     int kmax = min(KWG, Cinb - k0);
-    int ocb = tIdN;            // this thread's output channel-block within the tile
+    int blk = tIdN;            // this thread's output channel-block within the tile
     for (int kk = 0; kk < kmax; ++kk) {
       if (ACC16 != 0) {
-        f16vec4 b0 = sB[kk][ocb * 4 + 0];
-        f16vec4 b1 = sB[kk][ocb * 4 + 1];
-        f16vec4 b2 = sB[kk][ocb * 4 + 2];
-        f16vec4 b3 = sB[kk][ocb * 4 + 3];
+        f16vec4 u0 = sB[kk][blk * NC4 + 0];
+        f16vec4 u1 = sB[kk][blk * NC4 + 1];
+        f16vec4 u2 = sB[kk][blk * NC4 + 2];
+        f16vec4 u3 = sB[kk][blk * NC4 + 3];
         for (int r = 0; r < RM; ++r) {
           f16vec4 a = sA[kk][tIdM + r * MDIM];
-          hacc[r] += f16vec4(dot(a, b0), dot(a, b1), dot(a, b2), dot(a, b3));
+          hacc[r] = fma(f16vec4(a.x), u0, hacc[r]);
+          hacc[r] = fma(f16vec4(a.y), u1, hacc[r]);
+          hacc[r] = fma(f16vec4(a.z), u2, hacc[r]);
+          hacc[r] = fma(f16vec4(a.w), u3, hacc[r]);
         }
       } else {
-        vec4 b0 = vec4(sB[kk][ocb * 4 + 0]);
-        vec4 b1 = vec4(sB[kk][ocb * 4 + 1]);
-        vec4 b2 = vec4(sB[kk][ocb * 4 + 2]);
-        vec4 b3 = vec4(sB[kk][ocb * 4 + 3]);
+        vec4 u0 = vec4(sB[kk][blk * NC4 + 0]);
+        vec4 u1 = vec4(sB[kk][blk * NC4 + 1]);
+        vec4 u2 = vec4(sB[kk][blk * NC4 + 2]);
+        vec4 u3 = vec4(sB[kk][blk * NC4 + 3]);
         for (int r = 0; r < RM; ++r) {
           vec4 a = vec4(sA[kk][tIdM + r * MDIM]);
-          acc[r] += vec4(dot(a, b0), dot(a, b1), dot(a, b2), dot(a, b3));
+          acc[r] = fma(vec4(a.x), u0, acc[r]);
+          acc[r] = fma(vec4(a.y), u1, acc[r]);
+          acc[r] = fma(vec4(a.z), u2, acc[r]);
+          acc[r] = fma(vec4(a.w), u3, acc[r]);
         }
       }
     }
