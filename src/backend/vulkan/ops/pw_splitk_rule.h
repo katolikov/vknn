@@ -16,26 +16,36 @@
 
 namespace vknn {
 
-    // Output channel-block pixels (Coutb * OH*OW - the partial pass's threads at one part) at or
-    // under which the reduction is split. Measured on the primary device with the map-sized chunk
-    // decode: the register-tiled conv1x1 kernel wins from 18432 up (1024->512 @12x12, every 14x14
-    // plane of 128+ output blocks, every 7x7 plane of 512 blocks), the split pair wins by 16-44% at
-    // 12800 and under (1024->256 @14x14, 2048->1024 @7x7, 1024->512 @7x7..10x10).
+    // Output channel-block pixels (Coutb * OH*OW - the partial pass's threads at one part) above
+    // which the reduction is never split: from 18432 up the register-tiled conv1x1 kernel has the
+    // waves to hide its own latency and the pair's partial round trip only costs (1024->512
+    // @12x12, every 14x14 plane of 128+ output blocks, every 7x7 plane of 512), measured on the
+    // primary device with the map-sized chunk decode.
     inline constexpr int64_t kPwSplitKMaxOutputs = 16384;
-    // Channel floor: at 256 input channels the pair only ties the register-tiled kernel (256->256
-    // @14x14), at 512 it wins (512->256 @14x14, -16%).
-    inline constexpr int64_t kPwSplitKMinCin = 512;
+    // Under that cap the pair wins when the reduction is deep relative to the plane: at most
+    // kPwSplitKOutputsPerInputBlock outputs per input channel-block (Coutb*OHW <= Cinb * 128).
+    // Measured boundary: 128->64 @14x14 wins 17%, 128->128 @14x14 ties, 256->128 @14x14 wins
+    // 25%, 256->256 @14x14 ties, 512->256 @14x14 wins 16%, 480->80 @14x14 wins 52%.
+    inline constexpr int64_t kPwSplitKOutputsPerInputBlock = 128;
+    // Channel floor: 64->64 @14x14 loses to the single pass even inside the ratio.
+    inline constexpr int64_t kPwSplitKMinCin = 64;
     // Thread target of the partial pass (384 waves of 64 lanes), which sets how many ways the
-    // reduction splits: measured best at 4 parts for 6272-8192 outputs and 2 parts at 12544-12800.
+    // reduction splits: measured best at 4 parts for 6272-8192 outputs and 2 at 12544-12800.
     inline constexpr int64_t kPwSplitKTargetThreads = 24576;
-    inline constexpr int64_t kPwSplitKMaxParts      = 16;
-    inline constexpr int64_t kPwSplitKMinParts      = 2;
+    // Each part keeps at least this many input channel-blocks, so a shallow reduction on a tiny
+    // plane is not cut into slivers whose reduce pass outweighs the parallelism (240->80 @14x14
+    // is best at 3-4 parts, 256->256 @7x7 at 4, not the 7-8 the thread target alone would give).
+    inline constexpr int64_t kPwSplitKMinBlocksPerPart = 16;
+    inline constexpr int64_t kPwSplitKMaxParts         = 16;
+    inline constexpr int64_t kPwSplitKMinParts         = 2;
 
-    // Chunks the channel-block reduction is split into. Targets kPwSplitKTargetThreads partial-pass
-    // threads, capped by the block count itself and kPwSplitKMaxParts.
+    // Chunks the channel-block reduction is split into: the thread target, bounded by the depth
+    // floor per part, the block count itself and kPwSplitKMaxParts.
     inline int64_t pwSplitKParts(int64_t Cinb, int64_t Coutb, int64_t OHW) {
-        int64_t parts = (kPwSplitKTargetThreads + Coutb * OHW - 1) / (Coutb * OHW);
-        return std::max<int64_t>(kPwSplitKMinParts, std::min<int64_t>({parts, Cinb, kPwSplitKMaxParts}));
+        const int64_t outputs   = Coutb * OHW;
+        const int64_t byThreads = (kPwSplitKTargetThreads + outputs - 1) / outputs;
+        const int64_t byDepth   = std::max<int64_t>(kPwSplitKMinParts, Cinb / kPwSplitKMinBlocksPerPart);
+        return std::max<int64_t>(kPwSplitKMinParts, std::min<int64_t>({byThreads, byDepth, Cinb, kPwSplitKMaxParts}));
     }
 
     // True when a 1x1 conv of this shape runs the split-K partial+reduce pair instead of the
@@ -46,7 +56,9 @@ namespace vknn {
         {
             return false;
         }
-        return Coutb * OHW <= kPwSplitKMaxOutputs;
+        const int64_t outputs = Coutb * OHW;
+        const int64_t Cinb    = (Cin + 3) / 4;
+        return outputs <= kPwSplitKMaxOutputs && outputs <= Cinb * kPwSplitKOutputsPerInputBlock;
     }
 
 } // namespace vknn

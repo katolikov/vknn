@@ -161,11 +161,13 @@ cosine unchanged, and BETTER on DenseNet-121 (+2.4 dB) and YOLOv8n (+0.9 dB)):
   default and the rule is active out of the box); the hint is a cache-variant key field.
 - **Pointwise split-K rule recalibrated** (`ops/pw_splitk_rule.h`): with the chunk decode sized to
   the map, the 1x1 split pair wins only where the output plane has at most 16384 channel-block
-  pixels (`Coutb * OH*OW`) and the reduction is at least 512 channels deep; it is 16-44% faster
-  there (1024->256 @14x14, 2048->1024 @7x7, 1024->512 @7x7..10x10) and the register-tiled kernel
-  wins everywhere above (every 14x14 plane of 128+ output blocks, every 7x7 plane of 512). The
-  part count targets 384 waves of partial-pass threads (four parts at 6272 outputs, two at
-  12544). ResNet-50's 2048->512 @7x7 went 0.165 -> 0.117 ms.
+  pixels (`Coutb * OH*OW`) and at most 128 of them per input channel-block: 128->64 @14x14 wins
+  17%, 128->128 @14x14 ties, 256->128 @14x14 wins 25%, 256->256 @14x14 ties, 512->256 @14x14 wins
+  16%, 480->80 @14x14 wins 52%, and the register-tiled kernel wins everywhere above the cap (every
+  14x14 plane of 128+ output blocks, every 7x7 plane of 512). The part count targets 384 waves of
+  partial-pass threads with at least 16 input blocks per part (four parts at 6272 outputs, two at
+  12544, seven for a 120-block reduction on a 3920-output plane). ResNet-50's 2048->512 @7x7
+  went 0.165 -> 0.117 ms.
 - **Sliding-window 1-D conv** (`conv_1d`): 1xK/Kx1 kernels (Inception's 7x1/1x7, 3x1/1x3) load the
   input window into registers once per channel-block and reuse it across every overlapping tap;
   joins the bit-exact direct race.

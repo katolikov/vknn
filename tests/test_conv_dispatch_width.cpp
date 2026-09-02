@@ -464,8 +464,9 @@ TEST(ConvDispatchWidth, TileChunkIsSizedToTheMap) {
 }
 
 // The pointwise split-K rule follows the measured boundary: the pair wins only when the output
-// plane has at most kPwSplitKMaxOutputs channel-block pixels and the reduction is at least
-// kPwSplitKMinCin deep, and the part count targets kPwSplitKTargetThreads partial-pass threads.
+// plane has at most kPwSplitKMaxOutputs channel-block pixels and at most
+// kPwSplitKOutputsPerInputBlock of them per input channel-block, and the part count follows the
+// partial-pass thread target bounded by kPwSplitKMinBlocksPerPart blocks per part.
 TEST(ConvDispatchWidth, PointwiseSplitKFollowsTheMeasuredBoundary) {
     constexpr int kAuto = 0;
     // 2048->512 @7x7 and 1024->512 @7x7: 6272 outputs, four parts.
@@ -478,19 +479,31 @@ TEST(ConvDispatchWidth, PointwiseSplitKFollowsTheMeasuredBoundary) {
     EXPECT_EQ(pwSplitKParts(256, 64, 196), 2);
     EXPECT_TRUE(pwSplitKActive(true, 1, 2048, 256, 49, kAuto));
     EXPECT_EQ(pwSplitKParts(512, 256, 49), 2);
-    // 512->2048 @7x7 and 1024->512 @14x14: 25088 outputs, the register-tiled kernel wins.
+    // Shallow reductions on small planes: 480->80 @14x14 splits seven ways (120 blocks, 16 per
+    // part), 240->80 @14x14 three ways, 128->64 @14x14 two ways, a 480->20 squeeze seven ways.
+    EXPECT_TRUE(pwSplitKActive(true, 1, 480, 20, 196, kAuto));
+    EXPECT_EQ(pwSplitKParts(120, 20, 196), 7);
+    EXPECT_TRUE(pwSplitKActive(true, 1, 240, 20, 196, kAuto));
+    EXPECT_EQ(pwSplitKParts(60, 20, 196), 3);
+    EXPECT_TRUE(pwSplitKActive(true, 1, 128, 16, 196, kAuto));
+    EXPECT_EQ(pwSplitKParts(32, 16, 196), 2);
+    EXPECT_TRUE(pwSplitKActive(true, 1, 480, 5, 1, kAuto));
+    EXPECT_EQ(pwSplitKParts(120, 5, 1), 7);
+    // Too shallow for the plane: 128->128 @14x14 and 256->256 @14x14 tie, 64->64 @14x14 loses.
+    EXPECT_FALSE(pwSplitKActive(true, 1, 128, 32, 196, kAuto));
+    EXPECT_FALSE(pwSplitKActive(true, 1, 256, 64, 196, kAuto));
+    EXPECT_FALSE(pwSplitKActive(true, 1, 64, 16, 196, kAuto));
+    // Past the output cap the register-tiled kernel wins whatever the depth: 512->2048 @7x7,
+    // 1024->512 @14x14 and @12x12.
     EXPECT_FALSE(pwSplitKActive(true, 1, 512, 512, 49, kAuto));
     EXPECT_FALSE(pwSplitKActive(true, 1, 1024, 128, 196, kAuto));
-    // 1024->512 @12x12: 18432 outputs, still the register-tiled kernel.
     EXPECT_FALSE(pwSplitKActive(true, 1, 1024, 128, 144, kAuto));
-    // 256->256 @14x14: a shallow reduction only ties, so it stays single-pass.
-    EXPECT_FALSE(pwSplitKActive(true, 1, 256, 64, 196, kAuto));
     // Off disables the path; fp32 storage and batches never split.
     EXPECT_FALSE(pwSplitKActive(true, 1, 2048, 128, 49, (int) Mode::Off));
     EXPECT_FALSE(pwSplitKActive(false, 1, 2048, 128, 49, kAuto));
     EXPECT_FALSE(pwSplitKActive(true, 2, 2048, 128, 49, kAuto));
     // Parts never exceed the block count or the cap, and never drop under two.
-    EXPECT_EQ(pwSplitKParts(3, 4, 4), 3);
+    EXPECT_EQ(pwSplitKParts(3, 4, 4), 2);
     EXPECT_EQ(pwSplitKParts(512, 4, 4), kPwSplitKMaxParts);
     EXPECT_EQ(pwSplitKParts(512, 512, 196), kPwSplitKMinParts);
 }
