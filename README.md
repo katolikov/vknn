@@ -406,7 +406,7 @@ pipeline) and **Neural brain** (a drill-down explorer of the engine's class grap
 - [AGENTS.md](AGENTS.md) + [skills/](skills/) — orientation and focused how-to guides.
 
 Runnable examples live in [`examples/`](examples/): `readme_quickstart` (load-set-run-read),
-`zerocopy_simple` / `zerocopy_cache` and `dmabuf_fd_io` (caller-owned DMA-BUF I/O), `run_io` (generic
+`zerocopy_simple` / `zerocopy_cache` and `dmabuf_fd_io` (caller-owned DMA-BUF I/O), `zerocopy_bench` (host-mode vs zero-copy wall per run on one model), `run_io` (generic
 multi-I/O), `classify` / `predict` / `predict_cache` (CNN classifiers), `probe` (Vulkan device/feature report), `backend_switch` (per-backend routing), `op_check` (kernel + pipeline-cache smoke test), `profile` (per-op timings + chrome trace), `chat` / `vlm` (LLM and VLM device loops), and
 `yonosplat` (the transformer encoder + rasterizer). [`app-demo/`](app-demo/) wraps the LLM, VLM, and
 splatting paths in a four-tab Android app.

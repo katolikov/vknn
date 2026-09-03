@@ -444,7 +444,7 @@ if(VKNN_BUILD_EXAMPLES)
   if(NOT WIN32)
     # The dma-buf zero-copy demos drive Linux kernel interfaces (ioctl/mmap on dma-buf fds),
     # which do not exist on Windows.
-    list(APPEND _vknn_examples io/dmabuf_fd_io io/zerocopy_cache io/zerocopy_simple)
+    list(APPEND _vknn_examples io/dmabuf_fd_io io/zerocopy_bench io/zerocopy_cache io/zerocopy_simple)
   endif()
   if(VKNN_ENABLE_VULKAN)
     # microbench drives Vulkan kernels directly (includes vk_context.h), so it needs the backend.

@@ -594,4 +594,4 @@ on the whole-archive link of the static lib:
 | Vulkan backend | `src/backend/vulkan/` (`vk_backend.cpp`, `vk_context`, `vk_buffer`, `vk_command`, `vk_pipeline`, `ops/` — one `.cpp` per operator (Transpose and Slice share one)) |
 | CPU backend | `src/backend/cpu/` (`cpu_backend.cpp`, `ops/` — one file per operator) |
 | Shaders | `shaders/` (compiled by the vendored glslang — `third_party/glslang` — or a system `glslc` fallback, embedded via `tools/embed_spirv.py`) |
-| Examples | `examples/` (`basics/` — `probe`, `backend_switch`, `op_check`, `readme_quickstart`; `vision/` — `classify`, `predict`, `predict_cache`, `image_bench`; `bench/` — `profile`, `microbench`; `io/` — `run_io`, `dmabuf_fd_io`, `zerocopy_simple`, `zerocopy_cache`; `llm/` — `chat`, `vlm`; `splatting/` — `yonosplat`) |
+| Examples | `examples/` (`basics/` — `probe`, `backend_switch`, `op_check`, `readme_quickstart`; `vision/` — `classify`, `predict`, `predict_cache`, `image_bench`; `bench/` — `profile`, `microbench`; `io/` — `run_io`, `dmabuf_fd_io`, `zerocopy_simple`, `zerocopy_cache`, `zerocopy_bench`; `llm/` — `chat`, `vlm`; `splatting/` — `yonosplat`) |
