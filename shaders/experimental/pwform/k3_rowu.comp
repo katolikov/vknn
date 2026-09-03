@@ -1,0 +1,135 @@
+#version 450
+// 3x3 row probe with a 2-D workgroup footprint (TX_PER_WG column tiles x 64/TX_PER_WG rows), the
+// block group inside the footprint. Variants (microbench-only, never built by CMake):
+//   WGU=1  decode the footprint from gl_WorkGroupID (the block group is then provably wave-uniform,
+//          so the weight loads can take the scalar path) instead of from the flat gid.
+//   WLDS=1 stage the workgroup's weight slice ([OCB_BLK][Cinb][9 taps][4 ic] vec4) in shared memory.
+//   FORM   2 = outer-product fp32 accumulate (production), 3 = the same in packed fp16.
+//   W16=1  read each tap's four weight vec4 (32 contiguous bytes) as two uvec4 loads and unpack.
+#include "k3_head.glsl"
+#ifndef FORM
+#define FORM 2
+#endif
+#if FORM == 2
+#define ACC vec4
+#define LD(x) vec4(x)
+#else
+#define ACC f16vec4
+#define LD(x) (x)
+#endif
+#ifndef TX_PER_WG
+#define TX_PER_WG 16
+#endif
+#define ROWS_PER_WG (64 / TX_PER_WG)
+#ifndef WGU
+#define WGU 1
+#endif
+#ifndef WLDS
+#define WLDS 0
+#endif
+#ifndef W16
+#define W16 0
+#endif
+// Decomposition switches (timing only, wrong results): NOWT=1 weights are compile-time constants,
+// NOIN=1 the input window is compile-time constants, NOFMA=1 the loads feed a plain add instead.
+#ifndef NOWT
+#define NOWT 0
+#endif
+#ifndef NOIN
+#define NOIN 0
+#endif
+#ifndef NOFMA
+#define NOFMA 0
+#endif
+#if W16
+layout(std430, binding = 1) readonly buffer WtQ { uvec4 wtq[]; };
+#define UNPACK4(u) vec4(unpackHalf2x16((u).x), unpackHalf2x16((u).y))
+#endif
+#define TAPS 9
+#define WSLICE_PER_BLOCK (TAPS * 4)
+#if WLDS
+#ifndef WLDS_MAX_CINB
+#define WLDS_MAX_CINB 16
+#endif
+shared f16vec4 sW[OCB_BLK * WLDS_MAX_CINB * WSLICE_PER_BLOCK];
+#endif
+void main() {
+  int Cinb = (pc.Cin + 3) / 4, Coutb = (pc.Cout + 3) / 4, HW = pc.OH * pc.OW;
+  int nTX = (pc.OW + PTILE - 1) / PTILE, ocbGroups = (Coutb + OCB_BLK - 1) / OCB_BLK;
+  int nTXg = (nTX + TX_PER_WG - 1) / TX_PER_WG;
+  int nOYg = (pc.OH + ROWS_PER_WG - 1) / ROWS_PER_WG;
+#if WGU
+  int grp = int(gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x);
+  int lane = int(gl_LocalInvocationID.x);
+#else
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  int lane = int(gid) % 64, grp = int(gid) / 64;
+#endif
+  int tx = (grp % nTXg) * TX_PER_WG + lane % TX_PER_WG;
+  int ocbg = (grp / nTXg) % ocbGroups;
+  int oy = ((grp / (nTXg * ocbGroups)) % nOYg) * ROWS_PER_WG + lane / TX_PER_WG;
+  int n = grp / (nTXg * ocbGroups * nOYg);
+  int ocb0 = ocbg * OCB_BLK;
+#if WLDS
+  {
+    int perBlock = Cinb * WSLICE_PER_BLOCK, cnt = OCB_BLK * perBlock;
+    for (int i = lane; i < cnt; i += 64) {
+      int j = i / perBlock, rem = i % perBlock;
+      sW[i] = wt[min(ocb0 + j, Coutb - 1) * perBlock + rem];
+    }
+  }
+  barrier();
+#endif
+  if (tx >= nTX || oy >= pc.OH || n >= pc.N) return;
+  int ox0 = tx * PTILE, ixBase = ox0 * STRIDE - pc.PL;
+  ACC acc[PTILE][OCB_BLK];
+  for (int j = 0; j < OCB_BLK; ++j) { ACC b = (ocb0 + j < Coutb) ? LD(bias[ocb0 + j]) : ACC(0.0); for (int p = 0; p < PTILE; ++p) acc[p][j] = b; }
+  for (int icb = 0; icb < Cinb; ++icb) {
+    int sb = (n * Cinb + icb) * pc.H * pc.W;
+    for (int ky = 0; ky < 3; ++ky) {
+      int iy = oy * pc.SH - pc.PT + ky; bool rowOk = uint(iy) < uint(pc.H); int rowOff = sb + iy * pc.W;
+      ACC row[SEG]; bool colOk[SEG];
+#if NOIN
+      for (int c = 0; c < SEG; ++c) { colOk[c] = true; row[c] = ACC(vec4(0.5 + 0.125 * float(c), 0.25, 0.75, 1.0)); }
+#else
+      for (int c = 0; c < SEG; ++c) { int ix = ixBase + c; bool ok = rowOk && uint(ix) < uint(pc.W); colOk[c] = ok; row[c] = ok ? LD(src[rowOff + ix]) : ACC(0.0); }
+#endif
+      for (int kx = 0; kx < 3; ++kx) {
+        ACC w[OCB_BLK][4];
+        for (int j = 0; j < OCB_BLK; ++j) {
+#if NOWT
+          w[j][0] = ACC(vec4(0.5, 0.25, 0.125, 1.0) * float(j + 1)); w[j][1] = ACC(vec4(0.75, 0.5, 0.25, 0.125) * float(kx + 1));
+          w[j][2] = ACC(vec4(0.125, 0.75, 0.5, 0.25) * float(ky + 1)); w[j][3] = ACC(vec4(0.25, 0.125, 0.75, 0.5) * float(j + 2));
+#elif WLDS
+          int wb = (j * Cinb + icb) * WSLICE_PER_BLOCK + (ky * 3 + kx) * 4;
+          w[j][0] = LD(sW[wb + 0]); w[j][1] = LD(sW[wb + 1]); w[j][2] = LD(sW[wb + 2]); w[j][3] = LD(sW[wb + 3]);
+#elif W16
+          int wq = ((min(ocb0 + j, Coutb - 1) * Cinb + icb) * TAPS + (ky * 3 + kx)) * 2;
+          uvec4 q0 = wtq[wq + 0], q1 = wtq[wq + 1];
+          w[j][0] = ACC(UNPACK4(q0)); w[j][1] = ACC(vec4(unpackHalf2x16(q0.z), unpackHalf2x16(q0.w)));
+          w[j][2] = ACC(UNPACK4(q1)); w[j][3] = ACC(vec4(unpackHalf2x16(q1.z), unpackHalf2x16(q1.w)));
+#else
+          int wb = ((min(ocb0 + j, Coutb - 1) * Cinb + icb) * TAPS + (ky * 3 + kx)) * 4;
+          w[j][0] = LD(wt[wb + 0]); w[j][1] = LD(wt[wb + 1]); w[j][2] = LD(wt[wb + 2]); w[j][3] = LD(wt[wb + 3]);
+#endif
+        }
+        for (int p = 0; p < PTILE; ++p) {
+          int c = p * STRIDE + kx;
+          if (colOk[c]) {
+            ACC inv = row[c];
+            for (int j = 0; j < OCB_BLK; ++j) {
+#if NOFMA
+              acc[p][j] += inv + w[j][0] + w[j][1] + w[j][2] + w[j][3];
+#else
+              acc[p][j] = fma(ACC(inv.x), w[j][0], acc[p][j]); acc[p][j] = fma(ACC(inv.y), w[j][1], acc[p][j]);
+              acc[p][j] = fma(ACC(inv.z), w[j][2], acc[p][j]); acc[p][j] = fma(ACC(inv.w), w[j][3], acc[p][j]);
+#endif
+            }
+          }
+        }
+      }
+    }
+  }
+  for (int j = 0; j < OCB_BLK; ++j) { if (ocb0 + j >= Coutb) continue; int dbase = (n * Coutb + (ocb0 + j)) * HW;
+    for (int p = 0; p < PTILE; ++p) { int ox = ox0 + p; if (ox < pc.OW) dst[dbase + oy * pc.OW + ox] = TO_STORE4(vec4(acc[p][j])); } }
+}

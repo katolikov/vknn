@@ -525,3 +525,24 @@ TEST(ConvDispatchWidth, PointwiseSplitKFollowsTheMeasuredBoundary) {
     EXPECT_EQ(pwSplitKParts(512, 4, 4), kPwSplitKMaxParts);
     EXPECT_EQ(pwSplitKParts(512, 512, 196), kPwSplitKMinParts);
 }
+
+// The narrow two-pixel row tile the strided race carries: its specialization constants and its
+// workgroup count cover the map exactly like the default tile's, at half the pixels per thread.
+TEST(ConvDispatchWidth, NarrowStridedRowTileCoversTheMap) {
+    constexpr uint32_t kNarrow = 2, kDefault = 4, kStride = 2, kLanes = 64;
+    const uint32_t tilesPerWg = convRowTilesPerWorkgroup(kConvRowFootprintStridedCode, kLanes);
+    for (uint32_t ocb: {2u, 4u})
+    {
+        const std::vector<uint32_t> spec = convRowSpecConstants(ocb, kNarrow, kStride, tilesPerWg, kLanes);
+        EXPECT_EQ(spec[kConvRowOcbSpecIndex], ocb);
+        EXPECT_EQ(spec[kConvRowPixelTileSpecIndex], kNarrow);
+        // 16->32 s2 into 180x240: every (column tile, block group, row block) gets a workgroup.
+        const int64_t ocbGroups = (8 + ocb - 1) / ocb;
+        const int64_t narrow    = convRowWorkgroups(1, ocbGroups, 180, 240, kNarrow, tilesPerWg, kLanes);
+        const int64_t wide      = convRowWorkgroups(1, ocbGroups, 180, 240, kDefault, tilesPerWg, kLanes);
+        const int64_t rowBlocks = (180 + (kLanes / tilesPerWg) - 1) / (kLanes / tilesPerWg);
+        EXPECT_EQ(narrow, ocbGroups * rowBlocks * ((240 / kNarrow + tilesPerWg - 1) / tilesPerWg));
+        EXPECT_EQ(wide, ocbGroups * rowBlocks * ((240 / kDefault + tilesPerWg - 1) / tilesPerWg));
+        EXPECT_GT(narrow, wide);
+    }
+}

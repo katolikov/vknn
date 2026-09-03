@@ -707,6 +707,18 @@ namespace vknn {
             }
             // The wide pixel tile raced alongside the default 4; encoded in the WTILE field.
             static constexpr uint32_t kWtileWide = 8;
+            // The narrow pixel tile raced on strided shapes: a stride-2 row reads (WTILE-1)*2+3
+            // columns per tile, and at two pixels the 5-column segment leaves twice the waves in
+            // flight of the 9-column default. Measured on the primary device: 16->32 s2 @360x480
+            // 0.332 -> 0.278 ms (OCB 4) / 0.291 (OCB 2), 8->16 s2 @720x960 0.378 -> 0.328; at stride
+            // 1 the narrow tile ties or loses, so it is not raced there.
+            static constexpr uint32_t kWtileNarrow = 2;
+            // The pixel tile a row choice carries: the WTILE field, with 0 (a choice cached before the
+            // field existed) meaning the classic default.
+            static constexpr uint32_t rowWtileOf(uint32_t choice) {
+                const uint32_t field = (choice >> kChoiceWtileShift) & (uint32_t) kChoiceTileMask;
+                return field == 0 ? (uint32_t) kConv1x1DefaultWTile : field;
+            }
             // pickOcb results encode conv_reg's tile as OCB | WTILE<<8 (WTILE 0 = the classic 4),
             // with kChoice1D marking the conv_1d kernel at the same OCB/WTILE encoding and
             // kChoiceOcSplit2/4 marking a conv_reg tile whose flat gid range record() splits into
@@ -781,7 +793,7 @@ namespace vknn {
                 {
                     return false; // a stale cached HTILE choice (the raced-and-rejected vertical tile) re-races
                 }
-                return ocb >= 0 && ocb <= 3 && (wt == 0 || wt == 4 || wt == 8);
+                return ocb >= 0 && ocb <= 4 && (wt == 0 || wt == (int) kWtileNarrow || wt == 4 || wt == 8);
             }
             int pickOcb(VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb, bool lds3x3) {
                 // The LDS-halo kernel decodes a flat gl_WorkGroupID.x with no split spill, so its
@@ -1063,6 +1075,13 @@ namespace vknn {
                     // one-row strip. A footprint whose row count does not divide this device's lane
                     // width is skipped rather than dispatched at a width the kernel cannot decode.
                     std::vector<uint32_t> rowCands = {rowChoice(2, kConv1x1DefaultWTile, 0), rowChoice(2, kConv1x1DefaultWTile, 1), rowChoice(2, kWtileWide, 1)};
+                    if (pc.SW > 1 || pc.SH > 1)
+                    {
+                        // Strided shapes also race the narrow tile at two and four blocks per thread,
+                        // at the 4-row footprint the strided default wins with.
+                        rowCands.push_back(rowChoice(2, kWtileNarrow, 0));
+                        rowCands.push_back(rowChoice(4, kWtileNarrow, 0));
+                    }
                     if (env.tuning == Tuning::Heavy)
                     {
                         for (uint32_t cand: {rowChoice(1, kConv1x1DefaultWTile, 0), rowChoice(1, kConv1x1DefaultWTile, 1), rowChoice(1, kWtileWide, 1), rowChoice(2, kConv1x1DefaultWTile, 2)})
@@ -1073,7 +1092,7 @@ namespace vknn {
                     for (uint32_t cand: rowCands)
                     {
                         const uint32_t ocb        = cand & (uint32_t) kChoiceTileMask;
-                        const uint32_t wt         = std::max((uint32_t) kConv1x1DefaultWTile, (cand >> kChoiceWtileShift) & (uint32_t) kChoiceTileMask);
+                        const uint32_t wt         = rowWtileOf(cand);
                         const uint32_t tilesPerWg = convRowTilesPerWorkgroup((cand >> kChoiceFootprintShift) & (uint32_t) kChoiceFootprintMask, laneWidth);
                         if (tilesPerWg == 0)
                         {
@@ -1697,7 +1716,7 @@ namespace vknn {
                             // workgroups of (column-tile block, block group, row block).
                             reg                   = true;
                             const uint32_t regOcb = (uint32_t) (ocb & kChoiceTileMask);
-                            const uint32_t regWt = std::max((uint32_t) kConv1x1DefaultWTile, (uint32_t) (ocb >> kChoiceWtileShift) & (uint32_t) kChoiceTileMask);
+                            const uint32_t regWt = rowWtileOf((uint32_t) ocb);
                             const uint32_t tilesPerWg = convRowTilesPerWorkgroup((uint32_t) (ocb >> kChoiceFootprintShift) & (uint32_t) kChoiceFootprintMask, laneWidth);
                             const int64_t ocbGroups = (Coutb + regOcb - 1) / regOcb;
                             total                   = convRowWorkgroups(x.n, ocbGroups, y.h, y.w, regWt, tilesPerWg, laneWidth) * laneWidth;
