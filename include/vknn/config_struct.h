@@ -119,6 +119,8 @@ namespace vknn {
         /// at each chunk tail keeps results numerically identical. 0 disables this cap.
         /// The default keeps a ~2x margin under the observed corruption point (binding-dense chains only
         /// approach it; a plain-op graph binds far too few to ever split on this).
+        /// Chunks split on this cap stay in ONE vkQueueSubmit (a barrier at each chunk tail orders
+        /// them), so the split costs no host round trip; only maxSubmitNodes chunks submit separately.
         int maxSubmitBindings = 1024;
 
         /// Decode iterations the decode bucket's GPU segment records as ONE command-buffer chain

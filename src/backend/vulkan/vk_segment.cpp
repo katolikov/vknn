@@ -1860,17 +1860,23 @@ namespace vknn {
                 const bool splitBinds = chunkBinds > 0 && bindsSinceSplit >= chunkBinds;
                 if (!queryPool_ && (splitNodes || splitBinds) && k + 1 < nodeIdx.size())
                 {
-                    // Each chunk is its own vkQueueSubmit + fence wait (see run()). The fence is a
-                    // full barrier, so a chunk's writes are complete and visible before the next chunk
-                    // is submitted and buffer reuse stays correct across the boundary. Batching the
-                    // chunks into one submit and ordering them with a vkCmdPipelineBarrier at the
-                    // chunk tail is faster but unsafe: a submit spanning several chunks runs long
-                    // enough for the driver to reset it and zero the tail (the watchdog the chunking
-                    // exists to avoid), so a heavily-chunked model then produces nondeterministic
-                    // output. Keeping chunks as separate submits keeps every submit short.
+                    // A chunk split for the watchdog is its own vkQueueSubmit + fence wait (see
+                    // run()): a submit spanning several such chunks runs long enough for the driver
+                    // to reset it and zero the tail, so a heavily-chunked model would produce
+                    // nondeterministic output. A chunk split only for the per-command-buffer
+                    // descriptor cap is short, so it stays in the same submit as its successor: the
+                    // barrier at its tail makes its writes visible to the next command buffer of the
+                    // batch, and the fence round trip between them (submit latency plus the host
+                    // wake-up, ~1 ms on the release device) is saved.
+                    const bool endsSubmit = splitNodes;
+                    if (!endsSubmit)
+                    {
+                        vk::transferBarrier(*env_.ctx, cmd_);
+                    }
                     chunkTsEnd();
                     be_->runner().end(cmd_);
                     cmds_.push_back(cmd_);
+                    chunkEndsSubmit_.push_back(endsSubmit);
                     cmd_ = be_->runner().allocate();
                     be_->runner().begin(cmd_);
                     chunkTsBegin();
@@ -1922,6 +1928,7 @@ namespace vknn {
                 chunkTsEnd();
                 be_->runner().end(cmd_);
                 cmds_.push_back(cmd_);
+                chunkEndsSubmit_.push_back(true); // a run may stop at this iteration: the prefix must end a submit
                 cmd_ = be_->runner().allocate();
                 be_->runner().begin(cmd_);
                 chunkTsBegin();
@@ -1953,6 +1960,7 @@ namespace vknn {
         chunkTsEnd();
         be_->runner().end(cmd_);
         cmds_.push_back(cmd_);
+        chunkEndsSubmit_.push_back(true);
         timedChunks_     = timedChunk;
         recorded_        = true;
         recordedConvert_ = convert_;
@@ -2159,11 +2167,12 @@ namespace vknn {
                     }
                     // Every case the download path handles some other way keeps that way: a
                     // zero-copy fd, a resident link, an on-device argmax, a row-sliced readback (it
-                    // wants ONE row, not the converted whole), an int8 KV cache, and the NC4HW4
-                    // outputs, which do not take the flat download branch this replaces.
+                    // wants ONE row, not the converted whole) and an int8 KV cache. An NC4HW4
+                    // output converts the same way (boundary_convert reads the blocked layout and
+                    // writes NCHW), replacing the host unpackNc4 gather with the memcpy.
                     RtTensor &rt = ctx.t(tid);
                     if (rt.dmaBufFd >= 0 || convert_.count(tid) || linkedOutputs_.count(tid) || argMaxOutputs_.count(tid) || rowSelectOutputs_.count(tid) ||
-                        kvqCaches_.count(tid) || !g_.desc(tid).gpuFlat)
+                        kvqCaches_.count(tid))
                     {
                         continue;
                     }
@@ -2225,6 +2234,8 @@ namespace vknn {
                 {
                     vkFreeCommandBuffers(be_->ctx().device(), be_->runner().pool(), (uint32_t) cmds_.size(), cmds_.data());
                     cmds_.clear();
+                    chunkEndsSubmit_.clear();
+                    submitWallMs_.clear();
                 }
                 record();
             }
@@ -2346,11 +2357,25 @@ namespace vknn {
         double         submitCalls  = 0;
         const uint32_t submitChunks = chunksForActiveSteps();
         double         wall         = 0;
-        for (uint32_t ci = 0; ci < submitChunks; ++ci)
+        // Consecutive chunks up to one that ends a submit (a watchdog split, an iteration boundary,
+        // the last chunk) go out as one vkQueueSubmit. Each submit's previous wall predicts this
+        // one for the pre-wake fence wait (vk_fence_wait_policy.h).
+        submitWallMs_.resize(cmds_.size(), 0.0);
+        for (uint32_t ci = 0; ci < submitChunks;)
         {
-            double sc = 0;
-            wall += be_->runner().submitAndWait(cmds_[ci], summarize ? &sc : nullptr);
+            uint32_t count = 1;
+            while (ci + count < submitChunks && !chunkEndsSubmit_[ci + count - 1])
+            {
+                ++count;
+            }
+            double       sc        = 0;
+            const double predicted = submitWallMs_[ci];
+            const double thisWall  = count == 1 ? be_->runner().submitAndWait(cmds_[ci], summarize ? &sc : nullptr, predicted)
+                                                : be_->runner().submitBatchAndWait(&cmds_[ci], count, summarize ? &sc : nullptr, predicted);
+            submitWallMs_[ci] = thisWall;
+            wall += thisWall;
             submitCalls += sc;
+            ci += count;
         }
         auto t2 = now();
 
@@ -2414,6 +2439,7 @@ namespace vknn {
                     // memory rather than a per-element read of the device mapping.
                     const int64_t n = numElements(rt.shape);
                     rt.host.resizeElems(n, DType::Float32);
+                    sout->second->invalidateForRead();
                     std::memcpy(rt.host.bytes.data(), sout->second->host(), std::min(sout->second->bytes(), rt.host.bytes.size()));
                     rt.dtype = DType::Float32;
                 } else if (flat && graphOut.count(tid))

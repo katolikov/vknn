@@ -63,7 +63,9 @@ namespace vknn {
         // re-digesting host bytes the first upload already released.
         std::map<TensorId, std::weak_ptr<vk::Buffer>> flatWeightByTensor_;
         VkCommandBuffer                               cmd_ = VK_NULL_HANDLE;
-        std::vector<VkCommandBuffer> cmds_; // chunked submits (one entry unless the segment is split for the GPU watchdog; see Config::maxSubmitNodes)
+        std::vector<VkCommandBuffer> cmds_; // chunked command buffers (one entry unless the segment is split; see Config::maxSubmitNodes / maxSubmitBindings)
+        std::vector<bool>            chunkEndsSubmit_; // per cmds_ entry: true when the next chunk must start a new vkQueueSubmit (watchdog split, iteration boundary, last chunk)
+        std::vector<double>          submitWallMs_;    // per submit (indexed by its first chunk): the previous run's wall, the pre-wake fence wait's prediction
         VkQueryPool                  queryPool_ = VK_NULL_HANDLE;
         bool                         recorded_  = false;
         // Config::timingSummary state: the chunk-timestamp pool, how many chunks carry a query

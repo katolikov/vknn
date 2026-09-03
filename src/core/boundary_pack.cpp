@@ -17,6 +17,8 @@ namespace vknn { namespace boundary {
     // splitting the range costs more in pool wake-up and little-core stragglers than the work itself
     // (2-5x slower at 1.4M elements). They run on the calling thread; `threads` stays in the signature
     // for symmetry with the NC4 siblings, which gather strided channel planes and are not bus-bound.
+    // The same holds for the staged boundary memcpys in vk_segment.cpp: a pool-partitioned copy of an
+    // 11 MB input measured 0.49 -> 0.78 ms (best run) on the release device.
     void packFlatFp16(const float *src, fp16_t *dst, int64_t elems, int threads) {
         (void) threads;
         // Saturating: a value beyond +/-65504 packs as the max finite fp16, never as +/-inf.

@@ -46,16 +46,19 @@ namespace vknn { namespace vk {
         void            end(VkCommandBuffer cmd);
         /// Submit a pre-recorded buffer and wait on the fence. @returns wall time in ms.
         /// When `submitCallMs` is non-null it receives the vkQueueSubmit call's own wall share,
-        /// so the caller can split queue-submission cost from the fence wait.
-        double submitAndWait(VkCommandBuffer cmd, double *submitCallMs = nullptr);
+        /// so the caller can split queue-submission cost from the fence wait. `predictedMs` is the
+        /// expected wall of this submission (its previous run; 0 = unknown) and drives the pre-wake
+        /// fence wait (vk_fence_wait_policy.h): sleep until shortly before it, then poll.
+        double submitAndWait(VkCommandBuffer cmd, double *submitCallMs = nullptr, double predictedMs = 0.0);
 
         /// Submit `count` pre-recorded buffers as one vkQueueSubmit (one batch each, in order) and
         /// wait once on the fence. The GPU consumes the batches back-to-back with no host round
         /// trip between them; ordering/visibility across buffers is the CALLER's contract (each
         /// buffer must end with a barrier covering the next one's reads). @returns wall time in ms.
-        /// Unused by the engine: a single submit spanning watchdog chunks can run long enough for
-        /// the driver to reset it and zero the tail, so segments submit per-chunk via submitAndWait.
-        double submitBatchAndWait(const VkCommandBuffer *cmds, uint32_t count, double *submitCallMs = nullptr);
+        /// A segment batches the chunks it split only for the per-command-buffer descriptor cap
+        /// (Config::maxSubmitBindings); chunks split for the GPU watchdog stay separate submits,
+        /// since a single submit spanning them can run long enough for the driver to reset it.
+        double submitBatchAndWait(const VkCommandBuffer *cmds, uint32_t count, double *submitCallMs = nullptr, double predictedMs = 0.0);
 
         VkCommandPool pool() const noexcept {
             return pool_;
@@ -65,6 +68,8 @@ namespace vknn { namespace vk {
         VulkanContext &ctx_;
         VkCommandPool  pool_  = VK_NULL_HANDLE;
         VkFence        fence_ = VK_NULL_HANDLE;
+        /// Await fence_ under the pre-wake policy (vk_fence_wait_policy.h).
+        void waitFence(double predictedMs);
     };
 
 }} // namespace vknn::vk

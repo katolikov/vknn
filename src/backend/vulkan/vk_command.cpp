@@ -1,4 +1,5 @@
 #include "vk_command.h"
+#include "vk_fence_wait_policy.h"
 #include <chrono>
 #include <mutex>
 
@@ -128,7 +129,36 @@ namespace vknn { namespace vk {
         VK_CHECK(vkEndCommandBuffer(cmd));
     }
 
-    double CommandRunner::submitAndWait(VkCommandBuffer cmd, double *submitCallMs) {
+    void CommandRunner::waitFence(double predictedMs) {
+        const double sleepMs = fencePreWakeSleepMs(predictedMs);
+        if (sleepMs > 0.0)
+        {
+            const VkResult slept = vkWaitForFences(ctx_.device(), 1, &fence_, VK_TRUE, fenceTimeoutNs(sleepMs));
+            if (slept == VK_SUCCESS)
+            {
+                return;
+            }
+            if (slept != VK_TIMEOUT)
+            {
+                VK_CHECK(slept);
+            }
+        }
+        const auto pollDeadline = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double, std::milli>(fencePollBudgetMs(predictedMs)));
+        while (std::chrono::steady_clock::now() < pollDeadline)
+        {
+            const VkResult status = vkGetFenceStatus(ctx_.device(), fence_);
+            if (status == VK_SUCCESS)
+            {
+                return;
+            }
+            if (status != VK_NOT_READY)
+            {
+                VK_CHECK(status);
+            }
+        }
+        VK_CHECK(vkWaitForFences(ctx_.device(), 1, &fence_, VK_TRUE, kFenceWaitForever));
+    }
+    double CommandRunner::submitAndWait(VkCommandBuffer cmd, double *submitCallMs, double predictedMs) {
         VK_CHECK(vkResetFences(ctx_.device(), 1, &fence_));
         VkSubmitInfo si {VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
@@ -142,7 +172,7 @@ namespace vknn { namespace vk {
             VK_CHECK(vkQueueSubmit(ctx_.computeQueue(), 1, &si, fence_));
         }
         auto tSubmitted = std::chrono::high_resolution_clock::now();
-        VK_CHECK(vkWaitForFences(ctx_.device(), 1, &fence_, VK_TRUE, kFenceWaitForever));
+        waitFence(predictedMs);
         auto t1 = std::chrono::high_resolution_clock::now();
         if (submitCallMs)
         {
@@ -151,7 +181,7 @@ namespace vknn { namespace vk {
         return std::chrono::duration<double, std::milli>(t1 - t0).count();
     }
 
-    double CommandRunner::submitBatchAndWait(const VkCommandBuffer *cmds, uint32_t count, double *submitCallMs) {
+    double CommandRunner::submitBatchAndWait(const VkCommandBuffer *cmds, uint32_t count, double *submitCallMs, double predictedMs) {
         VK_CHECK(vkResetFences(ctx_.device(), 1, &fence_));
         std::vector<VkSubmitInfo> infos(count, VkSubmitInfo {VK_STRUCTURE_TYPE_SUBMIT_INFO});
         for (uint32_t i = 0; i < count; ++i)
@@ -166,7 +196,7 @@ namespace vknn { namespace vk {
             VK_CHECK(vkQueueSubmit(ctx_.computeQueue(), count, infos.data(), fence_));
         }
         auto tSubmitted = std::chrono::high_resolution_clock::now();
-        VK_CHECK(vkWaitForFences(ctx_.device(), 1, &fence_, VK_TRUE, kFenceWaitForever));
+        waitFence(predictedMs);
         auto t1 = std::chrono::high_resolution_clock::now();
         if (submitCallMs)
         {
