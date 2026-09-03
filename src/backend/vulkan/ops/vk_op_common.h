@@ -22,6 +22,11 @@ namespace vknn {
         // pipeline's push range may exceed the shader's block). 76 bytes total, well under the
         // 128-byte guaranteed push-constant minimum.
         int gidBase;
+        // Input-affine prologue (core/input_affine.h, shaders/input_affine.glsl): the unit's flag
+        // bits, its activation code and bounds. Declared only by the _pro kernel variants; 92 bytes
+        // total with the fields above.
+        int   proFlags = 0, proAct = 0;
+        float proLo = 0.f, proHi = 0.f;
     };
     struct DwPC {
         // pad0 is a reserved slot present in dwconv.comp's push_constant block too: it pads the int run
@@ -52,6 +57,9 @@ namespace vknn {
     // Split-K 1x1 conv (for deep, small-spatial convs that otherwise have too few threads).
     struct SplitKPC {
         int Cin, Cout, HW, KPARTS, chunk;
+        // Input-affine prologue tail (core/input_affine.h), declared by conv1x1_splitk's _pro variant only.
+        int   proFlags = 0, proAct = 0;
+        float proLo = 0.f, proHi = 0.f;
     };
     // Split-K general direct conv (conv_splitk.comp): same partial/reduce scheme with the full
     // KxK/stride/pad/dilation geometry.

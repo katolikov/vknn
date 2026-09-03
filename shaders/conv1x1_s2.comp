@@ -9,6 +9,11 @@
 #define PW_EPI_BASE 5
 #include "pw_epilogue.glsl"
 #endif
+#ifdef PW_PRO
+#define PRO_BASE 5
+#define PRO_VEC vec4
+#include "input_affine.glsl"
+#endif
 layout(constant_id = 0) const int HAS_RES = 0;  // fused residual add (out = act(conv + res))
 layout(constant_id = 1) const int WTILE = 4;    // output pixels per thread (autotuned per shape)
 layout(constant_id = 2) const int OCB = 1;      // output channel-blocks per thread (autotuned per shape)
@@ -21,6 +26,11 @@ layout(std430, binding = 4) readonly buffer Res { vec4 res[]; };
 layout(push_constant) uniform PC {
   int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
   float actLo, actHi;
+#ifdef PW_PRO
+  int gidBase;          // conv_reg's slice base; declared here only to place the prologue fields
+  int proFlags, proAct; // input-affine prologue (input_affine.glsl): flags and activation
+  float proLo, proHi;
+#endif
 }
 pc;
 
@@ -64,6 +74,9 @@ void main() {
     int wrow = ocb * 4 * Cinb;
     int sbaseN = n * Cinb * IHW;
     for (int icb = 0; icb < Cinb; ++icb) {
+#ifdef PW_PRO
+      vec4 proS = proScaleOf(pc.proFlags, n, icb, Cinb), proB = proShiftOf(pc.proFlags, n, icb, Cinb);
+#endif
       vec4 w0 = wt[wrow + icb * 4 + 0];
       vec4 w1 = wt[wrow + icb * 4 + 1];
       vec4 w2 = wt[wrow + icb * 4 + 2];
@@ -74,6 +87,9 @@ void main() {
         int oh = opix / pc.OW, ow = opix % pc.OW;
         int ipix = (oh * pc.SH) * pc.W + (ow * pc.SW);
         vec4 inv = src[sbase + ipix];
+#ifdef PW_PRO
+        inv = proApply(inv, proS, proB, pc.proFlags, pc.proAct, pc.proLo, pc.proHi);
+#endif
         acc[p] = fma(vec4(inv.x), w0, acc[p]);
         acc[p] = fma(vec4(inv.y), w1, acc[p]);
         acc[p] = fma(vec4(inv.z), w2, acc[p]);
@@ -125,6 +141,9 @@ void main() {
 
   int sbaseN = n * Cinb * IHW;
   for (int icb = 0; icb < Cinb; ++icb) {
+#ifdef PW_PRO
+    vec4 proS = proScaleOf(pc.proFlags, n, icb, Cinb), proB = proShiftOf(pc.proFlags, n, icb, Cinb);
+#endif
     int sbase = sbaseN + icb * IHW;
     for (int j = 0; j < OCB; ++j) {
       vec4 w0 = wt[wrowj[j] + icb * 4 + 0];
@@ -136,6 +155,9 @@ void main() {
         int oh = opix / pc.OW, ow = opix % pc.OW;
         int ipix = (oh * pc.SH) * pc.W + (ow * pc.SW);
         vec4 inv = src[sbase + ipix];
+#ifdef PW_PRO
+        inv = proApply(inv, proS, proB, pc.proFlags, pc.proAct, pc.proLo, pc.proHi);
+#endif
         acc[j][p] = fma(vec4(inv.x), w0, acc[j][p]);
         acc[j][p] = fma(vec4(inv.y), w1, acc[j][p]);
         acc[j][p] = fma(vec4(inv.z), w2, acc[j][p]);

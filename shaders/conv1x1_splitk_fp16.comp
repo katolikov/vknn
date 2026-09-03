@@ -8,11 +8,22 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #include "store16.glsl"
 #include "common.glsl"
+#ifdef PW_PRO
+#define PRO_BASE 3
+#define PRO_VEC f16vec4
+#include "input_affine.glsl"
+#endif
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
 layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
 layout(std430, binding = 2) writeonly buffer Part { vec4 part[]; }; // fp32 partials (each is a full Cin-slice sum)
-layout(push_constant) uniform PC { int Cin, Cout, HW, KPARTS, chunk; } pc;
+layout(push_constant) uniform PC {
+  int Cin, Cout, HW, KPARTS, chunk;
+#ifdef PW_PRO
+  int proFlags, proAct; // input-affine prologue (input_affine.glsl)
+  float proLo, proHi;
+#endif
+} pc;
 
 void main() {
   int Cinb = (pc.Cin + 3) / 4;
@@ -28,7 +39,13 @@ void main() {
   int wrow = ocb * 4 * Cinb;
   vec4 acc = vec4(0.0);
   for (int icb = istart; icb < iend; ++icb) {
+#ifdef PW_PRO
+    vec4 proS = proScaleOf(pc.proFlags, 0, icb, Cinb), proB = proShiftOf(pc.proFlags, 0, icb, Cinb);
+#endif
     vec4 inv = vec4(src[icb * pc.HW + pix]);
+#ifdef PW_PRO
+    inv = proApply(inv, proS, proB, pc.proFlags, pc.proAct, pc.proLo, pc.proHi);
+#endif
     acc = fma(vec4(inv.x), vec4(wt[wrow + icb * 4 + 0]), acc);
     acc = fma(vec4(inv.y), vec4(wt[wrow + icb * 4 + 1]), acc);
     acc = fma(vec4(inv.z), vec4(wt[wrow + icb * 4 + 2]), acc);

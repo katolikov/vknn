@@ -5,6 +5,7 @@
 #include "backend/vulkan/vk_tune_model.h"
 #include "backend/vulkan/vk_tune_race.h"
 #include "flat_ops.h"
+#include "core/input_affine.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
 #include "vknn/logging.h"
@@ -143,12 +144,59 @@ namespace vknn {
                 return quad;
             }
 
+            // A unit the pass recognised as a per-channel affine plus activation (pw_affine_* attrs,
+            // core/input_affine.h) runs on the vec4-per-thread input_affine kernel with one scale /
+            // shift pair hoisted per channel-block instead of the per-element VM interpreter: the
+            // same result under the relaxed rounding discipline at the memory stream rate.
+            struct Affine {
+                bool                                 active = false;
+                TensorId                             scale = kNoTensor, shift = kNoTensor;
+                std::shared_ptr<vk::Buffer>          scaleHold, shiftHold;
+                std::shared_ptr<vk::ComputePipeline> pipe;
+                struct PC {
+                    int   N, Cinb, HW, flags, act;
+                    float lo, hi;
+                } pc {};
+                int64_t vec4s = 0;
+            } affine;
+            static constexpr uint32_t kAffineLocalSize = 64; // local_size_x of shaders/input_affine*.comp
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g = *env.graph;
                 flat           = opIsFlat(node, env);
                 Shape out      = g.desc(node.outputs[0]).shape;
-
-                PwPlanCPU plan {};
+                affine         = Affine {};
+                if (!flat && node.attr.has("pw_affine_act") && out.size() >= 2 && node.outputs.size() == 1)
+                {
+                    const int64_t scaleIdx = node.attr.geti("pw_affine_scale", -1), shiftIdx = node.attr.geti("pw_affine_shift", -1);
+                    int64_t       hw       = 1;
+                    for (size_t d = 2; d < out.size(); ++d)
+                    {
+                        hw *= out[d];
+                    }
+                    const int64_t cinb  = cBlocks(out[1]);
+                    int           flags = 0;
+                    if (scaleIdx >= 0 && (size_t) scaleIdx < node.inputs.size())
+                    {
+                        affine.scale = node.inputs[(size_t) scaleIdx];
+                        flags |= kInputAffineHasScale;
+                        if (g.desc(affine.scale).shape.size() == 4 && g.desc(affine.scale).shape[0] == out[0] && out[0] > 1)
+                        {
+                            flags |= kInputAffineBatched;
+                        }
+                    }
+                    if (shiftIdx >= 0 && (size_t) shiftIdx < node.inputs.size())
+                    {
+                        affine.shift = node.inputs[(size_t) shiftIdx];
+                        flags |= kInputAffineHasShift;
+                    }
+                    affine.active = true;
+                    affine.vec4s  = out[0] * cinb * hw;
+                    affine.pc     = {(int) out[0], (int) cinb, (int) hw, flags, (int) node.attr.geti("pw_affine_act", 0), node.attr.getf("pw_affine_lo", 0.f), node.attr.getf("pw_affine_hi", 0.f)};
+                    affine.pipe   = env.pipeline(shader("input_affine", env.useFp16), 4, sizeof(Affine::PC), std::vector<uint32_t> {});
+                    VKNN_DEBUG << "FusedPointwise '" << node.name << "': channel affine + activation on the input_affine kernel, " << affine.vec4s << " vec4";
+                    return;
+                }
+PwPlanCPU plan {};
                 buildPwPlan(g, node, flat, out, plan, operands, total);
                 holds.assign(operands.size(), nullptr);
 
@@ -202,6 +250,14 @@ namespace vknn {
                 // `dst` as a harmless placeholder: the plan never references them, so the kernel
                 // never reads (or writes) them.
                 vk::Buffer           *dst = env.devBuf(node.outputs[0]);
+                if (affine.active)
+                {
+                    std::vector<VkBuffer> ab = {env.devBuf(node.inputs[0])->handle(), dst->handle(),
+                                                affine.scale != kNoTensor ? pwOperandBuf(env, affine.scale, affine.scaleHold, false)->handle() : dst->handle(),
+                                                affine.shift != kNoTensor ? pwOperandBuf(env, affine.shift, affine.shiftHold, false)->handle() : dst->handle()};
+                    affine.pipe->dispatch(cmd, ab, &affine.pc, sizeof(affine.pc), groups(affine.vec4s, kAffineLocalSize));
+                    return;
+                }
                 std::vector<VkBuffer> bufs;
                 bufs.push_back(env.devBuf(node.inputs[0])->handle());
                 bufs.push_back(dst->handle());

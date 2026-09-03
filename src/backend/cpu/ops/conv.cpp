@@ -4,6 +4,7 @@
 #include "backend/cpu/cpu_backend.h"
 #include "backend/cpu/parallel.h"
 #include "core/conv_geom.h"
+#include "core/input_affine.h"
 
 namespace vknn {
     namespace {
@@ -62,7 +63,37 @@ namespace vknn {
                 // kw == 1 so outW == 1): the output keeps the input's rank, mirroring inferShapes.
                 const bool   oneD = X.shape.size() == 3 && outW == 1;
                 float       *y    = cpu::allocOut(Y, oneD ? Shape {x.n, outC, outH} : Shape {x.n, outC, outH, outW});
-                const float *xd   = X.host.f32();
+                // Input-affine prologue (core/input_affine.h): the conv reads the transformed
+                // input, with the same per-step storage rounding the standalone unit would apply.
+                std::vector<float> xPro;
+                const float       *xd = X.host.f32();
+                if (inputAffineActive(node))
+                {
+                    const int64_t scaleIdx = node.attr.geti("pro_scale", -1), shiftIdx = node.attr.geti("pro_shift", -1);
+                    const float  *sd       = scaleIdx >= 0 ? ctx.t(node.inputs[(size_t) scaleIdx]).host.f32() : nullptr;
+                    const float  *bdp      = shiftIdx >= 0 ? ctx.t(node.inputs[(size_t) shiftIdx]).host.f32() : nullptr;
+                    const bool    batched  = (scaleIdx >= 0 && ctx.t(node.inputs[(size_t) scaleIdx]).shape[0] == x.n) || (shiftIdx >= 0 && ctx.t(node.inputs[(size_t) shiftIdx]).shape[0] == x.n);
+                    const auto    proAct   = (ActType) node.attr.geti("pro_act", 0);
+                    const float   proLo = node.attr.getf("pro_act_lo", 0.f), proHi = node.attr.getf("pro_act_hi", 0.f);
+                    const int64_t plane = x.h * x.w;
+                    xPro.resize(X.elems());
+                    for (int64_t n = 0; n < x.n; ++n)
+                    {
+                        for (int64_t c = 0; c < x.c; ++c)
+                        {
+                            const int64_t row = (batched && x.n > 1 ? n * x.c : 0) + c;
+                            const float   sc  = sd ? sd[row] : 1.f, sh = bdp ? bdp[row] : 0.f;
+                            const float  *in  = xd + (n * x.c + c) * plane;
+                            float        *out = xPro.data() + (n * x.c + c) * plane;
+                            for (int64_t i = 0; i < plane; ++i)
+                            {
+                                out[i] = in[i] * sc + sh;
+                            }
+                            cpu::applyAct(out, plane, proAct, proLo, proHi);
+                        }
+                    }
+                    xd = xPro.data();
+                }
                 const float *wd   = W.host.f32();
                 const float *bd   = B ? B->host.f32() : nullptr;
 

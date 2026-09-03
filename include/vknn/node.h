@@ -4,6 +4,7 @@
 #include "vknn/attributes.h"
 #include "vknn/op_type.h"
 #include "vknn/tensor_id.h"
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -44,11 +45,21 @@ namespace vknn {
     /// @returns inputs.size() when no chain is fused; otherwise the pw_opbase split point, clamped to
     ///          be non-negative.
     inline size_t pwCoreInputs(const Node &n) {
-        if (!n.attr.has("pw_steps"))
+        const bool chain    = n.attr.has("pw_steps");
+        const bool prologue = n.attr.has("pro_opbase"); // a Conv's input-affine prologue operands (core/input_affine.h)
+        if (!chain && !prologue)
         {
             return n.inputs.size();
         }
-        int64_t base = n.attr.geti("pw_opbase", (int64_t) n.inputs.size());
+        int64_t base = (int64_t) n.inputs.size();
+        if (chain)
+        {
+            base = std::min<int64_t>(base, n.attr.geti("pw_opbase", base));
+        }
+        if (prologue)
+        {
+            base = std::min<int64_t>(base, n.attr.geti("pro_opbase", base));
+        }
         // Clamp both ends: an out-of-range pw_opbase from a crafted/bit-flipped .vxm must not let a
         // caller iterate n.inputs past its end (e.g. concat's range-ctor) or before its begin.
         base = base < 0 ? 0 : base;

@@ -159,6 +159,24 @@ cosine unchanged, and BETTER on DenseNet-121 (+2.4 dB) and YOLOv8n (+0.9 dB)):
   Kahan-compensated fp32 partials so the two-pass sum tracks the true value tighter than the
   single-pass chain. `setHint(Hint::SplitKConv, Mode::Auto|On|Off)` overrides the rule (Auto is the
   default and the rule is active out of the box); the hint is a cache-variant key field.
+- **Conv input-affine prologue** (`core/input_affine.h`, `shaders/input_affine.glsl`): a pointwise
+  unit whose producer cannot host it - a BatchNorm affine plus ReLU after a zero-copy Concat view
+  (every DenseNet dense-block conv), a squeeze-excite scale on a graph tensor - is applied by its
+  single consumer conv at input load instead of running as a standalone FusedPointwise node that
+  writes the transformed tensor for the conv to read back. The pass attaches a per-channel scale,
+  a per-channel shift and an activation as `pro_*` attributes; conv1x1, its strided and split-K
+  forms, the row-halo, register-tiled and direct kernels fold it inline in a `_pro` variant (one
+  fma and the activation per loaded input vec4, unrounded fp32 straight into the multiplies), and
+  every other conv family applies it through one `input_affine` dispatch into scratch. It is
+  attached only in the pass's relaxed mode, where a fused unit already keeps fewer roundings than
+  the unfused graph (a strictly-rounded graph keeps the standalone unit), and only to a conv of at
+  least nine taps: the prologue runs once per loaded input vec4, which a 3x3 row kernel reuses
+  over 36 x OCB multiplies (DenseNet-121's 3x3 convs 0.131 -> 0.122 ms with their units gone)
+  but a 1x1 kernel over only 4 x OCB, where it ran 1.8-2.2x slower than the unit it replaced, so
+  pointwise consumers keep the standalone unit - which, when it is such an affine, runs on the same
+  vec4-per-thread `input_affine` kernel (one scale / shift pair hoisted per channel-block) instead
+  of the per-element VM interpreter. The sync check
+  (`tools/check_epi_sync.py`) pins the `_pro` surface like the epilogue's.
 - **Lane-split fully-connected heads** (`fc_split`, `core/gemm_dispatch_rules.h`): a Gemm with at
   most 16384 outputs (every classifier head) puts 16 lanes on each output with a fixed-order
   shared-memory reduce instead of one thread per output; a 2048->1000 head that ran 16 waves over

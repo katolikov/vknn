@@ -29,7 +29,7 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 
 | Operator | GPU | CPU | Notes |
 |---|---|---|---|
-| Conv (group=1, depthwise, 1×1 pointwise, general grouped via lowering) | ✅ | ✅ | NC4HW4; direct 3×3, split-K deep 1×1, fused activation + residual-Add + Relu in the epilogue; a general grouped Conv (1 < group < Cin) lowers at import (`lowerGroupedConv`) into group-1 Convs over channel slices + Concat and runs on the same kernels |
+| Conv (group=1, depthwise, 1×1 pointwise, general grouped via lowering) | ✅ | ✅ | NC4HW4; direct 3×3, split-K deep 1×1, fused activation + residual-Add + Relu in the epilogue, an input-affine prologue (per-channel scale/shift + activation applied at input load, `core/input_affine.h`); a general grouped Conv (1 < group < Cin) lowers at import (`lowerGroupedConv`) into group-1 Convs over channel slices + Concat and runs on the same kernels |
 | ConvTranspose | ✅ | ✅ | `auto_pad` + `output_shape` handled (shared `src/core/conv_geom.h` geometry) |
 | GlobalAveragePool | ✅ | ✅ | one workgroup / channel-block, LDS tree-reduce |
 | AvgPool / MaxPool | ✅ | ✅ | windowed |

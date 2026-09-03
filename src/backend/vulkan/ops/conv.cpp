@@ -13,6 +13,7 @@
 #include "core/wino_f63.h"
 #include "flat_ops.h" // flat::kConvFamilyLaneWidth (the family's declared lane-width ceiling)
 #include "pw_plan.h"
+#include "core/input_affine.h"
 #include "pw_splitk_rule.h"
 #include "vk_op_common.h"
 #include "vknn/logging.h"
@@ -140,6 +141,29 @@ namespace vknn {
             int64_t                              ldsGroups      = 0;
             bool                                 pwS2           = false; // strided 1x1 (downsample) on the register-tiled kernel
             bool                                 hasRes         = false; // residual Add fused into the epilogue (out = act(conv + residual))
+            // Input-affine prologue (core/input_affine.h): the unit's scale / shift tensors (an
+            // initializer uploads as one vec4 per channel-block; an activation binds its device
+            // buffer), the kernel flags, and whether the chosen kernel family folds it inline (a
+            // _pro variant) or a standalone input_affine dispatch materializes it into scratch.
+            struct InputAffine {
+                bool                                 active = false, inlineOk = false;
+                std::shared_ptr<vk::Buffer>          scaleInit, shiftInit, scratch;
+                TensorId                             scaleTensor = kNoTensor, shiftTensor = kNoTensor;
+                int                                  flags = 0, act = 0;
+                float                                lo = 0.f, hi = 0.f;
+                std::shared_ptr<vk::ComputePipeline> materialize;
+                int64_t                              inputVec4s = 0;
+                struct PC {
+                    int   N, Cinb, HW, flags, act;
+                    float lo, hi;
+                } pc {};
+                const char *suffix() const {
+                    return active && inlineOk ? "_pro" : "";
+                }
+                uint32_t extraBufs() const {
+                    return active && inlineOk ? 2u : 0u;
+                }
+            } pro;
             int                                  ocSplitParts   = 1;     // conv_reg OC-split: record() replays this many flat-gid slice dispatches
             int64_t                              ocSliceThreads = 0;     // threads per OC-split slice (whole laneWidth workgroups; convOcSplitSliceThreads)
             std::shared_ptr<vk::ComputePipeline> pipe;
@@ -195,7 +219,12 @@ namespace vknn {
                 int64_t chunk  = (Cinb + kparts - 1) / kparts;
                 skPC           = {(int) x.c, (int) Cout, (int) HW, (int) kparts, (int) chunk};
                 prepareSplitKShared(node, env, Cout, Coutb, HW, kparts);
-                skPipe = env.pipeline("conv1x1_splitk_fp16", 3, sizeof(SplitKPC), std::vector<uint32_t> {});
+                pro.inlineOk  = pro.active;
+                skPC.proFlags = pro.flags;
+                skPC.proAct   = pro.act;
+                skPC.proLo    = pro.lo;
+                skPC.proHi    = pro.hi;
+                skPipe        = env.pipeline((std::string("conv1x1_splitk") + pro.suffix() + "_fp16").c_str(), 3 + pro.extraBufs(), sizeof(SplitKPC), std::vector<uint32_t> {});
             }
 
             void prepareSplitKGeneral(const Node &node, VkOpEnv &env, NCHW x, NCHW y, int64_t Cout, int64_t Coutb, int64_t KH, int64_t KW, const std::vector<int64_t> &st, const std::vector<int64_t> &pad, const std::vector<int64_t> &dil) {
@@ -1380,6 +1409,56 @@ namespace vknn {
                 auto    pad   = convGeom(x.h, x.w, KH, KW, node.attr).pads();
                 int64_t group = node.attr.geti("group", 1);
                 hasRes        = (node.fusedResidual != kNoTensor); // set by the residual-Add fusion pass (1x1 only)
+                pro           = InputAffine {};
+                pro.active    = inputAffineActive(node);
+                if (pro.active)
+                {
+                    const int64_t proCinb  = cBlocks(x.c);
+                    const int64_t scaleIdx = node.attr.geti("pro_scale", -1), shiftIdx = node.attr.geti("pro_shift", -1);
+                    pro.act                = (int) node.attr.geti("pro_act", 0);
+                    pro.lo                 = node.attr.getf("pro_act_lo", 0.f);
+                    pro.hi                 = node.attr.getf("pro_act_hi", 0.f);
+                    pro.flags              = 0;
+                    // An initializer [1,C,1,1] packs to one vec4 per channel-block; the padding lanes
+                    // hold the identity (their input lanes and weights are zero either way).
+                    auto packChannelVector = [&](TensorId t, const char *key, float pad, std::shared_ptr<vk::Buffer> &buf, TensorId &tensor) {
+                        if (t == kNoTensor)
+                        {
+                            return;
+                        }
+                        if (g.isInitializer(t))
+                        {
+                            std::vector<float> v = initFloats(g, t);
+                            buf                  = uploadCached(env, node.name + key, [&] {
+                                std::vector<float> packed((size_t) proCinb * 4, pad);
+                                for (int64_t c = 0; c < x.c && c < (int64_t) v.size(); ++c)
+                                {
+                                    packed[(size_t) c] = v[(size_t) c];
+                                }
+                                return packed;
+                            });
+                        } else
+                        {
+                            tensor = t;
+                            if (g.desc(t).shape.size() == 4 && g.desc(t).shape[0] == x.n && x.n > 1)
+                            {
+                                pro.flags |= kInputAffineBatched;
+                            }
+                        }
+                    };
+                    if (scaleIdx >= 0 && (size_t) scaleIdx < node.inputs.size())
+                    {
+                        pro.flags |= kInputAffineHasScale;
+                        packChannelVector(node.inputs[(size_t) scaleIdx], "#pro_scale", 1.f, pro.scaleInit, pro.scaleTensor);
+                    }
+                    if (shiftIdx >= 0 && (size_t) shiftIdx < node.inputs.size())
+                    {
+                        pro.flags |= kInputAffineHasShift;
+                        packChannelVector(node.inputs[(size_t) shiftIdx], "#pro_shift", 0.f, pro.shiftInit, pro.shiftTensor);
+                    }
+                    pro.inputVec4s = (int64_t) x.n * proCinb * x.h * x.w;
+                    pro.pc         = {(int) x.n, (int) proCinb, (int) (x.h * x.w), pro.flags, pro.act, pro.lo, pro.hi};
+                }
                 depthwise     = (group == x.c && group == Cout && inCg == 1);
                 // The layout pass leaves a shallow-channel activation unpadded (core/conv_compact_input.h);
                 // the descriptor's layout is what decides here, so the kernel matches the bytes on hand.
@@ -1616,7 +1695,8 @@ namespace vknn {
                             int64_t nTiles    = (HW + wTile - 1) / wTile;
                             int64_t ocbGroups = (Coutb + ocbTile - 1) / ocbTile;
                             total             = convChunkedTileLanes(x.n, ocbGroups, nTiles, laneWidth);
-                            pipe = env.pipeline(shader((std::string("conv1x1") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile, laneWidth});
+                            pro.inlineOk = pro.active && !epi.active;
+                            pipe         = env.pipeline(shader((std::string("conv1x1") + epi.suffix() + pro.suffix()).c_str(), env.useFp16), (epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u)) + (pro.inlineOk ? (hasRes ? 0u : 1u) + pro.extraBufs() : 0u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile, laneWidth});
                         }
                     } else if (starvedDeep)
                     {
@@ -1635,7 +1715,8 @@ namespace vknn {
                         ocbTile           = std::max(1u, pick >> 8);
                         int64_t ocbGroups = (Coutb + ocbTile - 1) / ocbTile;
                         total             = convChunkedTileLanes(x.n, ocbGroups, (HW + wTile - 1) / wTile, laneWidth);
-                        pipe = env.pipeline(shader((std::string("conv1x1_s2") + epi.suffix()).c_str(), env.useFp16), epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile, laneWidth});
+                        pro.inlineOk = pro.active && !epi.active;
+                        pipe         = env.pipeline(shader((std::string("conv1x1_s2") + epi.suffix() + pro.suffix()).c_str(), env.useFp16), (epi.active ? 5 + epi.extraBufs() : (hasRes ? 5u : 4u)) + (pro.inlineOk ? (hasRes ? 0u : 1u) + pro.extraBufs() : 0u), sizeof(ConvPC), std::vector<uint32_t> {(uint32_t) (hasRes ? 1 : 0), wTile, ocbTile, laneWidth});
                     } else if (cfgHint(env, Hint::DirectConv3x3) == (int) Mode::LdsHalo && env.useFp16 && KH == 3 && KW == 3 && st[0] == 1 && st[1] == 1 && pad[0] == 1 && pad[1] == 1 && pad[2] == 1 && pad[3] == 1 && dil[0] == 1 && dil[1] == 1 && y.h >= kLdsHaloMinOutputExtent && y.w >= kLdsHaloMinOutputExtent)
                     {
                         // LDS input-halo 3x3 for the larger-spatial layers (input reuse via shared memory). A
@@ -1656,7 +1737,8 @@ namespace vknn {
                         // group inside a map-sized chunk of pixel tiles, and a flat tile count
                         // falls short of that range whenever the tiles do not fill their chunks.
                         total = convChunkedTileLanes(x.n, (Coutb + kConvRegDefaultOcbBlocks - 1) / kConvRegDefaultOcbBlocks, (HW + kConvRegDefaultPixelTile - 1) / kConvRegDefaultPixelTile, laneWidth);
-                        pipe  = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), convRegSpecConstants(kConvRegDefaultOcbBlocks, kConvRegDefaultPixelTile, laneWidth));
+                        pro.inlineOk = pro.active && !epi.active;
+                        pipe         = env.pipeline(shader((std::string("conv_reg") + epi.suffix() + pro.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs() + pro.extraBufs(), sizeof(ConvPC), convRegSpecConstants(kConvRegDefaultOcbBlocks, kConvRegDefaultPixelTile, laneWidth));
                     } else
                     {
                         // DirectAuto: the bit-exact direct race picks the baseline (1-pixel direct,
@@ -1720,7 +1802,8 @@ namespace vknn {
                             const uint32_t tilesPerWg = convRowTilesPerWorkgroup((uint32_t) (ocb >> kChoiceFootprintShift) & (uint32_t) kChoiceFootprintMask, laneWidth);
                             const int64_t ocbGroups = (Coutb + regOcb - 1) / regOcb;
                             total                   = convRowWorkgroups(x.n, ocbGroups, y.h, y.w, regWt, tilesPerWg, laneWidth) * laneWidth;
-                            pipe = env.pipeline(shader((std::string("conv3x3_row") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), convRowSpecConstants(regOcb, regWt, (uint32_t) st[1], tilesPerWg, laneWidth));
+                            pro.inlineOk = pro.active && !epi.active;
+                            pipe         = env.pipeline(shader((std::string("conv3x3_row") + epi.suffix() + pro.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs() + pro.extraBufs(), sizeof(ConvPC), convRowSpecConstants(regOcb, regWt, (uint32_t) st[1], tilesPerWg, laneWidth));
                         } else if ((ocb & kChoice1D) != 0)
                         {
                             // sliding-window 1-D kernel (1xK / Kx1; autotuned, won the bit-exact race).
@@ -1748,20 +1831,48 @@ namespace vknn {
                             total              = convChunkedTileLanes(x.n, ocbGroups, (HW + regWt - 1) / regWt, laneWidth);
                             ocSplitParts       = (ocb & kChoiceOcSplit2) ? 2 : ((ocb & kChoiceOcSplit4) ? 4 : 1);
                             ocSliceThreads     = convOcSplitSliceThreads(total, ocSplitParts, laneWidth);
-                            pipe = env.pipeline(shader((std::string("conv_reg") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), convRegSpecConstants(regOcb, regWt, laneWidth));
+                            pro.inlineOk = pro.active && !epi.active;
+                            pipe         = env.pipeline(shader((std::string("conv_reg") + epi.suffix() + pro.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs() + pro.extraBufs(), sizeof(ConvPC), convRegSpecConstants(regOcb, regWt, laneWidth));
                         } else
                         {
                             // autotuned 1-pixel-per-thread direct kernel (the fallback when OCB tiling didn't win)
                             total     = x.n * Coutb * y.h * y.w;
                             laneWidth = pickLocalSize(env);
-                            pipe = env.pipeline(shader((std::string("conv") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {laneWidth});
+                            pro.inlineOk = pro.active && !epi.active;
+                            pipe         = env.pipeline(shader((std::string("conv") + epi.suffix() + pro.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs() + pro.extraBufs(), sizeof(ConvPC), std::vector<uint32_t> {laneWidth});
                         }
                     }
                 }
             }
 
+            // The prologue's two binding slots: the scale and shift buffers (an initializer's packed
+            // upload or the operand tensor's device buffer; a missing one binds the bias buffer as a
+            // filler the kernel never reads, its flag bit being clear).
+            void appendPrologue(std::vector<VkBuffer> &bufs, VkOpEnv &env) {
+                bufs.push_back(pro.scaleInit ? pro.scaleInit->handle() : pro.scaleTensor != kNoTensor ? env.devBuf(pro.scaleTensor)->handle() : bbuf->handle());
+                bufs.push_back(pro.shiftInit ? pro.shiftInit->handle() : pro.shiftTensor != kNoTensor ? env.devBuf(pro.shiftTensor)->handle() : bbuf->handle());
+            }
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
                 vk::Buffer *src = env.devBuf(node.inputs[0]);
+                pc.proFlags     = pro.flags;
+                pc.proAct       = pro.act;
+                pc.proLo        = pro.lo;
+                pc.proHi        = pro.hi;
+                // A kernel family without a _pro variant reads the prologue's result from scratch:
+                // one input_affine dispatch applies the unit, then the conv runs unchanged on it.
+                if (pro.active && !pro.inlineOk)
+                {
+                    if (!pro.materialize)
+                    {
+                        pro.materialize = env.pipeline(shader("input_affine", env.useFp16), 4, sizeof(InputAffine::PC), std::vector<uint32_t> {});
+                        pro.scratch     = std::make_shared<vk::Buffer>(*env.ctx, std::max<size_t>((size_t) pro.inputVec4s * 4 * (env.useFp16 ? 2 : 4), 16), vk::MemPref::kDeviceOnly);
+                    }
+                    std::vector<VkBuffer> mb = {src->handle(), pro.scratch->handle()};
+                    appendPrologue(mb, env);
+                    pro.materialize->dispatch(cmd, mb, &pro.pc, sizeof(pro.pc), groups(pro.inputVec4s, kConvFixedKernelWidth));
+                    vk::computeBarrier(*env.ctx, cmd);
+                    src = pro.scratch.get();
+                }
                 vk::Buffer *dst = env.devBuf(node.outputs[0]);
                 if (winograd)
                 {
@@ -1804,7 +1915,12 @@ namespace vknn {
                         skPipe->dispatch(cmd, {src->handle(), wbuf->handle(), partBuf->handle()}, &skGenPC, sizeof(skGenPC), (uint32_t) skGroups);
                     } else
                     {
-                        skPipe->dispatch(cmd, {src->handle(), wbuf->handle(), partBuf->handle()}, &skPC, sizeof(skPC), (uint32_t) skGroups);
+                        std::vector<VkBuffer> pb = {src->handle(), wbuf->handle(), partBuf->handle()};
+                        if (pro.inlineOk)
+                        {
+                            appendPrologue(pb, env);
+                        }
+                        skPipe->dispatch(cmd, pb, &skPC, sizeof(skPC), (uint32_t) skGroups);
                     }
                     vk::computeBarrier(*env.ctx, cmd);
                     std::vector<VkBuffer> rb = {partBuf->handle(), bbuf->handle(), dst->handle()};
@@ -1837,11 +1953,15 @@ namespace vknn {
                     if (hasRes)
                     {
                         bufs.push_back(res);
-                    } else if (epi.active)
+                    } else if (epi.active || pro.inlineOk)
                     {
-                        bufs.push_back(dst->handle()); // epilogue binds after the Res slot: fill it
+                        bufs.push_back(dst->handle()); // the epilogue and the prologue bind after the Res slot: fill it
                     }
                     epi.append(bufs, node, env, dst->handle());
+                    if (pro.inlineOk)
+                    {
+                        appendPrologue(bufs, env);
+                    }
                     pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, laneWidth));
                 } else if (lds)
                 {
@@ -1854,6 +1974,10 @@ namespace vknn {
                     // disjoint outputs, so the run stays one hazard-tracking node. Each dispatch
                     // pushes its slice base; the kernel body is unchanged.
                     epi.append(bufs, node, env, dst->handle());
+                    if (pro.inlineOk)
+                    {
+                        appendPrologue(bufs, env);
+                    }
                     for (int64_t sliceBase = 0; sliceBase < total; sliceBase += ocSliceThreads)
                     {
                         ConvPC slicePc  = pc;
@@ -1863,6 +1987,10 @@ namespace vknn {
                 } else
                 {
                     epi.append(bufs, node, env, dst->handle());
+                    if (pro.inlineOk)
+                    {
+                        appendPrologue(bufs, env);
+                    }
                     pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(total, laneWidth));
                 }
             }

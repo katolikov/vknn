@@ -1,3 +1,4 @@
+#include "core/input_affine.h"
 #include "core/matmul_tile.h"
 #include "core/quant_weights.h"
 #include "passes_internal.h"
@@ -117,6 +118,80 @@ namespace vknn {
     // the whole. This predicate covers the structural half only (layout, alignment, axis); the
     // planner's segment-scoped conditions (produced in-segment, liveness, fp32 pins) can still
     // refuse a view at load, which costs one extra dispatch, never correctness.
+    // ---- input-affine prologue (core/input_affine.h) -------------------------------------------
+    // A unit that cannot host on its producer is applied by its single consumer Conv at input load
+    // when it is a per-channel affine plus an activation: an optional Mul by a [N,C,1,1] operand,
+    // an optional Add of a [N,C,1,1] operand, an optional activation, in that order, with no
+    // exports and no register traffic. The unit's output tensor disappears: the conv reads the
+    // unit's entry and carries the operands and the activation as pro_* attributes.
+    struct InputAffineUnit {
+        TensorId scale = kNoTensor, shift = kNoTensor;
+        ActType  act = ActType::None;
+        float    lo = 0.f, hi = 0.f;
+        bool     ok = false;
+    };
+    static InputAffineUnit inputAffineOf(const Graph &g, const Node &unitNode, const std::vector<int64_t> &steps, const std::vector<float> &params, TensorId entry) {
+        InputAffineUnit u;
+        const Shape &es = g.desc(entry).shape;
+        if (es.size() != 4)
+        {
+            return u;
+        }
+        auto channelVector = [&](TensorId t) {
+            const Shape &ts = g.desc(t).shape;
+            return ts.size() == 4 && ts[1] == es[1] && ts[2] == 1 && ts[3] == 1 && (ts[0] == 1 || ts[0] == es[0]);
+        };
+        const size_t count = steps.size() / (size_t) kPwStepInts;
+        size_t       at    = 0;
+        auto         step  = [&](size_t i, int field) {
+            return steps[i * (size_t) kPwStepInts + (size_t) field];
+        };
+        // A binary step over the running value and one channel-vector operand, either operand order.
+        auto channelBinary = [&](size_t i, BinaryType want, TensorId &operand) {
+            if (step(i, kPwStepKindField) != kPwKindBinary || step(i, kPwStepCodeField) != (int64_t) want || step(i, kPwStepKindField + 5) >= 0)
+            {
+                return false;
+            }
+            const int64_t a = step(i, kPwStepSrcAField), b = step(i, kPwStepSrcAField + 1);
+            const bool    runA = a == kPwRefAcc || a == kPwRefEntry, runB = b == kPwRefAcc || b == kPwRefEntry;
+            const int64_t opRef = runA ? b : runB ? a : kPwRefNone;
+            if (!(runA || runB) || opRef > kPwRefOp0)
+            {
+                return false;
+            }
+            // Operand refs count down from kPwRefOp0 over the standalone node's input index space
+            // (entry at 0, operand k at 1 + k), the space buildPwPlan reads them in.
+            const size_t slot = (size_t) (kPwRefOp0 - opRef);
+            if (slot == 0 || slot >= unitNode.inputs.size())
+            {
+                return false;
+            }
+            operand = unitNode.inputs[slot];
+            return operand != kNoTensor && channelVector(operand);
+        };
+        if (at < count && channelBinary(at, BinaryType::Mul, u.scale))
+        {
+            ++at;
+        }
+        if (at < count && channelBinary(at, BinaryType::Add, u.shift))
+        {
+            ++at;
+        }
+        if (at < count && step(at, kPwStepKindField) == kPwKindAct && step(at, kPwStepSrcAField) == kPwRefAcc && step(at, kPwStepKindField + 5) < 0)
+        {
+            const int64_t code = step(at, kPwStepCodeField);
+            if (code == (int64_t) ActType::Relu || code == (int64_t) ActType::Relu6 || code == (int64_t) ActType::Clip)
+            {
+                u.act = (ActType) code;
+                u.lo  = params[at * 2];
+                u.hi  = params[at * 2 + 1];
+                ++at;
+            }
+        }
+        u.ok = at == count && count > 0 && (u.scale != kNoTensor || u.shift != kNoTensor || u.act != ActType::None);
+        return u;
+    }
+
     static bool pwConcatPartsCanAlias(const Graph &g, const Node &n) {
         if (n.type != OpType::Concat || n.outputs.size() != 1 || n.inputs.empty() || n.fusedResidual != kNoTensor)
         {
@@ -1688,6 +1763,95 @@ namespace vknn {
                 continue;
             }
             warnFlatForcedUnit(g, g.nodes[members.back()], unit.generalOperand, run, unit.nc4Ok);
+            // ---- consumer-side attach: the unit's single reader is a Conv, and the unit is a
+            // per-channel affine plus activation the conv can apply at input load (core/input_affine.h).
+            // The conv then reads the unit's entry directly; the unit's output tensor disappears.
+            // Tried before a single-member unit is dropped and before a standalone node is emitted.
+            auto tryInputAffinePrologue = [&]() -> bool {
+                if (!(!strictFuse && unit.nc4Ok && unit.exports.empty() && unit.outSteps.empty() && !entryExported && unit.mainOut != kNoTensor && unit.mainOut < (TensorId) consumerCount.size() &&
+                      consumerCount[unit.mainOut] == 1 && !(unit.mainOut < (TensorId) isGraphOut.size() && isGraphOut[unit.mainOut])))
+                {
+                    return false;
+                }
+                Node probe;
+                probe.inputs = {unit.entry};
+                for (TensorId op: unit.operands)
+                {
+                    probe.inputs.push_back(op);
+                }
+                const InputAffineUnit affine = inputAffineOf(g, probe, unit.steps, unit.params, unit.entry);
+                int                   reader = -1;
+                for (size_t j = 0; affine.ok && j < g.nodes.size(); ++j)
+                {
+                    if (removed.count((int) j))
+                    {
+                        continue;
+                    }
+                    for (TensorId in: g.nodes[j].inputs)
+                    {
+                        if (in == unit.mainOut)
+                        {
+                            reader = (int) j;
+                        }
+                    }
+                }
+                if (reader >= 0)
+                {
+                    Node                       &C     = g.nodes[reader];
+                    const std::vector<int64_t> &kshape = C.attr.getints("kernel_shape");
+                    int64_t                     taps   = 1;
+                    for (int64_t k: kshape)
+                    {
+                        taps *= k;
+                    }
+                    const bool hostable = C.type == OpType::Conv && !C.inputs.empty() && C.inputs[0] == unit.mainOut && C.attr.geti("group", 1) == 1 && !C.attr.has("pw_steps") &&
+                                          !inputAffineActive(C) && C.fusedResidual != unit.mainOut && taps >= kInputAffineMinTaps;
+                    if (hostable)
+                    {
+                        C.inputs[0]           = unit.entry;
+                        const int64_t opbase  = (int64_t) C.inputs.size();
+                        int64_t       scaleAt = -1, shiftAt = -1;
+                        if (affine.scale != kNoTensor)
+                        {
+                            scaleAt = (int64_t) C.inputs.size();
+                            C.inputs.push_back(affine.scale);
+                        }
+                        if (affine.shift != kNoTensor)
+                        {
+                            shiftAt = (int64_t) C.inputs.size();
+                            C.inputs.push_back(affine.shift);
+                        }
+                        auto setInt = [&](const char *key, int64_t v) {
+                            Attr a;
+                            a.kind         = Attr::Int;
+                            a.i            = v;
+                            C.attr.map[key] = a;
+                        };
+                        auto setFloat = [&](const char *key, float v) {
+                            Attr a;
+                            a.kind         = Attr::Float;
+                            a.f            = v;
+                            C.attr.map[key] = a;
+                        };
+                        setInt("pro_opbase", opbase);
+                        setInt("pro_scale", scaleAt);
+                        setInt("pro_shift", shiftAt);
+                        setInt("pro_act", (int64_t) affine.act);
+                        setFloat("pro_act_lo", affine.lo);
+                        setFloat("pro_act_hi", affine.hi);
+                        for (int member: members)
+                        {
+                            removed.insert(member);
+                            visited[member] = 1;
+                        }
+                        fused++;
+                        attached++;
+                        rebuild();
+                        return true;
+                    }
+                }
+                return false;
+            };
 
             // Fast mode: a lone initializer-bias Add on a MatMul folds onto the kernel's native
             // bias input — matmul[_tiled]_bias adds it in the fp32 accumulator with one store
@@ -1928,9 +2092,17 @@ namespace vknn {
                 const bool broadcastSingle = unit.nc4Ok && !unit.operands.empty() && PwPlanner::dataInputs(g.nodes[members[0]]).size() > 1 && gpuFlatNode(g, g.nodes[members[0]]);
                 if (!broadcastSingle)
                 {
+                    if (tryInputAffinePrologue())
+                    {
+                        continue; // a lone channel-broadcast Mul / Add / activation folded into its consumer conv
+                    }
                     visited[members[0]] = 1;
                     continue;
                 }
+            }
+            if (tryInputAffinePrologue())
+            {
+                continue;
             }
             Node fn;
             fn.type   = OpType::FusedPointwise;
@@ -1944,6 +2116,43 @@ namespace vknn {
             for (TensorId e: unit.exports)
             {
                 fn.outputs.push_back(e);
+            }
+            // A standalone unit that is a per-channel affine plus activation (a consumer that could
+            // not host it, a pointwise consumer) is marked for the vec4-per-thread input_affine
+            // kernel (core/input_affine.h); the VM interpreter stays the fallback everywhere else.
+            if (!strictFuse && unit.nc4Ok && unit.exports.empty() && unit.outSteps.empty())
+            {
+                const InputAffineUnit affine = inputAffineOf(g, fn, unit.steps, unit.params, unit.entry);
+                if (affine.ok)
+                {
+                    auto indexOf = [&](TensorId t) -> int64_t {
+                        for (size_t i = 1; i < fn.inputs.size(); ++i)
+                        {
+                            if (fn.inputs[i] == t)
+                            {
+                                return (int64_t) i;
+                            }
+                        }
+                        return -1;
+                    };
+                    auto setInt = [&](const char *key, int64_t v) {
+                        Attr a;
+                        a.kind           = Attr::Int;
+                        a.i              = v;
+                        fn.attr.map[key] = a;
+                    };
+                    auto setFloat = [&](const char *key, float v) {
+                        Attr a;
+                        a.kind           = Attr::Float;
+                        a.f              = v;
+                        fn.attr.map[key] = a;
+                    };
+                    setInt("pw_affine_scale", affine.scale != kNoTensor ? indexOf(affine.scale) : -1);
+                    setInt("pw_affine_shift", affine.shift != kNoTensor ? indexOf(affine.shift) : -1);
+                    setInt("pw_affine_act", (int64_t) affine.act);
+                    setFloat("pw_affine_lo", affine.lo);
+                    setFloat("pw_affine_hi", affine.hi);
+                }
             }
             {
                 Attr a;

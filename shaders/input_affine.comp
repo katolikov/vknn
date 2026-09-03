@@ -1,0 +1,18 @@
+#version 450
+// fp32-storage twin of input_affine_fp16.comp (see that file).
+#include "common.glsl"
+#define PRO_BASE 2
+#define PRO_VEC vec4
+#include "input_affine.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Src { vec4 src[]; };
+layout(std430, binding = 1) writeonly buffer Dst { vec4 dst[]; };
+layout(push_constant) uniform PC { int N, Cinb, HW, flags, act; float lo, hi; } pc;
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.N * pc.Cinb * pc.HW)) return;
+  int blk = int(gid) / pc.HW;
+  int icb = blk % pc.Cinb, n = blk / pc.Cinb;
+  vec4 s = proScaleOf(pc.flags, n, icb, pc.Cinb), b = proShiftOf(pc.flags, n, icb, pc.Cinb);
+  dst[gid] = proApply(src[gid], s, b, pc.flags, pc.act, pc.lo, pc.hi);
+}

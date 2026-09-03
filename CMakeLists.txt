@@ -126,10 +126,21 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
   #   hand-written    <stem>_fp16.comp -> _epi_stems   (stem = name without the _fp16 suffix)
   #   the standalone pointwise VM      -> _rx_standalone (fused_pw_*; _rx twin, no _epi)
   set(_epi_stems "")
+  set(_pro_stems "")
   set(_rx_standalone "")
   foreach(_comp ${VKNN_COMP_SHADERS})
     get_filename_component(_name ${_comp} NAME_WE)
     file(READ ${_comp} _src)
+    # A kernel that #includes input_affine.glsl carries the conv input-affine prologue behind
+    # -DPW_PRO=1 (core/input_affine.h) and gets a _pro SPIR-V variant per storage precision; the
+    # standalone input_affine kernels include it as their body and are compiled once, plainly.
+    if(_src MATCHES "#include[ \t]+\"input_affine\\.glsl\"" AND NOT _name MATCHES "^input_affine")
+      if(_name MATCHES "^(.+)_fp16$")
+        list(APPEND _pro_stems ${CMAKE_MATCH_1})
+      else()
+        list(APPEND _pro_stems ${_name})
+      endif()
+    endif()
     # Match the include DIRECTIVE, not an incidental comment mention of the file.
     if(_src MATCHES "#include[ \t]+\"pw_epilogue\\.glsl\"")
       if(_name MATCHES "^fused_pw_")
@@ -142,6 +153,7 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
     endif()
   endforeach()
   list(REMOVE_DUPLICATES _epi_stems)
+  list(REMOVE_DUPLICATES _pro_stems)
   list(REMOVE_DUPLICATES _rx_standalone)
 
   # Fail configuration — not a device load — when the epilogue surfaces disagree (the shader set
@@ -209,6 +221,40 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
     # a split rounds its intermediate through fp16 storage and changes the answer.
     #   plain/templated <stem>.comp      -> <stem>_epi[_dc][_rx].spv (+ _fp16 when templated)
     #   hand-written    <stem>_fp16.comp -> <stem>_epi[_dc][_rx]_fp16.spv
+    list(FIND _pro_stems ${_name} _proPlain)
+    if(_proPlain GREATER -1)
+      set(_spvPro ${VKNN_SHADER_GEN_DIR}/${_name}_pro.spv)
+      add_custom_command(
+        OUTPUT ${_spvPro}
+        COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_PRO=1 -o ${_spvPro} ${_comp}
+        DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+        COMMENT "compile ${_name}.comp -DPW_PRO -> ${_name}_pro.spv"
+        VERBATIM)
+      list(APPEND _spv_files ${_spvPro})
+      if(_src MATCHES "precision.glsl")
+        set(_spvPro16 ${VKNN_SHADER_GEN_DIR}/${_name}_pro_fp16.spv)
+        add_custom_command(
+          OUTPUT ${_spvPro16}
+          COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_PRO=1 -DUSE_FP16=1 -o ${_spvPro16} ${_comp}
+          DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+          COMMENT "compile ${_name}.comp -DPW_PRO -DUSE_FP16 -> ${_name}_pro_fp16.spv"
+          VERBATIM)
+        list(APPEND _spv_files ${_spvPro16})
+      endif()
+    elseif(_name MATCHES "^(.+)_fp16$")
+      list(FIND _pro_stems ${CMAKE_MATCH_1} _proHand)
+      if(_proHand GREATER -1)
+        set(_proHandStem ${CMAKE_MATCH_1})
+        set(_spvProHand ${VKNN_SHADER_GEN_DIR}/${_proHandStem}_pro_fp16.spv)
+        add_custom_command(
+          OUTPUT ${_spvProHand}
+          COMMAND ${SHADERCC} ${SHADERCC_PRE} -DPW_PRO=1 -o ${_spvProHand} ${_comp}
+          DEPENDS ${_comp} ${VKNN_GLSL_INCLUDES}
+          COMMENT "compile ${_name}.comp -DPW_PRO -> ${_proHandStem}_pro_fp16.spv"
+          VERBATIM)
+        list(APPEND _spv_files ${_spvProHand})
+      endif()
+    endif()
     list(FIND _epi_stems ${_name} _epiPlain)
     list(FIND _rx_standalone ${_name} _rxAlone)
     if(_epiPlain GREATER -1)

@@ -17,6 +17,11 @@
 #define PW_EPI_BASE 4
 #include "pw_epilogue.glsl"
 #endif
+#ifdef PW_PRO
+#define PRO_BASE 4
+#define PRO_VEC vec4
+#include "input_affine.glsl"
+#endif
 // Specialization-constant mirrors of src/core/conv_dispatch_rules.h (keep in lockstep):
 // CONV_ROW_*_SPEC are kConvRowOcbSpecIndex, kConvRowPixelTileSpecIndex, kConvRowStrideSpecIndex and
 // kConvRowLaneWidthSpecIndex. The host states every slot through convRowSpecConstants(), so the
@@ -46,6 +51,10 @@ layout(push_constant) uniform PC {
   int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
   float actLo, actHi;
   int gidBase; // first flat gid of this dispatch's OC-split slice (0 = whole range)
+#ifdef PW_PRO
+  int proFlags, proAct; // input-affine prologue (input_affine.glsl): flags and activation
+  float proLo, proHi;
+#endif
 } pc;
 
 void main() {
@@ -85,6 +94,9 @@ void main() {
   }
 
   for (int icb = 0; icb < Cinb; ++icb) {
+#ifdef PW_PRO
+    vec4 proS = proScaleOf(pc.proFlags, n, icb, Cinb), proB = proShiftOf(pc.proFlags, n, icb, Cinb);
+#endif
     int sb = (n * Cinb + icb) * pc.H * pc.W;
     for (int ky = 0; ky < 3; ++ky) {
       int iy = oy * pc.SH - pc.PT + ky;
@@ -98,6 +110,9 @@ void main() {
         bool ok = rowOk && uint(ix) < uint(pc.W);
         colOk[c] = ok;
         row[c] = ok ? src[rowOff + ix] : vec4(0.0);
+#ifdef PW_PRO
+        if (ok) row[c] = proApply(row[c], proS, proB, pc.proFlags, pc.proAct, pc.proLo, pc.proHi); // padding stays zero
+#endif
       }
       for (int kx = 0; kx < 3; ++kx) {
         int wtap = (icb * 3 + ky) * 3 + kx;

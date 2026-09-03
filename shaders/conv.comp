@@ -8,6 +8,11 @@
 #define PW_EPI_BASE 4
 #include "pw_epilogue.glsl"
 #endif
+#ifdef PW_PRO
+#define PRO_BASE 4
+#define PRO_VEC vec4
+#include "input_affine.glsl"
+#endif
 layout(local_size_x_id = 0, local_size_x = 64) in;
 layout(std430, binding = 0) readonly  buffer Src { float src[]; };
 layout(std430, binding = 1) readonly  buffer Wt  { float wt[]; };
@@ -16,6 +21,11 @@ layout(std430, binding = 3) writeonly buffer Dst { float dst[]; };
 layout(push_constant) uniform PC {
   int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
   float actLo, actHi;
+#ifdef PW_PRO
+  int gidBase;          // conv_reg's slice base; declared here only to place the prologue fields
+  int proFlags, proAct; // input-affine prologue (input_affine.glsl): flags and activation
+  float proLo, proHi;
+#endif
 } pc;
 
 void main() {
@@ -33,6 +43,9 @@ void main() {
   for (int l = 0; l < 4; ++l) acc[l] = bias[ocb * 4 + l];
 
   for (int icb = 0; icb < Cinb; ++icb) {
+#ifdef PW_PRO
+    vec4 proS = proScaleOf(pc.proFlags, n, icb, Cinb), proB = proShiftOf(pc.proFlags, n, icb, Cinb);
+#endif
     for (int ky = 0; ky < pc.KH; ++ky) {
       int iy = oy * pc.SH - pc.PT + ky * pc.DH;
       if (iy < 0 || iy >= pc.H) continue;
@@ -41,6 +54,9 @@ void main() {
         if (ix < 0 || ix >= pc.W) continue;
         int sidx = ((((n * Cinb + icb) * pc.H + iy) * pc.W + ix) * 4);
         vec4 inv = vec4(src[sidx], src[sidx + 1], src[sidx + 2], src[sidx + 3]);
+#ifdef PW_PRO
+        inv = proApply(inv, proS, proB, pc.proFlags, pc.proAct, pc.proLo, pc.proHi);
+#endif
         // The tap's 4x4 block: per input channel l, the 4 output channels of the block.
         int wb = (((((ocb * Cinb + icb) * pc.KH + ky) * pc.KW + kx) * 4) * 4);
         for (int l = 0; l < 4; ++l) {

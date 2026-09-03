@@ -15,6 +15,11 @@
 #define PW_EPI_BASE 5
 #include "pw_epilogue.glsl"
 #endif
+#ifdef PW_PRO
+#define PRO_BASE 5
+#define PRO_VEC f16vec4
+#include "input_affine.glsl"
+#endif
 layout(constant_id = 0) const int HAS_RES = 0;  // fused residual add (out = act(conv + res))
 layout(constant_id = 1) const int WTILE = 4;    // output pixels per thread (autotuned per shape)
 layout(constant_id = 2) const int OCB = 1;      // output channel-blocks per thread (autotuned per shape)
@@ -27,6 +32,11 @@ layout(std430, binding = 4) readonly buffer Res { f16vec4 res[]; };
 layout(push_constant) uniform PC {
   int N, Cin, H, W, Cout, OH, OW, KH, KW, SH, SW, PT, PL, DH, DW, act;
   float actLo, actHi;
+#ifdef PW_PRO
+  int gidBase;          // conv_reg's slice base; declared here only to place the prologue fields
+  int proFlags, proAct; // input-affine prologue (input_affine.glsl): flags and activation
+  float proLo, proHi;
+#endif
 }
 pc;
 
@@ -69,6 +79,9 @@ void main() {
 
     int wrow = ocb * 4 * Cinb;
     for (int icb = 0; icb < Cinb; ++icb) {
+#ifdef PW_PRO
+      vec4 proS = proScaleOf(pc.proFlags, n, icb, Cinb), proB = proShiftOf(pc.proFlags, n, icb, Cinb);
+#endif
       vec4 w0 = vec4(wt[wrow + icb * 4 + 0]);
       vec4 w1 = vec4(wt[wrow + icb * 4 + 1]);
       vec4 w2 = vec4(wt[wrow + icb * 4 + 2]);
@@ -77,6 +90,9 @@ void main() {
       for (int p = 0; p < WTILE; ++p) {
         int pix = min(p0 + p, HW - 1);
         vec4 inv = vec4(src[sbase + pix]);
+#ifdef PW_PRO
+        inv = proApply(inv, proS, proB, pc.proFlags, pc.proAct, pc.proLo, pc.proHi);
+#endif
         acc[p] = fma(vec4(inv.x), w0, acc[p]);
         acc[p] = fma(vec4(inv.y), w1, acc[p]);
         acc[p] = fma(vec4(inv.z), w2, acc[p]);
@@ -127,6 +143,9 @@ void main() {
   }
 
   for (int icb = 0; icb < Cinb; ++icb) {
+#ifdef PW_PRO
+    vec4 proS = proScaleOf(pc.proFlags, n, icb, Cinb), proB = proShiftOf(pc.proFlags, n, icb, Cinb);
+#endif
     int sbase = (n * Cinb + icb) * HW;
     for (int j = 0; j < OCB; ++j) {
       vec4 w0 = vec4(wt[wrowj[j] + icb * 4 + 0]);
@@ -136,6 +155,9 @@ void main() {
       for (int p = 0; p < WTILE; ++p) {
         int pix = min(p0 + p, HW - 1);
         vec4 inv = vec4(src[sbase + pix]);
+#ifdef PW_PRO
+        inv = proApply(inv, proS, proB, pc.proFlags, pc.proAct, pc.proLo, pc.proHi);
+#endif
         acc[j][p] = fma(vec4(inv.x), w0, acc[j][p]);
         acc[j][p] = fma(vec4(inv.y), w1, acc[j][p]);
         acc[j][p] = fma(vec4(inv.z), w2, acc[j][p]);

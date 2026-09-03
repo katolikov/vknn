@@ -52,6 +52,11 @@ REPO_DEFAULT = os.path.dirname(HERE)
 _EPI_INCLUDE_RE = re.compile(r'#include[ \t]+"pw_epilogue\.glsl"')
 # A string literal immediately followed by  + epi.suffix()  (the common site and each ternary arm).
 _STEM_SITE_RE = re.compile(r'"([A-Za-z0-9_]+)"\s*\)?\s*\+\s*epi\.suffix\(\)')
+# The conv input-affine prologue surface (core/input_affine.h): a shader that #includes
+# input_affine.glsl gets a _pro variant, and the op file requests it as
+# "<stem>" [+ epi.suffix()] + pro.suffix().
+_PRO_INCLUDE_RE = re.compile(r'#include[ \t]+"input_affine\.glsl"')
+_PRO_SITE_RE = re.compile(r'"([A-Za-z0-9_]+)"\s*\)?\s*\+\s*(?:epi\.suffix\(\)\s*\+\s*)?pro\.suffix\(\)')
 # matmul.cpp composes the stem in a variable then does  name += epi.suffix();  — trace the literals.
 _NAME_SUFFIX_RE = re.compile(r'\b(\w+)\s*\+=\s*epi\.suffix\(\)')
 _REGISTER_VK_RE = re.compile(r'VKNN_REGISTER_VK_OP\(\s*OpType::(\w+)')
@@ -523,6 +528,39 @@ def check_applier_twins(shader_dir):
     return problems
 
 
+def derive_pro_stems(shader_dir):
+    """Stems whose kernels carry the input-affine prologue (input_affine.glsl included), minus the
+    standalone input_affine kernels themselves."""
+    stems = set()
+    for path in glob.glob(os.path.join(shader_dir, "*.comp")):
+        name = os.path.basename(path)[:-len(".comp")]
+        if name.startswith("input_affine"):
+            continue
+        with open(path, encoding="utf-8") as f:
+            if _PRO_INCLUDE_RE.search(f.read()):
+                stems.add(name[:-len("_fp16")] if name.endswith("_fp16") else name)
+    return stems
+
+
+def requested_pro_stems(ops_dir):
+    stems = set()
+    for path in glob.glob(os.path.join(ops_dir, "*.cpp")):
+        with open(path, encoding="utf-8") as f:
+            stems.update(_PRO_SITE_RE.findall(f.read()))
+    return stems
+
+
+def check_pro_surface(shader_dir, ops_dir):
+    """The prologue surface: every _pro-capable shader is requested and every request has a shader."""
+    shaders, requested = derive_pro_stems(shader_dir), requested_pro_stems(ops_dir)
+    problems = []
+    for stem in sorted(shaders - requested):
+        problems.append('%s: carries the input-affine prologue (input_affine.glsl) but no op file requests "%s" + pro.suffix()' % (stem, stem))
+    for stem in sorted(requested - shaders):
+        problems.append("%s: an op file requests its _pro variant but the shader does not #include input_affine.glsl" % stem)
+    return problems
+
+
 def main():
     ap = argparse.ArgumentParser(description="VKNN pointwise-epilogue multi-surface sync check")
     ap.add_argument("--repo", default=REPO_DEFAULT, help="VKNN repo root (default: this tree)")
@@ -542,6 +580,7 @@ def main():
     vk_reg = parse_vk_registry(ops_dir)
 
     problems = []
+    problems += check_pro_surface(shader_dir, ops_dir)
 
     # 1. every requested stem has an _epi shader.
     missing_shader = sorted(s for s in req_stems if s not in epi_stems)
