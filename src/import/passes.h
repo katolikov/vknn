@@ -156,7 +156,10 @@ namespace vknn {
         // automatically by inferShapes; `inputShapes` (per-tensor) overrides a binding for that tensor.
         // Empty = the batch-only path.
         std::map<std::string, int64_t> dimBindings;
-        bool                           fuseSqueezeExcite = false; // fuse the SE squeeze->FC->scale chain (experimental)
+        bool                           fuseSqueezeExcite = false; // fuse the SE pool->FC->act->FC->gate chain into FusedSE
+                                                                  // (opt-in: measured a LOSS on the release device, see
+                                                                  // backend/vulkan/ops/fused_se.cpp; the unfused 1x1 convs
+                                                                  // on a [N,C,1,1] tensor already sit at the dispatch floor)
         bool                           fuseDwPw          = false; // fuse depthwise KxK + 1x1-project into FusedDwPw
                                                                   // (experimental: the fp16-rounded LDS intermediate matches
                                                                   // the unfused store bit-for-bit on the CPU oracle and at
@@ -180,9 +183,10 @@ namespace vknn {
         // Optimization-level preset (vknn_compile -O0..-O3). Individual fuse flags override on top.
         //   O0 = no optional fusion (reference output, one kernel per op)
         //   O1 = the default production set: the general pointwise fusion (bit-exact)
-        //   O2/O3 = + the experimental squeeze-excite and dwpw-pair fusions (situational; the
-        //           dwpw pair still diverges from the unfused graph on the fp16 GPU path —
-        //           measure before shipping a model with them).
+        //   O2/O3 = + the experimental squeeze-excite and dwpw-pair fusions (situational: the
+        //           squeeze-excite kernel measured slower than the unfused chain on the release
+        //           device, and the dwpw pair still diverges from the unfused graph on the fp16 GPU
+        //           path — measure before shipping a model with them).
         //   ConvGemm lowering stays opt-in (--lower-conv) at every level until its kernel is tuned.
         static PassOptions forOptLevel(int level) {
             PassOptions o;

@@ -1,45 +1,88 @@
 #version 450
-// Fused SE middle (one workgroup per image): reads the pooled avg [N,C,1,1], does FC1(relu) ->
-// FC2 -> hardsigmoid, writes the channel scale [N,C,1,1]. GlobalAvgPool and the broadcast Mul remain
-// separate ops; this fuses only the FC1/FC2 middle on the tiny [N,C,1,1] tensor.
+// Fused Squeeze-Excite scale (one workgroup per image). avgpool_partial has reduced the feature map
+// to one fp32 vec4 partial sum per (channel block, split); this kernel folds the splits into the
+// pooled channel vector, runs FC1 -> activation -> FC2 -> gate on it in shared memory, and stores
+// the channel scale [N,C,1,1]. The broadcast Mul that applies the scale stays a separate op.
+//
+// Both weight matrices arrive transposed (W1T [C][Cr], W2T [Cr][C]) so that at every step the
+// threads of a wave read consecutive elements: FC1 splits the input channels across
+// SE_WORKGROUP / Cr slices (thread = (output j, slice s)) and folds the slices through shared
+// memory in slice order; FC2 gives each thread an output channel. A single-workgroup kernel is
+// latency-bound, so the serial length per thread (C / slices, then Cr) is what these mappings cut.
+//
+// SE_MAX_CHANNELS / SE_MAX_SQUEEZE mirror kSeMaxChannels / kSeMaxSqueeze and the SE_ACT_* /
+// SE_GATE_* codes mirror kSeAct* / kSeGate* (src/core/squeeze_excite.h). fused_se_fp16.comp is the
+// fp16-storage twin.
 #include "common.glsl"
-layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer Avg { vec4 avgbuf[]; };
-layout(std430, binding = 1) readonly  buffer W1 { float w1[]; };
-layout(std430, binding = 2) readonly  buffer B1 { float b1[]; };
-layout(std430, binding = 3) readonly  buffer W2 { float w2[]; };
-layout(std430, binding = 4) readonly  buffer B2 { float b2[]; };
-layout(std430, binding = 5) writeonly buffer Scale { vec4 scale[]; };
-layout(push_constant) uniform PC { int N, C, Cr; float alpha, beta; } pc;
-shared float avg[1024];
-shared float s1[256];
-
+#define SE_MAX_CHANNELS 4096
+#define SE_MAX_SQUEEZE 1024
+#define SE_ACT_RELU 0
+#define SE_ACT_SILU 1
+#define SE_ACT_HARDSWISH 2
+#define SE_GATE_HARDSIGMOID 0
+#define SE_GATE_SIGMOID 1
+#define SE_WORKGROUP 256
+#include "se_codes.glsl"
+layout(local_size_x = SE_WORKGROUP) in;
+layout(std430, binding = 0) readonly  buffer P { vec4 part[]; };     // fp32 partial sums, [(n*Cb+cb)*groups + split]
+layout(std430, binding = 1) readonly  buffer W1 { float w1t[]; };    // [C][Cr] (FC1 weights, transposed)
+layout(std430, binding = 2) readonly  buffer B1 { float b1[]; };     // [Cr]
+layout(std430, binding = 3) readonly  buffer W2 { float w2t[]; };    // [Cr][C] (FC2 weights, transposed)
+layout(std430, binding = 4) readonly  buffer B2 { float b2[]; };     // [C]
+layout(std430, binding = 5) writeonly buffer Scale { vec4 scale[]; }; // [N][Cb] blocked scale
+layout(push_constant) uniform PC { int N, C, Cr, groups, hw, act, gate; float alpha, beta; } pc;
+shared float chan[SE_MAX_CHANNELS]; // the pooled vector, then the gated FC2 outputs
+shared float s1[SE_MAX_SQUEEZE];    // FC1 activations
+shared float red[SE_WORKGROUP];     // FC1 slice partials
 void main() {
-  int Cb = (pc.C + 3) / 4;
-  int n = int(gl_WorkGroupID.x);
+  int Cb  = (pc.C + 3) / 4;
+  int n   = int(gl_WorkGroupID.x);
   int tid = int(gl_LocalInvocationID.x);
-  for (int cb = tid; cb < Cb; cb += 256) {
-    vec4 a = vec4(avgbuf[n * Cb + cb]);
-    for (int l = 0; l < 4; ++l) if (cb * 4 + l < pc.C) avg[cb * 4 + l] = a[l];
+  // Pool: fold the splits of each channel block in split order (a fixed summation order).
+  for (int cb = tid; cb < Cb; cb += SE_WORKGROUP) {
+    vec4 acc  = vec4(0.0);
+    int  base = (n * Cb + cb) * pc.groups;
+    for (int g = 0; g < pc.groups; ++g) acc += part[base + g];
+    vec4 a = acc / float(pc.hw);
+    for (int l = 0; l < 4; ++l) if (cb * 4 + l < pc.C) chan[cb * 4 + l] = a[l];
   }
   barrier();
-  for (int j = tid; j < pc.Cr; j += 256) {
-    float acc = float(b1[j]);
-    int row = j * pc.C;
-    for (int c = 0; c < pc.C; ++c) acc += float(w1[row + c]) * avg[c];
-    s1[j] = max(acc, 0.0);
-  }
-  barrier();
-  for (int cb = tid; cb < Cb; cb += 256) {
-    vec4 o = vec4(0.0);
-    for (int l = 0; l < 4; ++l) {
-      int k = cb * 4 + l;
-      if (k >= pc.C) continue;
-      float acc = float(b2[k]);
-      int row = k * pc.Cr;
-      for (int j = 0; j < pc.Cr; ++j) acc += float(w2[row + j]) * s1[j];
-      o[l] = clamp(pc.alpha * acc + pc.beta, 0.0, 1.0);
+  // FC1 + activation. slices is uniform across the workgroup, so the barrier inside the branch is
+  // reached by every thread.
+  int slices = max(SE_WORKGROUP / pc.Cr, 1);
+  if (slices > 1) {
+    int   j          = tid % pc.Cr;
+    int   s          = tid / pc.Cr;
+    float partialSum = 0.0;
+    if (s < slices) {
+      for (int c = s; c < pc.C; c += slices) partialSum += w1t[c * pc.Cr + j] * chan[c];
     }
-    scale[n * Cb + cb] = vec4(o);
+    red[tid] = partialSum;
+    barrier();
+    for (int jj = tid; jj < pc.Cr; jj += SE_WORKGROUP) {
+      float acc = b1[jj];
+      for (int ss = 0; ss < slices; ++ss) acc += red[jj + ss * pc.Cr];
+      s1[jj] = seAct(pc.act, acc);
+    }
+  } else {
+    for (int jj = tid; jj < pc.Cr; jj += SE_WORKGROUP) {
+      float acc = b1[jj];
+      for (int c = 0; c < pc.C; ++c) acc += w1t[c * pc.Cr + jj] * chan[c];
+      s1[jj] = seAct(pc.act, acc);
+    }
+  }
+  barrier();
+  // FC2 + gate, one output channel per thread; the gated value replaces the pooled one in chan[].
+  for (int k = tid; k < pc.C; k += SE_WORKGROUP) {
+    float acc = b2[k];
+    for (int j = 0; j < pc.Cr; ++j) acc += w2t[j * pc.C + k] * s1[j];
+    chan[k] = seGate(pc.gate, acc, pc.alpha, pc.beta);
+  }
+  barrier();
+  // Store the blocked scale; padding lanes past C stay zero.
+  for (int cb = tid; cb < Cb; cb += SE_WORKGROUP) {
+    vec4 o = vec4(0.0);
+    for (int l = 0; l < 4; ++l) if (cb * 4 + l < pc.C) o[l] = chan[cb * 4 + l];
+    scale[n * Cb + cb] = o;
   }
 }

@@ -1,66 +1,81 @@
-/// @file
-/// CPU reference for the fused Squeeze-Excite middle (OpType::FusedSE).
-///
-/// Collapses the Squeeze-Excite scale chain GlobalAvgPool -> Conv1x1(+relu) -> Conv1x1 ->
-/// HardSigmoid into a single kernel that reads the already-pooled channel descriptor and emits the
-/// per-channel scale. The 1x1 convolutions over a [N,C,1,1] tensor are exactly two fully-connected
-/// layers (matrix-vector products), so the kernel is FC1 -> ReLU -> FC2 -> HardSigmoid. The
-/// GlobalAvgPool and the downstream channel-broadcast Mul are left as separate nodes; this op
-/// produces only the scale that the Mul consumes.
-///
-/// This is the numerically-exact oracle: FC accumulations run in double so the reference does not
-/// itself introduce fp32 rounding.
+// CPU oracle of the fused Squeeze-Excite scale (core/squeeze_excite.h): pools the feature map
+// [N,C,H,W] to one value per channel, runs FC1 -> activation -> FC2 -> gate and writes the channel
+// scale [N,C,1,1]. Sums accumulate in double, so the result is the reference the GPU kernel's
+// fp32 arithmetic is gated against.
 #include "backend/cpu/cpu_backend.h"
+#include "core/squeeze_excite.h"
 #include "vknn/op.h"
 #include <algorithm>
+#include <cmath>
 
 namespace vknn {
     namespace {
+        float seActivate(ActType act, float x) {
+            switch (act)
+            {
+                case ActType::SiLU:
+                    return x / (1.0f + std::exp(-x));
+                case ActType::HardSwish:
+                    return x * std::min(std::max(x + 3.0f, 0.0f), 6.0f) / 6.0f;
+                default:
+                    return std::max(x, 0.0f); // Relu
+            }
+        }
+        float seGateValue(UnaryType gate, float x, float alpha, float beta) {
+            if (gate == UnaryType::Sigmoid)
+            {
+                return 1.0f / (1.0f + std::exp(-x));
+            }
+            return std::min(std::max(alpha * x + beta, 0.0f), 1.0f); // HardSigmoid
+        }
+
         struct FusedSeCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
-                // Operand layout (matches the fusion pass and the Vulkan sibling):
-                //   [0] avg  pooled channel descriptor [N,C,1,1]
-                //   [1] W1   FC1 weights, row-major [Cr][C]   [2] b1  FC1 bias [Cr] (optional)
-                //   [3] W2   FC2 weights, row-major [C][Cr]   [4] b2  FC2 bias [C]  (optional)
-                // An absent Conv bias is kNoTensor, decoded here to a null pointer treated as zero.
-                const RtTensor &A  = ctx.t(node.inputs[0]); // pooled avg [N,C,1,1]
-                const RtTensor &W1 = ctx.t(node.inputs[1]);
-                const RtTensor &W2 = ctx.t(node.inputs[3]);
+                const RtTensor &X  = ctx.t(node.inputs[0]); // feature map [N,C,H,W]
+                const RtTensor &W1 = ctx.t(node.inputs[1]); // [Cr][C][1][1]
+                const RtTensor &W2 = ctx.t(node.inputs[3]); // [C][Cr][1][1]
                 const float    *b1 = node.inputs[2] != kNoTensor ? ctx.t(node.inputs[2]).host.f32() : nullptr;
                 const float    *b2 = node.inputs[4] != kNoTensor ? ctx.t(node.inputs[4]).host.f32() : nullptr;
                 RtTensor       &Y  = ctx.t(node.outputs[0]);
-                NCHW            x  = NCHW::from(A.shape);
-                // C is the full channel width (FC2 output); Cr is the reduced "squeeze" width, taken as
-                // W1's row count since W1 is [Cr][C].
-                int64_t      N = x.n, C = x.c, Cr = W1.shape[0];
-                const float *avg = A.host.f32();
-                const float *w1  = W1.host.f32();
-                const float *w2  = W2.host.f32();
-                // HardSigmoid slope/offset carried through from the fused node: scale = clamp(a*z + b, 0, 1).
-                float              a = node.actLo, b = node.actHi;
-                float             *y = cpu::allocOut(Y, {N, C, 1, 1});
-                std::vector<float> s1(Cr); // FC1 activations for the current image, reused across n
+                const NCHW      x  = NCHW::from(X.shape);
+                const int64_t   N = x.n, C = x.c, Cr = W1.shape[0], hw = x.h * x.w;
+                const float    *xd = X.host.f32();
+                const float    *w1 = W1.host.f32();
+                const float    *w2 = W2.host.f32();
+                const ActType   act   = node.fusedAct;
+                const UnaryType gate  = (UnaryType) node.subOp;
+                const float     alpha = node.actLo, beta = node.actHi;
+                float          *y     = cpu::allocOut(Y, {N, C, 1, 1});
+                std::vector<float> avg((size_t) C), s1((size_t) Cr); // per image, reused across n
                 for (int64_t n = 0; n < N; ++n)
                 {
-                    // FC1: s1[j] = ReLU( b1[j] + sum_c W1[j][c] * avg[n][c] ), squeeze to Cr channels.
+                    for (int64_t c = 0; c < C; ++c)
+                    {
+                        const float *p = xd + (n * C + c) * hw;
+                        double       s = 0;
+                        for (int64_t i = 0; i < hw; ++i)
+                        {
+                            s += p[i];
+                        }
+                        avg[(size_t) c] = hw > 0 ? (float) (s / (double) hw) : 0.f;
+                    }
                     for (int64_t j = 0; j < Cr; ++j)
                     {
                         double s = b1 ? b1[j] : 0.0;
                         for (int64_t c = 0; c < C; ++c)
                         {
-                            s += (double) w1[j * C + c] * avg[n * C + c];
+                            s += (double) w1[j * C + c] * avg[(size_t) c];
                         }
-                        s1[j] = s > 0 ? (float) s : 0.f;
+                        s1[(size_t) j] = seActivate(act, (float) s);
                     }
-                    // FC2 + HardSigmoid: expand back to C channels and clamp to the [0,1] scale.
                     for (int64_t k = 0; k < C; ++k)
                     {
                         double s = b2 ? b2[k] : 0.0;
                         for (int64_t j = 0; j < Cr; ++j)
                         {
-                            s += (double) w2[k * Cr + j] * s1[j];
+                            s += (double) w2[k * Cr + j] * s1[(size_t) j];
                         }
-                        y[n * C + k] = std::min(std::max(a * (float) s + b, 0.f), 1.f);
+                        y[n * C + k] = seGateValue(gate, (float) s, alpha, beta);
                     }
                 }
             }

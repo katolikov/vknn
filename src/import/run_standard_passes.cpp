@@ -100,11 +100,12 @@ namespace vknn {
         eliminateIdentity(g);
         foldBatchNorm(g);
         lowerBatchNorm(g); // whatever foldBatchNorm left becomes a fusable per-channel Mul+Add
-        // fuseActivations is the PREREQUISITE of the two experimental block-kernel fusions, not an
-        // activation optimization in its own right. fuseSqueezeExcite and fuseDwPw match on
-        // conv.fusedAct and both run here, ahead of the general pointwise fusion that otherwise
-        // sets it, so the fold has to precede them; it runs exactly when at least one of them will,
-        // once, ahead of both, so neither flag changes the graph the other pass sees.
+        // fuseActivations is the PREREQUISITE of the experimental dwpw block fusion, not an
+        // activation optimization in its own right. fuseDwPw matches on conv.fusedAct and runs here,
+        // ahead of the general pointwise fusion that otherwise sets it, so the fold has to precede
+        // it; it runs exactly when fuseDwPw will. fuseSqueezeExcite matches the activation in both
+        // forms (the conv epilogue and the standalone node or Sigmoid-Mul diamond), so it needs no
+        // prefold.
         //
         // Activation folding at every optimization level is owned by fusePointwiseChains below,
         // whose inline-act path sets the same conv.fusedAct from the same Relu/Clip, and re-encodes
@@ -113,10 +114,10 @@ namespace vknn {
         // to the pointwise pass's own (same nodes, same epilogues, same encoded steps; only which of
         // two equivalent tensor ids survives the fold differs, and the CPU oracle is byte-identical).
         // So it is not a second, independent activation fusion, and adding it to the -O1 set would
-        // buy no fusion while changing every affected model's compiled bytes. Read the condition as
-        // the boolean below, not as "fuse-se or fuse-dwpw": with both off nothing needs the fold, so
-        // nothing loses it (tests/test_activation_fold_coupling.cpp pins that).
-        const bool blockFusionsNeedActivationEpilogues = opt.fuseSqueezeExcite || opt.fuseDwPw;
+        // buy no fusion while changing every affected model's compiled bytes. With fuse-dwpw off
+        // nothing needs the fold, so nothing loses it (tests/test_activation_fold_coupling.cpp pins
+        // that).
+        const bool blockFusionsNeedActivationEpilogues = opt.fuseDwPw;
         if (blockFusionsNeedActivationEpilogues)
         {
             fuseActivations(g);

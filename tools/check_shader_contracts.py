@@ -165,6 +165,8 @@ LANE_MIRRORS = (
     ("wino_out4_fp16.comp", "core/wino_f63.h", (("LANES", "kWinoF43TransformLanes"), ("UNITS_PER_GROUP", "kWinoF43TransformUnitsPerGroup"))),
     ("fc_split.comp", "core/gemm_dispatch_rules.h", (("LANES_K", "kFcSplitLanesK"), ("OUTPUTS", "kFcSplitOutputsPerGroup"))),
     ("fc_split_fp16.comp", "core/gemm_dispatch_rules.h", (("LANES_K", "kFcSplitLanesK"), ("OUTPUTS", "kFcSplitOutputsPerGroup"))),
+    ("fused_se.comp", "core/squeeze_excite.h", (("SE_MAX_CHANNELS", "kSeMaxChannels"), ("SE_MAX_SQUEEZE", "kSeMaxSqueeze"), ("SE_ACT_RELU", "kSeActRelu"), ("SE_ACT_SILU", "kSeActSiLU"), ("SE_ACT_HARDSWISH", "kSeActHardSwish"), ("SE_GATE_HARDSIGMOID", "kSeGateHardSigmoid"), ("SE_GATE_SIGMOID", "kSeGateSigmoid"))),
+    ("fused_se_fp16.comp", "core/squeeze_excite.h", (("SE_MAX_CHANNELS", "kSeMaxChannels"), ("SE_MAX_SQUEEZE", "kSeMaxSqueeze"), ("SE_ACT_RELU", "kSeActRelu"), ("SE_ACT_SILU", "kSeActSiLU"), ("SE_ACT_HARDSWISH", "kSeActHardSwish"), ("SE_GATE_HARDSIGMOID", "kSeGateHardSigmoid"), ("SE_GATE_SIGMOID", "kSeGateSigmoid"))),
 )
 
 

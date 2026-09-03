@@ -4,6 +4,7 @@
 // CPU op, and the flat row-major kernels bound the decodable rank. Each refusal names its gate so
 // fallback diagnostics and the support report state WHY a node left the GPU.
 #include "core/vk_gates.h"
+#include "core/squeeze_excite.h"
 #include "backend/cpu/cpu_backend.h"
 #include "core/fused_attention.h"
 #include "core/fused_dwpw.h"
@@ -167,14 +168,15 @@ namespace vknn {
         }
         if (nd.type == OpType::FusedSE)
         {
-            // fixed LDS arrays: avg[1024], s1[256]
+            // The kernel's shared arrays bound the widths (core/squeeze_excite.h); the import pass
+            // only fuses chains that fit, so this refusal guards a hand-built graph.
             const Shape &f  = g.desc(nd.inputs[0]).shape;
             const Shape &w1 = g.desc(nd.inputs[1]).shape;
-            if (f.size() == 4 && f[1] <= 1024 && !w1.empty() && w1[0] <= 256)
+            if (f.size() == 4 && !w1.empty() && seShapeFits(f[1], w1[0]))
             {
                 return true;
             }
-            return refuse(whyNot, "FusedSE: shape exceeds LDS caps (C <= 1024, squeeze <= 256)");
+            return refuse(whyNot, "FusedSE: shape exceeds the fused kernel's widths (C <= " + std::to_string(kSeMaxChannels) + ", squeeze <= " + std::to_string(kSeMaxSqueeze) + ")");
         }
         if (nd.type == OpType::ConstantOfShape)
         {

@@ -51,10 +51,11 @@
 //                       graph-input order, each numElements*dtypeSize bytes (the vknn_run_io input
 //                       convention). Only meaningful with -Os.
 //     --[no-]fuse-se / --[no-]fuse-dwpw / --[no-]fuse-pointwise / --[no-]fuse-gridsample-warp / --[no-]lower-conv
-//                       fuse-se and fuse-dwpw additionally enable the activation prefold they match
-//                       on (reported as act-prefold in the pass line). That prefold is redundant
-//                       with fuse-pointwise, which folds the same activations into the same
-//                       conv.fusedAct, so it does not confound a fuse-se / fuse-dwpw A/B.
+//                       fuse-dwpw additionally enables the activation prefold it matches on
+//                       (reported as act-prefold in the pass line). That prefold is redundant with
+//                       fuse-pointwise, which folds the same activations into the same
+//                       conv.fusedAct, so it does not confound a fuse-dwpw A/B. fuse-se matches
+//                       the activation in either form and needs no prefold.
 //     --no-dequantize   keep QuantizeLinear/DequantizeLinear ops instead of folding DQ weights and
 //                       collapsing matching QDQ sandwiches (default: quantized checkpoints compile
 //                       to plain float graphs and run dequantized)
@@ -972,11 +973,11 @@ int main(int argc, char **argv) {
     try
     {
         g = importOnnx(onnx);
-        // act-prefold reports the activation fold the block fusions require as their prerequisite.
-        // It is not an independent knob: it follows fuse-se/fuse-dwpw, so printing it keeps the two
-        // arms of a block-fusion A/B self-documenting instead of leaving the difference implicit.
+        // act-prefold reports the activation fold the dwpw block fusion requires as its prerequisite.
+        // It is not an independent knob: it follows fuse-dwpw, so printing it keeps the two arms of
+        // a block-fusion A/B self-documenting instead of leaving the difference implicit.
         printf("[compile] %zu nodes, %zu weights. running passes (-O%d: fuse-se=%d fuse-dwpw=%d act-prefold=%d fuse-pointwise=%d lower-conv=%d)\n", g.nodes.size(),
-               g.initializers.size(), optLevel, opt.fuseSqueezeExcite, opt.fuseDwPw, opt.fuseSqueezeExcite || opt.fuseDwPw, opt.fusePointwiseChains, opt.lowerConv);
+               g.initializers.size(), optLevel, opt.fuseSqueezeExcite, opt.fuseDwPw, opt.fuseDwPw, opt.fusePointwiseChains, opt.lowerConv);
         runStandardPasses(g, opt);
     } catch (const Error &e)
     {

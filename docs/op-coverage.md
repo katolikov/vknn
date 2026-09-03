@@ -165,7 +165,7 @@ flags override a single pass on top of the level:
   shifts, exactly as Winograd's does). Experimental and off by default — the current 64×64×16
   kernel loses to the direct conv on classifier-CNN shapes (small output areas starve its pixel
   tiles); opt in with `--lower-conv` and measure per model.
-- **Squeeze-Excite** chain folds to one kernel (`-O2` or `--fuse-se`, experimental).
+- **Squeeze-Excite** chain (GlobalAveragePool, two 1x1 convs, Relu/SiLU/HardSwish, Sigmoid/HardSigmoid gate) can fold to one pooled kernel per block (`-O2` or `--fuse-se`, opt-in: the unfused chain measured faster on the reference device, since the 1x1 convs on a [N,C,1,1] tensor already sit at the dispatch floor and a one-workgroup kernel is latency-bound).
 - **Depthwise + 1×1-project** folds to one kernel; the expanded intermediate stays on-chip,
   fp16-rounded like the unfused store. Byte-identical to the unfused graph on the CPU oracle and
   on the fp32 GPU path; the fp16 GPU path still diverges, so the pass stays experimental
