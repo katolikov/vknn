@@ -157,36 +157,45 @@ def check_shader(name, src):
 #    and the host sizes the dispatch from kWinoF43TransformLanes / kWinoF43TransformUnitsPerGroup
 #    in src/core/wino_f63.h (winoTransformGroups). A drift between the two launches a grid the
 #    shader decodes differently: units at the end of every workgroup go unwritten, silently.
-TRANSFORM_LANE_KERNELS = ("wino_input4_fp16.comp", "wino_out4_fp16.comp")
-TRANSFORM_LANE_CONSTANTS = (("LANES", "kWinoF43TransformLanes"), ("UNITS_PER_GROUP", "kWinoF43TransformUnitsPerGroup"))
+#    The fully-connected split kernels (fc_split*.comp) mirror kFcSplitLanesK / kFcSplitOutputsPerGroup
+#    from src/core/gemm_dispatch_rules.h the same way.
+# Each entry: (shader file, header path under src/, ((shader macro, host constant), ...)).
+LANE_MIRRORS = (
+    ("wino_input4_fp16.comp", "core/wino_f63.h", (("LANES", "kWinoF43TransformLanes"), ("UNITS_PER_GROUP", "kWinoF43TransformUnitsPerGroup"))),
+    ("wino_out4_fp16.comp", "core/wino_f63.h", (("LANES", "kWinoF43TransformLanes"), ("UNITS_PER_GROUP", "kWinoF43TransformUnitsPerGroup"))),
+    ("fc_split.comp", "core/gemm_dispatch_rules.h", (("LANES_K", "kFcSplitLanesK"), ("OUTPUTS", "kFcSplitOutputsPerGroup"))),
+    ("fc_split_fp16.comp", "core/gemm_dispatch_rules.h", (("LANES_K", "kFcSplitLanesK"), ("OUTPUTS", "kFcSplitOutputsPerGroup"))),
+)
 
 
 def _host_constant(header_src, name):
-    m = re.search(r"constexpr\s+int\s+%s\s*=\s*(\d+)\s*;" % re.escape(name), header_src)
+    m = re.search(r"constexpr\s+(?:int|uint32_t|int64_t|size_t)\s+%s\s*=\s*(\d+)\s*;" % re.escape(name), header_src)
     return int(m.group(1)) if m else None
 
 
 def check_transform_lane_constants(sources, shaders_dir):
-    header = os.path.join(os.path.dirname(os.path.abspath(shaders_dir)), "src", "core", "wino_f63.h")
-    if not os.path.isfile(header):
-        return ["%s not found; cannot check the cooperative-transform lane constants" % header]
-    with open(header, encoding="utf-8") as f:
-        header_src = f.read()
+    root = os.path.dirname(os.path.abspath(shaders_dir))
     fatals = []
-    for kernel in TRANSFORM_LANE_KERNELS:
+    for kernel, header_rel, pairs in LANE_MIRRORS:
+        header = os.path.join(root, "src", header_rel)
+        if not os.path.isfile(header):
+            fatals.append("%s not found; cannot check %s's lane constants" % (header, kernel))
+            continue
+        with open(header, encoding="utf-8") as f:
+            header_src = f.read()
         src = sources.get(kernel)
         if src is None:
-            fatals.append("%s missing; the host dispatches it (winoTransformGroups)" % kernel)
+            fatals.append("%s missing; the host dispatches it from %s" % (kernel, header_rel))
             continue
-        for macro, host_name in TRANSFORM_LANE_CONSTANTS:
+        for macro, host_name in pairs:
             m = re.search(r"^#define\s+%s\s+(\d+)" % macro, src, re.M)
             host = _host_constant(header_src, host_name)
             if m is None or host is None:
-                fatals.append("%s: cannot find #define %s or %s in wino_f63.h" % (kernel, macro, host_name))
+                fatals.append("%s: cannot find #define %s or %s in %s" % (kernel, macro, host_name, header_rel))
             elif int(m.group(1)) != host:
-                fatals.append("%s: #define %s %s disagrees with %s = %d in src/core/wino_f63.h; the host "
-                              "sizes the transform dispatch from the header, the shader decodes with the macro"
-                              % (kernel, macro, m.group(1), host_name, host))
+                fatals.append("%s: #define %s %s disagrees with %s = %d in src/%s; the host sizes the "
+                              "dispatch from the header, the shader decodes with the macro"
+                              % (kernel, macro, m.group(1), host_name, host, header_rel))
     return fatals
 
 

@@ -1,0 +1,44 @@
+#version 450
+// fp32-storage twin of fc_split_fp16.comp: the same lane split and fixed-order reduce over fp32
+// [Cout][Cin] weight rows (see that file for the rule).
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
+#include "common.glsl"
+#ifdef PW_EPI
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
+#define LANES_K 16 // kFcSplitLanesK
+#define OUTPUTS 4  // kFcSplitOutputsPerGroup
+layout(local_size_x = LANES_K, local_size_y = OUTPUTS) in;
+layout(std430, binding = 0) readonly  buffer Src { float src[]; };
+layout(std430, binding = 1) readonly  buffer Wt  { float wt[]; };
+layout(std430, binding = 2) readonly  buffer Bs  { float bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { float dst[]; };
+layout(push_constant) uniform PC { int Cin, Cout, M, srcStride, dstStride, act; float actLo, actHi; } pc;
+shared float part[OUTPUTS][LANES_K];
+
+void main() {
+  uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  uint kx = gl_LocalInvocationID.x, oy = gl_LocalInvocationID.y;
+  uint gid = group * OUTPUTS + oy;
+  bool live = gid < uint(pc.M) * uint(pc.Cout);
+  uint m = live ? gid / uint(pc.Cout) : 0u;
+  uint oc = live ? gid % uint(pc.Cout) : 0u;
+  uint wbase = oc * uint(pc.Cin);
+  uint sbase = m * uint(pc.srcStride);
+  float acc = 0.0;
+  if (live) {
+    for (int ic = int(kx); ic < pc.Cin; ic += LANES_K) acc += wt[wbase + uint(ic)] * src[sbase + uint(ic)];
+  }
+  part[oy][kx] = acc;
+  barrier();
+  if (kx != 0u || !live) return;
+  float r = bias[oc];
+  for (int i = 0; i < LANES_K; ++i) r += part[oy][i];
+  float v = vx_act(r, pc.act, pc.actLo, pc.actHi);
+#ifdef PW_EPI
+  int di = int(m * uint(pc.dstStride) + oc);
+  v = (plan.worldFlat != 0) ? pw_apply(v, di) : pw_apply_nc4(v, di);
+#endif
+  dst[m * uint(pc.dstStride) + oc] = v;
+}

@@ -9,6 +9,7 @@
 // needs a device gate on a device whose subgroupSize is not 64.
 #include "backend/vulkan/ops/pw_splitk_rule.h"
 #include "core/conv_dispatch_rules.h"
+#include "core/gemm_dispatch_rules.h"
 #include "vknn/hint.h"
 #include <algorithm>
 #include <gtest/gtest.h>
@@ -544,5 +545,24 @@ TEST(ConvDispatchWidth, NarrowStridedRowTileCoversTheMap) {
         EXPECT_EQ(narrow, ocbGroups * rowBlocks * ((240 / kNarrow + tilesPerWg - 1) / tilesPerWg));
         EXPECT_EQ(wide, ocbGroups * rowBlocks * ((240 / kDefault + tilesPerWg - 1) / tilesPerWg));
         EXPECT_GT(narrow, wide);
+    }
+}
+
+// The fully-connected op splits a starved output count over lanes: a 1000-way head (M=1) and a
+// two-view camera head take the split kernel, a wide projection keeps the serial one; the split
+// dispatch covers every output with kFcSplitOutputsPerGroup per workgroup.
+TEST(ConvDispatchWidth, FullyConnectedSplitsStarvedHeads) {
+    EXPECT_TRUE(fcSplitActive(1000));
+    EXPECT_TRUE(fcSplitActive(2 * 1000));
+    EXPECT_TRUE(fcSplitActive(kFcSplitMaxOutputs));
+    EXPECT_FALSE(fcSplitActive(kFcSplitMaxOutputs + 1));
+    EXPECT_FALSE(fcSplitActive(0));
+    EXPECT_EQ(fcSplitWorkgroups(1000), 250);
+    EXPECT_EQ(fcSplitWorkgroups(1001), 251);
+    EXPECT_EQ(kFcSplitLanesK * kFcSplitOutputsPerGroup, 64u);
+    for (int64_t outputs = 1; outputs <= 4096; ++outputs)
+    {
+        EXPECT_GE(fcSplitWorkgroups(outputs) * (int64_t) kFcSplitOutputsPerGroup, outputs);
+        EXPECT_LT(fcSplitWorkgroups(outputs) * (int64_t) kFcSplitOutputsPerGroup - outputs, (int64_t) kFcSplitOutputsPerGroup);
     }
 }

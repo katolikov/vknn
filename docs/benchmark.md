@@ -159,6 +159,17 @@ cosine unchanged, and BETTER on DenseNet-121 (+2.4 dB) and YOLOv8n (+0.9 dB)):
   Kahan-compensated fp32 partials so the two-pass sum tracks the true value tighter than the
   single-pass chain. `setHint(Hint::SplitKConv, Mode::Auto|On|Off)` overrides the rule (Auto is the
   default and the rule is active out of the box); the hint is a cache-variant key field.
+- **Lane-split fully-connected heads** (`fc_split`, `core/gemm_dispatch_rules.h`): a Gemm with at
+  most 16384 outputs (every classifier head) puts 16 lanes on each output with a fixed-order
+  shared-memory reduce instead of one thread per output; a 2048->1000 head that ran 16 waves over
+  its 4 MB weight read at 23 GB/s dispatches 250 workgroups. A shape rule, never a race, so the
+  summation order is deterministic.
+- **Per-op traffic audit** (`benchmark/scripts/traffic_audit.py model.onnx profile.log`): joins a
+  `--profile` log with the ONNX graph and sets every op's minimal DRAM traffic (fp16 NC4HW4
+  activations, fp16 weights) against its GPU time - achieved GB/s and, for MAC-bearing ops,
+  TFLOPS - per op and per op type, with elided zero-copy views excluded. Ops far below both the
+  device's stream rate and its arithmetic ceiling are latency-bound and the ones to restructure or
+  fuse; ops at the stream rate move only with less traffic.
 - **Pointwise split-K rule recalibrated** (`ops/pw_splitk_rule.h`): with the chunk decode sized to
   the map, the 1x1 split pair wins only where the output plane has at most 16384 channel-block
   pixels (`Coutb * OH*OW`) and at most 128 of them per input channel-block: 128->64 @14x14 wins

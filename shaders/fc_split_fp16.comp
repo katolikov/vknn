@@ -1,0 +1,57 @@
+#version 450
+// Fully-connected (Gemm) kernel for small output counts: kFcSplitLanesK lanes split every output's
+// contraction over the input channels and reduce through shared memory in a fixed lane order, so a
+// classifier head with a thousand outputs dispatches hundreds of waves instead of sixteen. The
+// summation order is a shape rule (src/core/gemm_dispatch_rules.h), never a race. Weights are
+// [Cout][Cin] fp16 rows, as fc_fp16.comp reads them.
+#define VKNN_NO_RTE 1 // this kernel avoids the float-controls execution mode (miscompiled by some drivers); TO_STORE rounds explicitly
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#include "store16.glsl"
+#include "common.glsl"
+#ifdef PW_EPI
+#define STORE float16_t
+#define PW_EPI_BASE 4
+#include "pw_epilogue.glsl"
+#endif
+#define LANES_K 16 // kFcSplitLanesK
+#define OUTPUTS 4  // kFcSplitOutputsPerGroup
+layout(local_size_x = LANES_K, local_size_y = OUTPUTS) in;
+layout(std430, binding = 0) readonly buffer Src { f16vec4 src[]; };
+layout(std430, binding = 1) readonly buffer Wt { f16vec4 wt[]; };
+layout(std430, binding = 2) readonly buffer Bs { float16_t bias[]; };
+layout(std430, binding = 3) writeonly buffer Dst { float16_t dst[]; };
+layout(push_constant) uniform PC {
+  int Cin, Cout, M, srcStride, dstStride, act;
+  float actLo, actHi;
+}
+pc;
+shared vec4 part[OUTPUTS][LANES_K];
+
+void main() {
+  uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+  uint kx = gl_LocalInvocationID.x, oy = gl_LocalInvocationID.y;
+  uint gid = group * OUTPUTS + oy; // output element: m * Cout + oc
+  bool live = gid < uint(pc.M) * uint(pc.Cout);
+  uint m = live ? gid / uint(pc.Cout) : 0u;
+  uint oc = live ? gid % uint(pc.Cout) : 0u;
+  int cb = (pc.Cin + 3) / 4;                  // contraction length in f16vec4 units
+  uint wrow = oc * uint(cb);
+  uint srow = m * uint(pc.srcStride) / 4u;    // srcStride is in float elems; src is f16vec4
+  vec4 acc = vec4(0.0);
+  if (live) {
+    for (int j = int(kx); j < cb; j += LANES_K) acc += vec4(src[srow + uint(j)]) * vec4(wt[wrow + uint(j)]);
+  }
+  part[oy][kx] = acc;
+  barrier();
+  if (kx != 0u || !live) return;
+  vec4 s = vec4(0.0);
+  for (int i = 0; i < LANES_K; ++i) s += part[oy][i];
+  float r = s.x + s.y + s.z + s.w + float(bias[oc]);
+  float v = vx_act(r, pc.act, pc.actLo, pc.actHi);
+#ifdef PW_EPI
+  int di = int(m * uint(pc.dstStride) + oc);
+  v = (plan.worldFlat != 0) ? pw_apply(v, di) : pw_apply_nc4(v, di);
+#endif
+  dst[m * uint(pc.dstStride) + oc] = TO_STORE(v);
+}

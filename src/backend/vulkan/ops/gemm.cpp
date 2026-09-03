@@ -1,5 +1,6 @@
 // Gemm / fully-connected classifier. The pooled input is NC4HW4 with H=W=1, so the packed
 // buffer is just the channel vector. Weights are stored row-major [Cout][Cin].
+#include "core/gemm_dispatch_rules.h"
 #include "pw_plan.h"
 #include "vk_op_common.h"
 
@@ -14,7 +15,8 @@ namespace vknn {
             std::shared_ptr<vk::Buffer>          wbuf, bbuf;
             PwEpi                                epi;
             FcPC                                 pc {};
-            int64_t                              Cout = 0;
+            int64_t                              Cout  = 0;
+            bool                                 split = false; // the lane-split kernel (fc_split) serves a starved output count
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 const Graph &g      = *env.graph;
@@ -82,7 +84,11 @@ namespace vknn {
                 int dstStride = (int) (g.desc(node.outputs[0]).gpuFlat ? CoutL : pad4(CoutL));
                 pc            = {(int) Cin, (int) CoutL, (int) M, srcStride, dstStride, (int) node.fusedAct, node.actLo, node.actHi};
                 epi.prepare(node, env, g.desc(node.outputs[0]).gpuFlat, g.desc(node.outputs[0]).shape);
-                pipe = env.pipeline(shader((std::string("fc") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(FcPC), std::vector<uint32_t> {});
+                // A small output count (a classifier head) is parallelism-starved one thread per
+                // output; the split kernel puts kFcSplitLanesK lanes on each output instead. A shape
+                // rule, so the summation order never depends on a timing race.
+                split = fcSplitActive(CoutL * M);
+                pipe  = env.pipeline(shader((std::string(split ? "fc_split" : "fc") + epi.suffix()).c_str(), env.useFp16), 4 + epi.extraBufs(), sizeof(FcPC), std::vector<uint32_t> {});
             }
 
             void record(VkCommandBuffer cmd, const Node &node, VkOpEnv &env) override {
@@ -90,10 +96,12 @@ namespace vknn {
                 vk::Buffer           *dst  = env.devBuf(node.outputs[0]);
                 std::vector<VkBuffer> bufs = {src->handle(), wbuf->handle(), bbuf->handle(), dst->handle()};
                 epi.append(bufs, node, env, dst->handle());
-                // One thread per output element: Cout channels * M rows, ceil-divided into kLocalSize-wide
-                // workgroups. The shader linearizes gid across a 2D grid, so an overflowing X count folds
-                // into Y — no per-op 65535-limit handling needed here.
-                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), groups(Cout * pc.M, kLocalSize));
+                // Serial kernel: one thread per output element (Cout channels * M rows) in
+                // kLocalSize-wide workgroups. Split kernel: kFcSplitOutputsPerGroup outputs per
+                // workgroup, kFcSplitLanesK lanes each. Both shaders linearize the workgroup id across
+                // a 2D grid, so an overflowing X count folds into Y — no per-op 65535-limit handling.
+                const int64_t outputs = Cout * pc.M;
+                pipe->dispatch(cmd, bufs, &pc, sizeof(pc), split ? (uint32_t) fcSplitWorkgroups(outputs) : groups(outputs, kLocalSize));
             }
         };
 
