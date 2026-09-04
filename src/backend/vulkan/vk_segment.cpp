@@ -58,9 +58,13 @@ namespace vknn {
                 {
                     continue;
                 }
-                for (TensorId in: g.nodes[ni].inputs)
+                // A node reads its inputs and the tensors on its fused edges.
+                std::vector<TensorId> reads(g.nodes[ni].inputs.begin(), g.nodes[ni].inputs.end());
+                reads.push_back(g.nodes[ni].fusedResidual);
+                reads.push_back(g.nodes[ni].fusedBias);
+                for (TensorId in: reads)
                 {
-                    if (produced.count(in))
+                    if (in != kNoTensor && produced.count(in))
                     {
                         readOutsideSegment_.insert(in);
                     }

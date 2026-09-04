@@ -186,7 +186,7 @@ TEST(PinnedHostMemory, PinnedTensorReductionsRankZeroAndNonFp32Outputs) {
     const std::vector<float> x  = sample();
     Tensor                   in = Tensor::pinned({kN, kC, kH, kW}, "x");
     std::memcpy(in.data(), x.data(), x.size() * sizeof(float));
-    Tensor              outBinding = Tensor::toPinned({kN, kC, kH, kW}, "y");
+    Tensor              outBinding = Tensor::toPinned({kN, kC, kH, kW}); // EXPERIMENT: no name, as the reviewer's claim describes
     std::vector<Tensor> outs       = model.run({in}, {outBinding});
     ASSERT_EQ(outs.size(), 1u);
     EXPECT_EQ(outs[0].pinnedBlock(), outBinding.pinnedBlock()) << "the block is still the caller's";
@@ -196,5 +196,34 @@ TEST(PinnedHostMemory, PinnedTensorReductionsRankZeroAndNonFp32Outputs) {
     for (int64_t i = 0; i < kElems; ++i)
     {
         EXPECT_FLOAT_EQ(outs[0][i], host[0][i]) << "element " << i << ": the fp16 output must reach the block widened";
+        EXPECT_FLOAT_EQ(outBinding.data()[i], host[0][i]) << "EXPERIMENT: caller's own block element " << i << " (unnamed binding)";
+    }
+}
+
+// A pinned output binding with an empty name on a single-output model resolves to that output,
+// so a non-fp32 output still reaches the block widened.
+TEST(PinnedHostMemory, UnnamedPinnedOutputBindingResolvesToTheSingleOutput) {
+    Graph g                              = reluGraph();
+    g.tensors[g.nodes[0].outputs[0]].dtype = DType::Float16;
+    Config cfg                           = cpuConfig();
+    auto   sess                          = Session::create(std::move(g), cfg);
+    ASSERT_NE(sess, nullptr);
+    const std::string path = (std::filesystem::temp_directory_path() / "vknn_pinned_relu_f16_unnamed.vxm").string();
+    ASSERT_TRUE(sess->saveOptimized(path));
+    Model model = Model::load(path, cfg);
+    ASSERT_FALSE(model.outputs().empty());
+    const std::vector<float> x  = sample();
+    Tensor                   in = Tensor::pinned({kN, kC, kH, kW}); // unnamed input, unnamed output binding
+    std::memcpy(in.data(), x.data(), x.size() * sizeof(float));
+    Tensor              outBinding = Tensor::toPinned({kN, kC, kH, kW});
+    std::vector<Tensor> outs       = model.run({in}, {outBinding});
+    ASSERT_EQ(outs.size(), 1u);
+    EXPECT_EQ(outs[0].pinnedBlock(), outBinding.pinnedBlock());
+    std::vector<Tensor> host = model.run({in});
+    ASSERT_EQ(host.size(), 1u);
+    ASSERT_EQ(outs[0].size(), kElems);
+    for (int64_t i = 0; i < kElems; ++i)
+    {
+        EXPECT_FLOAT_EQ(outs[0][i], host[0][i]) << "element " << i;
     }
 }

@@ -198,10 +198,15 @@ namespace vknn {
         // output at the model's declared dtype, so only an fp32-declared output binds its block for
         // the run; any other is read back through the host and widened into the block below.
         const std::vector<IOInfo> outInfo = sess_->outputInfo();
+        // The session reports each output under the model's name; a binding may carry an empty
+        // name for a single-output model, so resolve it once and key everything by the model's.
+        auto resolvedName = [&](const std::string &name) {
+            return name.empty() && outInfo.size() == 1 ? outInfo[0].name : name;
+        };
         auto declaredDtype = [&](const std::string &name) {
             for (const IOInfo &oi: outInfo)
             {
-                if (oi.name == name || (name.empty() && outInfo.size() == 1))
+                if (oi.name == name)
                 {
                     return oi.dtype;
                 }
@@ -222,12 +227,13 @@ namespace vknn {
                 b.dmaBufDtype  = o.dmaBufDtype();
                 if (o.pinnedBlock() && o.dmaBufFd() < 0)
                 {
-                    if (declaredDtype(o.name()) == DType::Float32)
+                    const std::string name = resolvedName(o.name());
+                    if (declaredDtype(name) == DType::Float32)
                     {
                         b.pinned = o.pinnedBlock();
                     } else
                     {
-                        widenInto[o.name()] = o.pinnedBlock();
+                        widenInto[name] = o.pinnedBlock();
                     }
                 }
                 outs.push_back(std::move(b));
