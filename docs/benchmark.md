@@ -454,6 +454,50 @@ fused against 0.052 + 0.045 ms unfused. The fusion therefore stays opt-in (`-O2`
 `--fuse-dwpw`); shipping it by default would roughly double these models' runtime. A phase B that
 register-tiles like `conv1x1` is the prerequisite for revisiting it.
 
+## Full `run()` wall: the host side of a run (v1.5.x branch)
+
+The GPU span is not what an application sees; `run()` also pays the input copy, the submit, the
+fence wait and the output copy. Measured with the engine's own per-run stage lines (`--timing`) on
+the reference phone under the cooled protocol, four host-side changes landed:
+
+- **Pre-wake fence wait.** A blocking `vkWaitForFences` cost 0.3-1.2 ms more than polling on the
+  mobile SoC (the core drops into a deep idle state and wakes late). The wait now sleeps until
+  shortly before the previous submission's wall, polls to completion, and falls back to the
+  blocking wait past a fixed budget (`vk_fence_wait_policy.h`).
+- **One submit for the descriptor-cap chunks.** Chunks split only for `maxSubmitBindings` go out as
+  one `vkQueueSubmit` with a barrier at each chunk tail; only watchdog and iteration splits keep
+  their own fence. The 3-chunk DenseNet lost its two GPU-idle gaps (1.9 ms).
+- **Pinned host memory.** `PinnedHostMemory` blocks (`IOTensor::pinned`, `Tensor::pinned` /
+  `Tensor::toPinned`) bind to the GPU through `VK_EXT_external_memory_host`: the boundary convert
+  reads the caller's input pages and writes the caller's output pages, so no copy runs on either
+  side. A block the device cannot bind is copied like a payload. `vknn_zerocopy_bench` times host,
+  pinned and dma-buf modes per run and checks the pinned outputs byte for byte.
+- **Detection head.** The YOLOv8 DFL decode chain folds to one blocked `FusedDfl` kernel, and the
+  head's spatial-axis concats stay blocked (head converts 8 -> 2, the decode 0.35 -> 0.04 ms).
+
+Cooled per-run `run()` wall in host mode (pack + submit/GPU + unpack; min / median over 29 runs),
+before and after this stretch:
+
+| Model | before (min / med) | after (min / med) | GPU span |
+|---|---|---|---|
+| mobilenetv2 | 2.31 / 2.39 | 1.79 / 2.26 | 1.58 |
+| mobilenetv3 | 2.39 / 2.64 | 2.06 / 2.49 | 1.81 |
+| efficientnet_b0 | 3.53 / 3.67 | 3.53 / 3.74 | 2.78 |
+| resnet50 | 8.32 / 8.63 | 8.09 / 8.60 | 7.61 |
+| yolov8n | 8.84 / 11.40 | 8.70 / 10.60 | 7.03 |
+| densenet121 | 12.71 / 13.72 | 11.14 / 11.80 | 10.64 |
+| six-conv probe | 4.48 / 5.37 | 4.54 / 5.29 | 3.04 |
+
+With pinned host memory (`vknn_zerocopy_bench`, 20 runs, same device): the six-conv probe
+4.38 / 4.45 -> 3.42 / 3.81 ms (the dma-buf loop's 3.46 / 4.25), yolov8n 7.90 / 9.05 -> 7.86 / 7.98
+(dma-buf 7.97 / 8.07); the pinned outputs are byte-identical to the host mode's.
+
+Tried and rejected on the same device, with the numbers in the source: a pool-partitioned staged
+memcpy (0.49 -> 0.78 ms on 11 MB; the copy is bandwidth-bound and the pool wakes on little cores),
+and the squeeze-excite chain fusion (generalized to Sigmoid / SiLU / HardSwish and a pooled kernel,
+0.025-0.23 ms per block against ~0.05 unfused: the two 1x1 convs on a [N,C,1,1] tensor already sit
+at the dispatch floor; it stays opt-in at `-O2`).
+
 ## YoNoSplat encoder (965M-param transformer)
 
 The feed-forward 3D-Gaussian-Splatting encoder (DINOv2 ViT-L/14 backbone + RoPE decoders + Gaussian /
