@@ -578,12 +578,13 @@ namespace vknn { namespace vk {
             {
                 throw Error(Status::Unsupported, "host memory import: no compatible memory type or the buffer outgrows the block");
             }
-            // The host reads its own pages through the cache; prefer a cached, coherent type so neither
-            // side pays an explicit flush, then any host-visible type the driver allows.
+            // The host reads its own pages through the cache; prefer a cached, coherent type, then any
+            // coherent one. The import is never vkMapMemory'd (the caller's pointer is the mapping), so
+            // a non-coherent type, whose flush/invalidate would need a mapped range, is refused.
             uint32_t typeIdx;
             try
             { typeIdx = b->findMemoryType(typeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT); } catch (const Error &)
-            { typeIdx = b->findMemoryType(typeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT); }
+            { typeIdx = b->findMemoryType(typeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT); }
             VkImportMemoryHostPointerInfoEXT importInfo {VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
             importInfo.handleType   = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
             importInfo.pHostPointer = ptr;

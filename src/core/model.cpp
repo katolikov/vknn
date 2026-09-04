@@ -3,6 +3,7 @@
 #include "vknn/ion.h"
 #include "vknn/session.h"
 #include <algorithm>
+#include <map>
 #include <cstring>
 
 namespace vknn {
@@ -39,13 +40,15 @@ namespace vknn {
         return t;
     }
 
+    // A rank-0 shape holds one element (the value a scalar output carries), as a host Tensor built
+    // from a one-element vector does.
     int64_t Tensor::shapeElems() const noexcept {
         int64_t n = 1;
         for (int64_t d: shape_)
         {
             n *= d;
         }
-        return shape_.empty() ? 0 : n;
+        return n;
     }
     Tensor Tensor::pinned(std::shared_ptr<PinnedHostMemory> block, std::vector<int64_t> shape, std::string name) {
         Tensor t;
@@ -60,7 +63,14 @@ namespace vknn {
         {
             n *= d;
         }
-        return pinned(PinnedHostMemory::alloc((size_t) (shape.empty() ? 0 : n) * sizeof(float)), std::move(shape), std::move(name));
+        std::shared_ptr<PinnedHostMemory> block = PinnedHostMemory::alloc((size_t) std::max<int64_t>(n, 0) * sizeof(float));
+        if (!block)
+        {
+            // Out of memory: a host tensor of the same size keeps data() valid and the run correct
+            // (one copy per direction instead of none).
+            return Tensor(std::vector<float>((size_t) std::max<int64_t>(n, 0), 0.f), std::move(shape), std::move(name));
+        }
+        return pinned(std::move(block), std::move(shape), std::move(name));
     }
     Tensor Tensor::toPinned(std::vector<int64_t> shape, std::string name) {
         return pinned(std::move(shape), std::move(name));
@@ -86,15 +96,18 @@ namespace vknn {
     }
 
     int64_t Tensor::argmax() const {
-        if (data_.empty())
+        const int64_t n = size();
+        if (n <= 0)
         {
             return -1;
         }
-        return (int64_t) (std::max_element(data_.begin(), data_.end()) - data_.begin());
+        const float *v = data();
+        return (int64_t) (std::max_element(v, v + n) - v);
     }
 
     float Tensor::max() const {
-        return data_.empty() ? 0.f : *std::max_element(data_.begin(), data_.end());
+        const int64_t n = size();
+        return n <= 0 ? 0.f : *std::max_element(data(), data() + n);
     }
 
     // ----------------------------- Model -----------------------------
@@ -181,7 +194,22 @@ namespace vknn {
         }
         // Pre-fill `outs` with zero-copy output bindings; run() writes each bound output into the caller's
         // fd and refills `outs` with the results.
-        std::vector<IOTensor> outs;
+        // A pinned output block holds fp32 (Tensor::data() reads it as such). The session writes an
+        // output at the model's declared dtype, so only an fp32-declared output binds its block for
+        // the run; any other is read back through the host and widened into the block below.
+        const std::vector<IOInfo> outInfo = sess_->outputInfo();
+        auto declaredDtype = [&](const std::string &name) {
+            for (const IOInfo &oi: outInfo)
+            {
+                if (oi.name == name || (name.empty() && outInfo.size() == 1))
+                {
+                    return oi.dtype;
+                }
+            }
+            return DType::Float32;
+        };
+        std::vector<IOTensor>                                    outs;
+        std::map<std::string, std::shared_ptr<PinnedHostMemory>> widenInto; // non-fp32 outputs: block filled after the run
         for (const auto &o: outputs)
         {
             if (o.dmaBufFd() >= 0 || o.pinnedBlock())
@@ -192,7 +220,16 @@ namespace vknn {
                 b.dmaBufFd     = o.dmaBufFd();
                 b.dmaBufFormat = o.dmaBufFormat();
                 b.dmaBufDtype  = o.dmaBufDtype();
-                b.pinned       = o.pinnedBlock();
+                if (o.pinnedBlock() && o.dmaBufFd() < 0)
+                {
+                    if (declaredDtype(o.name()) == DType::Float32)
+                    {
+                        b.pinned = o.pinnedBlock();
+                    } else
+                    {
+                        widenInto[o.name()] = o.pinnedBlock();
+                    }
+                }
                 outs.push_back(std::move(b));
             }
         }
@@ -209,6 +246,12 @@ namespace vknn {
             } else if (o.pinned)
             {
                 result.push_back(Tensor::pinned(o.pinned, o.shape, o.name)); // delivered into the caller's block
+            } else if (auto wi = widenInto.find(o.name); wi != widenInto.end())
+            {
+                // A non-fp32 output bound to a block: widen the declared-dtype bytes into it.
+                std::vector<float> wide = o.toFloat32();
+                std::memcpy(wi->second->data(), wide.data(), std::min(wide.size() * sizeof(float), wi->second->bytes()));
+                result.push_back(Tensor::pinned(wi->second, o.shape, o.name));
             } else
             {
                 // Widen by the declared dtype: a non-fp32 output (fp16 logits, uint8/int64) read as raw

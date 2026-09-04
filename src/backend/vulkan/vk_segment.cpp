@@ -40,6 +40,33 @@ namespace vknn {
         chainStepsMax_ = std::max(1, cfg.decodeChainSteps); // sizes the per-iteration link range sets + argmax result slots
         graphInputs_.insert(g.inputs.begin(), g.inputs.end());
         graphOutputs_.insert(g.outputs.begin(), g.outputs.end());
+        {
+            // Tensors this segment produces that a node outside it reads: they must reach rt.host
+            // after the run, so a pinned block cannot be their only destination.
+            std::set<int>      mine(idx.begin(), idx.end());
+            std::set<TensorId> produced;
+            for (int ni: idx)
+            {
+                for (TensorId o: g.nodes[(size_t) ni].outputs)
+                {
+                    produced.insert(o);
+                }
+            }
+            for (size_t ni = 0; ni < g.nodes.size(); ++ni)
+            {
+                if (mine.count((int) ni))
+                {
+                    continue;
+                }
+                for (TensorId in: g.nodes[ni].inputs)
+                {
+                    if (produced.count(in))
+                    {
+                        readOutsideSegment_.insert(in);
+                    }
+                }
+            }
+        }
 
         // 1) allocate device buffers for all activation tensors (non-initializers).
         std::set<TensorId> acts;
@@ -2071,10 +2098,15 @@ namespace vknn {
                 // caller's NCHW bytes at the declared dtype) and the boundary buffer on the GPU, the
                 // staged route without the staging copy. An import that fails leaves the block on the
                 // lent-bytes route, which copies from it.
+                // An input binds only on the lent-bytes route (the block still holds the values at
+                // rt.dtype; a copied-in block holds them at another dtype). An output binds only when
+                // nothing but the caller reads it: a reader in another segment expects rt.host.
                 const bool  pinnedInputDtype = rt.dtype == DType::Float32 || rt.dtype == DType::UInt8 || rt.dtype == DType::Float16;
+                const bool  pinnedInputLent  = rt.hostPinned && rt.hostBorrow == rt.hostPinned->data() && rt.hostBorrowBytes == rt.hostPinned->bytes();
                 const bool  pinnedCandidate  = fd < 0 && rt.hostPinned && !kvqCaches_.count(tid) && !linkedInputs_.count(tid) && !linkedOutputs_.count(tid) &&
                                               !argMaxOutputs_.count(tid) && !rowSelectOutputs_.count(tid) &&
-                                              (isInput ? pinnedInputDtype : (graphOutputs_.count(tid) > 0 && g_.tensors[tid].dtype == DType::Float32));
+                                              (isInput ? pinnedInputDtype && pinnedInputLent : (graphOutputs_.count(tid) > 0 && !readOutsideSegment_.count(tid) && g_.tensors[tid].dtype == DType::Float32));
+                bool        pinnedBoundNow   = false;
                 if (pinnedCandidate)
                 {
                     const bool         flat   = g_.desc(tid).gpuFlat;
@@ -2105,19 +2137,21 @@ namespace vknn {
                         if (imp.buf)
                         {
                             ConvertBinding cb;
-                            cb.imported   = imp.buf;
-                            cb.isInput    = isInput;
-                            cb.shape      = x;
-                            cb.declFmt    = TensorFormat::NCHW;
-                            cb.declDtype  = declDt;
-                            cb.devFmt     = devFmt;
-                            cb.devDtype   = devDt;
-                            convert_[tid] = cb;
+                            cb.imported    = imp.buf;
+                            cb.isInput     = isInput;
+                            cb.shape       = x;
+                            cb.declFmt     = TensorFormat::NCHW;
+                            cb.declDtype   = declDt;
+                            cb.devFmt      = devFmt;
+                            cb.devDtype    = devDt;
+                            convert_[tid]  = cb;
+                            pinnedBoundNow = true;
                         }
                     }
-                } else
+                }
+                if (!pinnedBoundNow)
                 {
-                    hostImported_.erase(tid);
+                    hostImported_.erase(tid); // an import never outlives the run that stopped using it
                 }
                 if (bit->second != want)
                 {

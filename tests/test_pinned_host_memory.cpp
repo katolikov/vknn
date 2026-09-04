@@ -155,3 +155,46 @@ TEST(PinnedHostMemory, ModelApiPinnedTensorsAliasTheirBlocks) {
     ASSERT_EQ(plain[0].size(), kElems);
     EXPECT_EQ(std::memcmp(plain[0].data(), outs[0].data(), (size_t) kElems * sizeof(float)), 0);
 }
+
+// A pinned tensor's reductions read the block, a rank-0 pinned tensor carries its one element, and
+// a pinned output binding on a model whose output is declared fp16 comes back widened to fp32 in
+// the block (the session delivers the declared dtype; the Model API keeps the block fp32).
+TEST(PinnedHostMemory, PinnedTensorReductionsRankZeroAndNonFp32Outputs) {
+    Tensor t = Tensor::pinned({1, 4}, "t");
+    ASSERT_NE(t.pinnedBlock(), nullptr);
+    t.data()[0] = 0.5f;
+    t.data()[1] = -2.f;
+    t.data()[2] = 7.25f;
+    t.data()[3] = 1.f;
+    EXPECT_EQ(t.argmax(), 2);
+    EXPECT_FLOAT_EQ(t.max(), 7.25f);
+    Tensor scalar = Tensor::pinned({}, "s");
+    ASSERT_NE(scalar.pinnedBlock(), nullptr);
+    EXPECT_EQ(scalar.size(), 1) << "a rank-0 tensor holds one value";
+    EXPECT_FALSE(scalar.empty());
+    EXPECT_GE(scalar.pinnedBlock()->bytes(), sizeof(float));
+    // fp16-declared output through the Model API.
+    Graph g                              = reluGraph();
+    g.tensors[g.nodes[0].outputs[0]].dtype = DType::Float16;
+    Config cfg                           = cpuConfig();
+    auto   sess                          = Session::create(std::move(g), cfg);
+    ASSERT_NE(sess, nullptr);
+    const std::string path = (std::filesystem::temp_directory_path() / "vknn_pinned_relu_f16.vxm").string();
+    ASSERT_TRUE(sess->saveOptimized(path));
+    Model model = Model::load(path, cfg);
+    ASSERT_FALSE(model.outputs().empty());
+    const std::vector<float> x  = sample();
+    Tensor                   in = Tensor::pinned({kN, kC, kH, kW}, "x");
+    std::memcpy(in.data(), x.data(), x.size() * sizeof(float));
+    Tensor              outBinding = Tensor::toPinned({kN, kC, kH, kW}, "y");
+    std::vector<Tensor> outs       = model.run({in}, {outBinding});
+    ASSERT_EQ(outs.size(), 1u);
+    EXPECT_EQ(outs[0].pinnedBlock(), outBinding.pinnedBlock()) << "the block is still the caller's";
+    ASSERT_EQ(outs[0].size(), kElems);
+    std::vector<Tensor> host = model.run({in});
+    ASSERT_EQ(host.size(), 1u);
+    for (int64_t i = 0; i < kElems; ++i)
+    {
+        EXPECT_FLOAT_EQ(outs[0][i], host[0][i]) << "element " << i << ": the fp16 output must reach the block widened";
+    }
+}

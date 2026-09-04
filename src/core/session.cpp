@@ -2172,6 +2172,12 @@ namespace vknn {
             pool_[iid].dmaBufFd     = -1;
             pool_[iid].dmaBufFormat = TensorFormat::NCHW;
             pool_[iid].dmaBufDtype  = DType::Float32;
+            // A run that returned before its BorrowGuard (an unbound or misshaped input) left the
+            // previous bindings in place; every input starts this run unbound.
+            pool_[iid].hostPinned.reset();
+            pool_[iid].hostPinnedValid = false;
+            pool_[iid].hostBorrow      = nullptr;
+            pool_[iid].hostBorrowBytes = 0;
         }
         for (const auto &io: inputs)
         {
@@ -2218,9 +2224,12 @@ namespace vknn {
             } else if (rt.hostPinned)
             {
                 // Every other route reads owned host bytes: copy the block in at the declared dtype.
+                // The mirror now holds the values at rt.dtype while the block keeps them at io.dtype,
+                // so no backend may bind the block: drop it.
                 int64_t elems = rt.shape.empty() ? 1 : numElements(rt.shape);
                 bindInputBytes(io.dtype, rt.hostPinned->data(), rt.hostPinned->bytes(), elems, rt);
                 rt.hostValid = true;
+                rt.hostPinned.reset();
             } else if (ioGpuConvert_ && (io.dtype == DType::UInt8 || io.dtype == DType::Int8) && !linkedInput(bucketIndex, id))
             {
                 // (A LINKED input takes the fp32 bindInput path below even for 8-bit data: the raw-

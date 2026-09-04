@@ -119,6 +119,7 @@ namespace vknn {
             std::shared_ptr<vk::Buffer>     buf;
         };
         std::map<TensorId, HostImported> hostImported_;
+        std::set<TensorId>               readOutsideSegment_; // outputs a node of another segment reads (see the constructor)
         /// Whether `tid`'s convert reads/writes the pinned block bound this run.
         bool pinnedBound(TensorId tid) const;
         // Declared-format zero-copy: boundary tensors whose declared dma-buf layout/dtype differs from the
