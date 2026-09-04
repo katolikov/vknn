@@ -2067,6 +2067,58 @@ namespace vknn {
                         }
                     }
                 }
+                // Pinned host block (IOTensor::pinned): import it once and convert between it (the
+                // caller's NCHW bytes at the declared dtype) and the boundary buffer on the GPU, the
+                // staged route without the staging copy. An import that fails leaves the block on the
+                // lent-bytes route, which copies from it.
+                const bool  pinnedInputDtype = rt.dtype == DType::Float32 || rt.dtype == DType::UInt8 || rt.dtype == DType::Float16;
+                const bool  pinnedCandidate  = fd < 0 && rt.hostPinned && !kvqCaches_.count(tid) && !linkedInputs_.count(tid) && !linkedOutputs_.count(tid) &&
+                                              !argMaxOutputs_.count(tid) && !rowSelectOutputs_.count(tid) &&
+                                              (isInput ? pinnedInputDtype : (graphOutputs_.count(tid) > 0 && g_.tensors[tid].dtype == DType::Float32));
+                if (pinnedCandidate)
+                {
+                    const bool         flat   = g_.desc(tid).gpuFlat;
+                    const TensorFormat devFmt = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
+                    const DType        devDt  = (useFp16_ && !g_.tensors[tid].storeFp32) ? DType::Float16 : DType::Float32;
+                    const DType        declDt = isInput ? rt.dtype : DType::Float32;
+                    const NCHW         x      = NCHW::from(rt.shape.empty() ? g_.tensors[tid].shape : rt.shape);
+                    const size_t       needB  = (size_t) (formatElems(TensorFormat::NCHW, x) * dtypeSize(declDt));
+                    if (needB > 0 && needB <= rt.hostPinned->bytes())
+                    {
+                        HostImported &imp   = hostImported_[tid];
+                        const bool    stale = !imp.buf || imp.ptr != rt.hostPinned->data() || imp.bytes != needB || imp.block.expired();
+                        if (stale)
+                        {
+                            std::unique_ptr<vk::Buffer> b = vk::Buffer::importHostPointer(be_->ctx(), rt.hostPinned->data(), needB, rt.hostPinned->capacity());
+                            imp.ptr                       = rt.hostPinned->data();
+                            imp.bytes                     = needB;
+                            imp.block                     = rt.hostPinned;
+                            imp.buf                       = std::shared_ptr<vk::Buffer>(std::move(b));
+                            if (!imp.buf)
+                            {
+                                VKNN_WARN_THROTTLE("pinned-import-fail", 1) << "pinned host memory cannot be bound for '" << g_.tensors[tid].name << "' (no host import on this device); the block is copied instead";
+                            } else
+                            {
+                                VKNN_INFO << "pinned host block bound for '" << g_.tensors[tid].name << "' (" << needB << " bytes, " << (isInput ? "input" : "output") << ")";
+                            }
+                        }
+                        if (imp.buf)
+                        {
+                            ConvertBinding cb;
+                            cb.imported   = imp.buf;
+                            cb.isInput    = isInput;
+                            cb.shape      = x;
+                            cb.declFmt    = TensorFormat::NCHW;
+                            cb.declDtype  = declDt;
+                            cb.devFmt     = devFmt;
+                            cb.devDtype   = devDt;
+                            convert_[tid] = cb;
+                        }
+                    }
+                } else
+                {
+                    hostImported_.erase(tid);
+                }
                 if (bit->second != want)
                 {
                     bit->second = want;
@@ -2264,8 +2316,11 @@ namespace vknn {
             // Session may have LENT this input's bytes rather than copying them, which is valid only
             // for the staging-convert route below. Every other route reads owned host bytes, so take
             // ownership before entering the chain.
-            const bool stagedInput = sit != stagingIn_.end() && convert_.count(tid);
-            if (!stagedInput)
+            // The staging route holds only while the recorded convert reads the staging buffer: a
+            // pinned block bound later leaves the staging allocated but unread.
+            const bool stagedInput = sit != stagingIn_.end() && convert_.count(tid) && convert_[tid].imported == sit->second;
+            const bool pinnedInput = !stagedInput && pinnedBound(tid);
+            if (!stagedInput && !pinnedInput)
             {
                 rt.materializeHostBorrow();
             }
@@ -2286,6 +2341,12 @@ namespace vknn {
                 const uint8_t *src      = rt.hostBorrow ? rt.hostBorrow : rt.host.bytes.data();
                 const size_t   srcBytes = rt.hostBorrow ? rt.hostBorrowBytes : rt.host.bytes.size();
                 std::memcpy(sit->second->host(), src, std::min(sit->second->bytes(), srcBytes));
+                rt.deviceValid  = true;
+                rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
+            } else if (pinnedInput)
+            {
+                // Pinned block: the recorded boundary_convert reads the caller's pages directly.
+                hostImported_[tid].buf->flushAfterWrite();
                 rt.deviceValid  = true;
                 rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
             } else if (rt.hostValid && !alreadyHere && kvqCaches_.count(tid))
@@ -2411,7 +2472,13 @@ namespace vknn {
                 rt.hostValid = false;
                 continue;
             }
-            if (rt.dmaBufFd < 0)
+            if (pinnedBound(tid))
+            {
+                // The recorded boundary_convert widened this output straight into the caller's block.
+                hostImported_[tid].buf->invalidateForRead();
+                rt.hostPinnedValid = true;
+                rt.hostValid       = false;
+            } else if (rt.dmaBufFd < 0)
             {
                 bool deviceFp16 = useFp16_ && !g_.tensors[tid].storeFp32;
                 auto rowIt      = rowSelectOutputs_.find(tid);
@@ -2432,7 +2499,7 @@ namespace vknn {
                     { // out-of-range selection: fall back to the full readback rather than miscopy
                         VulkanBackend::downloadFlatOutput(bit->second.get(), rt, deviceFp16, g_.tensors[tid].dtype, cpu::threadCount(&cfg_));
                     }
-                } else if (auto sout = stagingOut_.find(tid); sout != stagingOut_.end() && convert_.count(tid))
+                } else if (auto sout = stagingOut_.find(tid); sout != stagingOut_.end() && convert_.count(tid) && convert_[tid].imported == sout->second)
                 {
                     // The recorded boundary_convert already widened this output into the staging
                     // buffer in the declared dtype, so the download is a memcpy out of HOST_CACHED
@@ -2943,6 +3010,12 @@ namespace vknn {
 
     size_t VulkanSegment::linkRangesBufferBytes(uint32_t rangeCapacity) const {
         return (size_t) chainStepsMax_ * (kLinkRangeHeaderBytes + (size_t) rangeCapacity * 12);
+    }
+
+    bool VulkanSegment::pinnedBound(TensorId tid) const {
+        auto hi = hostImported_.find(tid);
+        auto ci = convert_.find(tid);
+        return hi != hostImported_.end() && hi->second.buf && ci != convert_.end() && ci->second.imported == hi->second.buf;
     }
 
     uint32_t VulkanSegment::chunksForActiveSteps() const {

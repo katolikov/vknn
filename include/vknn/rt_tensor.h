@@ -1,5 +1,6 @@
 // Runtime tensor: the live thing during a run (host data, device data, or both, with validity flags).
 #pragma once
+#include "vknn/pinned_host_memory.h"
 #include "vknn/common.h"
 #include "vknn/device_storage.h"
 #include "vknn/dtype.h"
@@ -43,6 +44,11 @@ namespace vknn {
         /// copy from the caller instead of two. Valid only for the duration of run(), which is why
         /// Session clears them when it returns; any path that needs owned bytes calls
         /// materializeHostBorrow() first.
+        /// Caller block the run reads this input from / writes this output into with no copy when the
+        /// backend can bind it (IOTensor::pinned); a backend that cannot falls back to `hostBorrow` /
+        /// `host`. Set for the run by Session and cleared after it.
+        std::shared_ptr<PinnedHostMemory> hostPinned;
+        bool hostPinnedValid = false; ///< The backend delivered this output into `hostPinned` (no host copy to make).
         const uint8_t *hostBorrow      = nullptr;
         size_t         hostBorrowBytes = 0;
 

@@ -20,7 +20,7 @@ namespace vknn { namespace vk {
         std::ostringstream os;
         os << deviceName << " | " << driverName << " (" << driverInfo << ")" << " | Vulkan " << VK_VERSION_MAJOR(apiVersion) << "." << VK_VERSION_MINOR(apiVersion) << "." << VK_VERSION_PATCH(apiVersion) << " | subgroup=" << subgroupSize << " maxWG=" << maxWorkGroupInvocations << " maxWGCount=" << maxWorkGroupCount[0] << " shared=" << (maxSharedMemory / 1024) << "KB pushConst=" << maxPushConstantsSize << "B" << " maxAllocs=" << maxMemoryAllocationCount << " tsPeriod=" << timestampPeriod << "ns\n"
            << "  fp16=" << shaderFloat16 << " int8=" << shaderInt8 << " int64=" << shaderInt64 << " storage16=" << storage16bit << " storage8=" << storage8bit << " int8dot=" << int8DotProduct << " coopmat=" << cooperativeMatrix << "\n"
-           << "  timeline=" << timelineSemaphore << " pushDesc=" << pushDescriptor << " dedicated=" << dedicatedAllocation << " extMemFd=" << externalMemoryFd << " dmabuf=" << externalMemoryDmaBuf << " ahb=" << externalMemoryAhb << " memBudget=" << memoryBudget << " subgroupArith=" << subgroupArithmetic << " shuffle=" << subgroupShuffle << "\n"
+           << "  timeline=" << timelineSemaphore << " pushDesc=" << pushDescriptor << " dedicated=" << dedicatedAllocation << " extMemFd=" << externalMemoryFd << " dmabuf=" << externalMemoryDmaBuf << " ahb=" << externalMemoryAhb << " hostImport=" << externalMemoryHost << " memBudget=" << memoryBudget << " subgroupArith=" << subgroupArithmetic << " shuffle=" << subgroupShuffle << "\n"
            << "  globalPriority=" << globalPriority << " sync2=" << synchronization2 << " sgCtl=" << subgroupSizeControl << " sgRange=[" << minSubgroupSize << "," << maxSubgroupSize << "]" << " vkMemModel=" << vulkanMemoryModel
            << " coopmatRows=" << coopmatShapes.size() << " fp8=" << shaderFloat8 << " int8dotAccel=" << int8DotAccel8Bit << "/" << int8DotAccel4x8Packed;
         return os.str();
@@ -144,6 +144,12 @@ namespace vknn { namespace vk {
             dotProps.pNext = subgroup.pNext;
             subgroup.pNext = &dotProps;
         }
+        VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostImportProps {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+        if (caps_.has("VK_EXT_external_memory_host"))
+        {
+            hostImportProps.pNext = subgroup.pNext;
+            subgroup.pNext        = &hostImportProps;
+        }
         VkPhysicalDeviceProperties2 props2 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
         props2.pNext = &driver;
         vkGetPhysicalDeviceProperties2(phys_, &props2);
@@ -159,6 +165,7 @@ namespace vknn { namespace vk {
         caps_.driverInfo    = driver.driverInfo;
         std::memcpy(caps_.pipelineCacheUUID, p.pipelineCacheUUID, sizeof(caps_.pipelineCacheUUID));
         caps_.subgroupSize             = subgroup.subgroupSize;
+        caps_.hostPointerAlignment     = caps_.has("VK_EXT_external_memory_host") ? (size_t) hostImportProps.minImportedHostPointerAlignment : 0;
         caps_.subgroupArithmetic       = (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
         caps_.subgroupShuffle          = (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0;
         caps_.maxWorkGroupInvocations  = p.limits.maxComputeWorkGroupInvocations;
@@ -236,6 +243,7 @@ namespace vknn { namespace vk {
         caps_.externalMemoryFd     = caps_.has("VK_KHR_external_memory_fd");
         caps_.externalMemoryDmaBuf = caps_.has("VK_EXT_external_memory_dma_buf");
         caps_.externalMemoryAhb    = caps_.has("VK_ANDROID_external_memory_android_hardware_buffer");
+        caps_.externalMemoryHost   = caps_.has("VK_EXT_external_memory_host");
         caps_.memoryBudget         = caps_.has("VK_EXT_memory_budget");
         caps_.cooperativeMatrix    = caps_.has("VK_KHR_cooperative_matrix");
         caps_.globalPriority       = caps_.has("VK_KHR_global_priority") || caps_.has("VK_EXT_global_priority");
@@ -330,6 +338,7 @@ namespace vknn { namespace vk {
         addExt("VK_KHR_external_memory");
         addExt("VK_KHR_external_memory_fd");
         addExt("VK_EXT_external_memory_dma_buf");
+        addExt("VK_EXT_external_memory_host");
         addExt("VK_EXT_memory_budget");
         addExt("VK_KHR_shader_float16_int8");
         addExt("VK_KHR_16bit_storage");

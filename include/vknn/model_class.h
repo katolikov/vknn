@@ -50,14 +50,16 @@ namespace vknn {
         /// @param input Single host input tensor for a single-input model.
         /// @returns Every output tensor, each carrying its name and shape.
         std::vector<Tensor> run(const Tensor &input);
-        /// Run with several inputs (matched to the model's inputs in order). Inputs may be host tensors
-        /// or DMA-BUF inputs (Tensor::fromDmaBuf). Optional `outputs` are DMA-BUF output bindings
-        /// (Tensor::toDmaBuf): each named output is written straight into the caller's fd, and the
-        /// returned Tensor for it carries no host copy (empty data). Outputs without a binding come back
-        /// as host tensors as usual.
-        /// @param inputs  Inputs matched to the model's inputs in order (host or DMA-BUF tensors).
-        /// @param outputs Optional DMA-BUF output bindings, matched to outputs by name.
-        /// @returns Every output tensor; DMA-BUF-bound outputs return with empty host data.
+        /// Run with several inputs (matched to the model's inputs in order). Inputs may be host tensors,
+        /// pinned tensors (Tensor::pinned) or DMA-BUF inputs (Tensor::fromDmaBuf). Optional `outputs`
+        /// are output bindings: a DMA-BUF binding (Tensor::toDmaBuf) has the named output written
+        /// straight into the caller's fd and its returned Tensor carries no host copy (empty data); a
+        /// pinned binding (Tensor::toPinned) has it written into the caller's block and its returned
+        /// Tensor aliases that block. Outputs without a binding come back as host tensors as usual.
+        /// @param inputs  Inputs matched to the model's inputs in order (host, pinned or DMA-BUF tensors).
+        /// @param outputs Optional DMA-BUF / pinned output bindings, matched to outputs by name.
+        /// @returns Every output tensor; a DMA-BUF-bound output returns with empty host data, a pinned
+        ///          one over the caller's block.
         std::vector<Tensor> run(const std::vector<Tensor> &inputs, const std::vector<Tensor> &outputs = {});
         /// Simplest form: raw values in (shaped to the model's single input), first output back.
         /// @param input Raw float values, reshaped to the model's single input.

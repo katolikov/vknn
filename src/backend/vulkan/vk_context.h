@@ -75,6 +75,8 @@ namespace vknn { namespace vk {
         bool externalMemoryFd     = false;
         bool externalMemoryDmaBuf = false;
         bool externalMemoryAhb    = false;
+        bool externalMemoryHost   = false; ///< VK_EXT_external_memory_host: caller host memory binds as a buffer (pinned I/O).
+        size_t hostPointerAlignment = 0;   ///< minImportedHostPointerAlignment (0 = no host import).
         bool memoryBudget         = false;
         bool subgroupArithmetic   = false;
         bool subgroupShuffle      = false;

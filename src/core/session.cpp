@@ -39,13 +39,13 @@ namespace vknn {
         rt.hostBorrowBytes = io.data.size();
     }
 
-    static void bindInput(DType src, const std::vector<uint8_t> &in, int64_t elems, RtTensor &rt) {
+    static void bindInputBytes(DType src, const uint8_t *inData, size_t inSize, int64_t elems, RtTensor &rt) {
         if (src == DType::Int64)
         {
             rt.dtype = DType::Int64;
             rt.host.resizeElems(elems, DType::Int64);
-            int64_t avail = std::min<int64_t>(elems, (int64_t) (in.size() / 8));
-            std::memcpy(rt.host.bytes.data(), in.data(), (size_t) avail * 8);
+            int64_t avail = std::min<int64_t>(elems, (int64_t) (inSize / 8));
+            std::memcpy(rt.host.bytes.data(), inData, (size_t) avail * 8);
             if (avail < elems)
             {
                 std::memset(rt.host.i64() + avail, 0, (size_t) (elems - avail) * 8);
@@ -57,18 +57,18 @@ namespace vknn {
         float *f = rt.host.f32();
         // Elements that fit in both the destination (elems) and the caller buffer at bytesPer each.
         auto fitElems = [&](int64_t bytesPer) {
-            return std::min<int64_t>(elems, (int64_t) (in.size() / bytesPer));
+            return std::min<int64_t>(elems, (int64_t) (inSize / bytesPer));
         };
         int64_t filled = 0;
         switch (src)
         {
             case DType::Float32: {
                 filled = fitElems(4);
-                std::memcpy(f, in.data(), (size_t) filled * 4);
+                std::memcpy(f, inData, (size_t) filled * 4);
                 break;
             }
             case DType::Float16: {
-                const fp16_t *h = reinterpret_cast<const fp16_t *>(in.data());
+                const fp16_t *h = reinterpret_cast<const fp16_t *>(inData);
                 filled          = fitElems(2);
                 for (int64_t i = 0; i < filled; ++i)
                 {
@@ -80,26 +80,26 @@ namespace vknn {
                 filled = fitElems(1);
                 for (int64_t i = 0; i < filled; ++i)
                 {
-                    f[i] = (float) reinterpret_cast<const uint8_t *>(in.data())[i];
+                    f[i] = (float) reinterpret_cast<const uint8_t *>(inData)[i];
                 }
                 break;
             case DType::Int8:
                 filled = fitElems(1);
                 for (int64_t i = 0; i < filled; ++i)
                 {
-                    f[i] = (float) reinterpret_cast<const int8_t *>(in.data())[i];
+                    f[i] = (float) reinterpret_cast<const int8_t *>(inData)[i];
                 }
                 break;
             case DType::Int32:
                 filled = fitElems(4);
                 for (int64_t i = 0; i < filled; ++i)
                 {
-                    f[i] = (float) reinterpret_cast<const int32_t *>(in.data())[i];
+                    f[i] = (float) reinterpret_cast<const int32_t *>(inData)[i];
                 }
                 break;
             default: {
                 filled = fitElems(4);
-                std::memcpy(f, in.data(), (size_t) filled * 4);
+                std::memcpy(f, inData, (size_t) filled * 4);
                 break;
             }
         }
@@ -110,6 +110,9 @@ namespace vknn {
     }
 
     // Internal storage (rt.dtype fp32 or int64) -> output bytes in the model's declared dtype `dst`.
+    static void bindInput(DType src, const std::vector<uint8_t> &in, int64_t elems, RtTensor &rt) {
+        bindInputBytes(src, in.data(), in.size(), elems, rt);
+    }
     static void readbackOutput(DType dst, RtTensor &rt, int64_t elems, IOTensor &io) {
         io.dtype = dst;
         if (dst == rt.dtype)
@@ -2191,13 +2194,33 @@ namespace vknn {
                 return vs;
             }
             rt.shape        = io.shape.empty() ? graph_.tensors[id].shape : io.shape;
-            rt.dmaBufFd     = io.dmaBufFd;
-            rt.dmaBufFormat = io.dmaBufFormat;
-            rt.dmaBufDtype  = io.dmaBufDtype;
+            rt.dmaBufFd        = io.dmaBufFd;
+            rt.dmaBufFormat    = io.dmaBufFormat;
+            rt.dmaBufDtype     = io.dmaBufDtype;
+            rt.hostPinned      = io.dmaBufFd < 0 ? io.pinned : nullptr;
+            rt.hostPinnedValid = false;
+            const bool pinnedBorrow = rt.hostPinned && ioGpuConvert_ && !linkedInput(bucketIndex, id) &&
+                                      (io.dtype == DType::UInt8 || io.dtype == DType::Int8 || (io.dtype == DType::Float32 && rt.shape.size() == kNchwRank));
             if (io.dmaBufFd >= 0)
             {
                 rt.dtype     = io.dtype;
                 rt.hostValid = false; // zero-copy: the input comes straight from the fd, no host buffer
+            } else if (pinnedBorrow)
+            {
+                // Pinned block on the GPU-convert route: lend its bytes as a borrowed payload. A backend
+                // that binds the block reads it in place; one that cannot copies from it as it would
+                // from a lent payload.
+                rt.dtype     = io.dtype;
+                rt.hostValid = true;
+                rt.host.bytes.clear();
+                rt.hostBorrow      = rt.hostPinned->data();
+                rt.hostBorrowBytes = rt.hostPinned->bytes();
+            } else if (rt.hostPinned)
+            {
+                // Every other route reads owned host bytes: copy the block in at the declared dtype.
+                int64_t elems = rt.shape.empty() ? 1 : numElements(rt.shape);
+                bindInputBytes(io.dtype, rt.hostPinned->data(), rt.hostPinned->bytes(), elems, rt);
+                rt.hostValid = true;
             } else if (ioGpuConvert_ && (io.dtype == DType::UInt8 || io.dtype == DType::Int8) && !linkedInput(bucketIndex, id))
             {
                 // (A LINKED input takes the fp32 bindInput path below even for 8-bit data: the raw-
@@ -2283,6 +2306,27 @@ namespace vknn {
                 pool_[id].dmaBufDtype  = b.dmaBufDtype;
             }
         }
+        for (TensorId oid: graph_.outputs)
+        {
+            pool_[oid].hostPinned.reset();
+            pool_[oid].hostPinnedValid = false;
+        }
+        for (const auto &b: outputs)
+        {
+            if (!b.pinned || b.dmaBufFd >= 0)
+            {
+                continue;
+            }
+            TensorId id = graph_.find(b.name);
+            if (id == kNoTensor && graph_.outputs.size() == 1)
+            {
+                id = graph_.outputs[0];
+            }
+            if (id != kNoTensor)
+            {
+                pool_[id].hostPinned = b.pinned; // the run writes the block; see the readback below
+            }
+        }
         // Reclaim the byte storage the previous run donated to the caller. readbackOutput() moves an
         // output tensor's host bytes into the caller's IOTensor, leaving that tensor's host residency with
         // no allocation; `outputs` carries those buffers back in and is cleared below regardless. Taking
@@ -2328,6 +2372,8 @@ namespace vknn {
                 {
                     rt.hostBorrow      = nullptr;
                     rt.hostBorrowBytes = 0;
+                    rt.hostPinned.reset();
+                    rt.hostPinnedValid = false;
                 }
             }
         } borrowGuard {pool_};
@@ -2414,6 +2460,21 @@ namespace vknn {
                 // An argmax-registered output is served by readOutputArgMax(): metadata only, no
                 // declared-dtype readback (the device path never downloads the vector at all).
                 io.dtype = graph_.tensors[oid].dtype;
+            } else if (rt.hostPinned)
+            {
+                // Pinned block: a backend that bound it has written the result there already; any
+                // other delivers through the host copy, which lands in the block here. `data` stays
+                // empty either way and the block travels back on the IOTensor.
+                const int64_t outElems = outShape.empty() ? 1 : numElements(outShape);
+                io.dtype               = graph_.tensors[oid].dtype;
+                io.pinned              = rt.hostPinned;
+                if (!rt.hostPinnedValid)
+                {
+                    IOTensor viaHost;
+                    readbackOutput(graph_.tensors[oid].dtype, rt, outElems, viaHost);
+                    std::memcpy(rt.hostPinned->data(), viaHost.data.data(), std::min(viaHost.data.size(), rt.hostPinned->bytes()));
+                }
+                rt.hostValid = false;
             } else if (rt.dmaBufFd < 0)
             {
                 // Emit the output in the model's DECLARED dtype (e.g. a UINT8 image, FLOAT16 tensor),
@@ -2430,6 +2491,8 @@ namespace vknn {
             rt.dmaBufFd     = -1; // reset for the next run
             rt.dmaBufFormat = TensorFormat::NCHW;
             rt.dmaBufDtype  = DType::Float32;
+            rt.hostPinned.reset();
+            rt.hostPinnedValid = false;
         }
         if (tm)
         {

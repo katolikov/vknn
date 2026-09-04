@@ -1,5 +1,6 @@
 // A named tensor handed in/out of the engine at the public API boundary.
 #pragma once
+#include "vknn/pinned_host_memory.h"
 #include "vknn/tensor.h"
 #include <cstdint>
 #include <cstring>
@@ -32,6 +33,12 @@ namespace vknn {
         DType dmaBufDtype = DType::Float32;
         /// Host payload in host mode; empty in zero-copy mode. Raw bytes; reinterpret via f32().
         std::vector<uint8_t> data;
+        /// Pinned mode: the payload lives in this block (PinnedHostMemory::alloc) instead of `data`,
+        /// laid out as `data` would be (canonical NCHW, `dtype`). For an input the engine reads the
+        /// block; for an output it writes the block and leaves `data` empty. On a device that imports
+        /// host memory the GPU works on the block directly (no copy in either direction); elsewhere
+        /// the engine copies, so the mode is always correct. `data` is ignored while `pinned` is set.
+        std::shared_ptr<PinnedHostMemory> pinned;
         /// Mutable typed view of `data` as fp32. Valid only when `dtype` is Float32 and `data` is sized
         /// to whole fp32 elements.
         float *f32() noexcept {

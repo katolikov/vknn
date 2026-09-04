@@ -236,7 +236,7 @@ This requires the static lib to be linked whole-archive
   token feedback, default 1).
 - Cache controls: `cacheFile` (the per-model cache, §7), `noCache` (skip caching), and `tuning`
   (`None`/`Fast`/`Heavy` autotune effort).
-- Caller-owned dma-buf I/O via `Tensor::fromDmaBuf` / `Tensor::toDmaBuf` (§6).
+- Caller-owned dma-buf I/O via `Tensor::fromDmaBuf` / `Tensor::toDmaBuf`, and pinned host memory via `PinnedHostMemory` / `Tensor::pinned` (§6).
 - Diagnostics: `profile`, `verbosity`, `layerDump` / `layerDumpDir`.
 - Conv kernel + GPU-pass knobs via `setHint(Hint, Mode)`: `Hint::Winograd` (`Auto`/`On`/`Off`),
   `Hint::FlatLayout` / `Hint::GpuIslandFold` / `Hint::MatMulViewFold` / `Hint::RopeFusion` /
@@ -527,6 +527,19 @@ warns loudly (zero-copy unavailable) rather than reading undefined memory. Becau
 bit-exact against the staged path (`maxAbsErr 0`).
 
 ---
+
+### Pinned host memory (`include/vknn/pinned_host_memory.h`)
+
+The host-side counterpart of the dma-buf path, for callers that hold their tensors in ordinary
+process memory. `PinnedHostMemory::alloc(bytes)` returns a page-aligned block; an `IOTensor` carries
+it in `pinned` (the `Tensor` API through `Tensor::pinned` / `Tensor::toPinned`), laid out exactly as
+the `data` payload would be. On a device whose driver imports host memory
+(`VK_EXT_external_memory_host`, the unified-memory phones the engine targets) the Vulkan segment
+imports the block once (kept while the block lives, refreshed if the tensor moves to another block)
+and records its boundary convert against it: the GPU reads an input's fp32 NCHW bytes from the
+caller's pages and writes an output's into them, so neither the upload memcpy nor the readback
+memcpy of the host path runs. Without the extension the block is copied like a payload, so a pinned
+run is always correct. `vknn_zerocopy_bench` times all three modes per run.
 
 ## 7. Caches (`config.cacheFile`)
 

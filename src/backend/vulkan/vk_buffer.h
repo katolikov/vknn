@@ -140,6 +140,13 @@ namespace vknn { namespace vk {
         /// @returns An owning Buffer, or nullptr if the device lacks dma-buf import or the import fails
         ///          (the caller then falls back to a staged copy). Never throws.
         static std::unique_ptr<Buffer> importDmaBufFd(VulkanContext &ctx, int fd, size_t bytes, VkBufferUsageFlags extraUsage = 0) noexcept;
+        /// Bind caller host memory as a buffer (VK_EXT_external_memory_host): the GPU reads and writes
+        /// the caller's pages directly and host() is `ptr` itself. `ptr` and `importBytes` must be
+        /// multiples of the device's host-pointer alignment (VulkanCaps::hostPointerAlignment) and
+        /// `bytes` <= `importBytes`. Returns null when the device lacks the extension, the alignment is
+        /// off, or the driver refuses the import; the caller then falls back to a copy. The memory is
+        /// released at destruction; the pages themselves stay the caller's.
+        static std::unique_ptr<Buffer> importHostPointer(VulkanContext &ctx, void *ptr, size_t bytes, size_t importBytes, VkBufferUsageFlags extraUsage = 0) noexcept;
 
         /// Bytes still free across the device-local heaps, as VK_EXT_memory_budget reports them
         /// (heapBudget - heapUsage, summed over every DEVICE_LOCAL heap and floored at zero).

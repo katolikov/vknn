@@ -545,4 +545,70 @@ namespace vknn { namespace vk {
         { return nullptr; }
     }
 
+    std::unique_ptr<Buffer> Buffer::importHostPointer(VulkanContext &ctx, void *ptr, size_t bytes, size_t importBytes, VkBufferUsageFlags extraUsage) noexcept {
+        const size_t align = ctx.caps().hostPointerAlignment;
+        if (!ctx.caps().externalMemoryHost || ptr == nullptr || align == 0 || bytes == 0 || bytes > importBytes || (reinterpret_cast<uintptr_t>(ptr) % align) != 0 || (importBytes % align) != 0)
+        {
+            return nullptr;
+        }
+        try
+        {
+            std::unique_ptr<Buffer> b(new Buffer(ctx));
+            b->bytes_    = bytes;
+            b->imported_ = true;
+            VkExternalMemoryBufferCreateInfo ext {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+            ext.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+            VkBufferCreateInfo bi {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bi.pNext       = &ext;
+            bi.size        = bytes;
+            bi.usage       = kBaseBufferUsage | extraUsage;
+            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            VK_CHECK(vkCreateBuffer(ctx.device(), &bi, nullptr, &b->buf_));
+            auto pfnHostProps = reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(vkGetDeviceProcAddr(ctx.device(), "vkGetMemoryHostPointerPropertiesEXT"));
+            if (!pfnHostProps)
+            {
+                throw Error(Status::Unsupported, "vkGetMemoryHostPointerPropertiesEXT unavailable");
+            }
+            VkMemoryHostPointerPropertiesEXT hostProps {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+            VK_CHECK(pfnHostProps(ctx.device(), VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, ptr, &hostProps));
+            VkMemoryRequirements req;
+            vkGetBufferMemoryRequirements(ctx.device(), b->buf_, &req);
+            const uint32_t typeBits = hostProps.memoryTypeBits & req.memoryTypeBits;
+            if (typeBits == 0 || req.size > importBytes)
+            {
+                throw Error(Status::Unsupported, "host memory import: no compatible memory type or the buffer outgrows the block");
+            }
+            // The host reads its own pages through the cache; prefer a cached, coherent type so neither
+            // side pays an explicit flush, then any host-visible type the driver allows.
+            uint32_t typeIdx;
+            try
+            { typeIdx = b->findMemoryType(typeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT); } catch (const Error &)
+            { typeIdx = b->findMemoryType(typeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT); }
+            VkImportMemoryHostPointerInfoEXT importInfo {VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+            importInfo.handleType   = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+            importInfo.pHostPointer = ptr;
+            VkMemoryAllocateInfo ai {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            ai.pNext           = &importInfo;
+            ai.allocationSize  = importBytes;
+            ai.memoryTypeIndex = typeIdx;
+            const VkResult ar  = vkAllocateMemory(ctx.device(), &ai, nullptr, &b->mem_);
+            if (ar != VK_SUCCESS)
+            {
+                throw Error(Status::RuntimeError, std::string("host memory import vkAllocateMemory -> ") + vkResultStr(ar));
+            }
+            VK_CHECK(vkBindBufferMemory(ctx.device(), b->buf_, b->mem_, 0));
+            // The caller's pointer is the mapping: no vkMapMemory, and destroy() never unmaps an import.
+            b->mapped_       = ptr;
+            b->memTypeIndex_ = typeIdx;
+            b->memSize_      = importBytes;
+            b->coherent_     = (ctx.memProps().memoryTypes[typeIdx].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+            b->account();
+            return b;
+        } catch (const std::exception &e)
+        {
+            VKNN_WARN << "host memory import failed: " << e.what();
+            return nullptr;
+        } catch (...)
+        { return nullptr; }
+    }
 }} // namespace vknn::vk

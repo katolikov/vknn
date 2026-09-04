@@ -39,6 +39,32 @@ namespace vknn {
         return t;
     }
 
+    int64_t Tensor::shapeElems() const noexcept {
+        int64_t n = 1;
+        for (int64_t d: shape_)
+        {
+            n *= d;
+        }
+        return shape_.empty() ? 0 : n;
+    }
+    Tensor Tensor::pinned(std::shared_ptr<PinnedHostMemory> block, std::vector<int64_t> shape, std::string name) {
+        Tensor t;
+        t.shape_  = std::move(shape);
+        t.name_   = std::move(name);
+        t.pinned_ = std::move(block);
+        return t;
+    }
+    Tensor Tensor::pinned(std::vector<int64_t> shape, std::string name) {
+        int64_t n = 1;
+        for (int64_t d: shape)
+        {
+            n *= d;
+        }
+        return pinned(PinnedHostMemory::alloc((size_t) (shape.empty() ? 0 : n) * sizeof(float)), std::move(shape), std::move(name));
+    }
+    Tensor Tensor::toPinned(std::vector<int64_t> shape, std::string name) {
+        return pinned(std::move(shape), std::move(name));
+    }
     Tensor Tensor::toDmaBuf(int fd, std::vector<int64_t> shape, std::string name, TensorFormat layout, DType dtype) {
         // same carrier; output vs input is by list position in Model::run
         return fromDmaBuf(fd, std::move(shape), std::move(name), layout, dtype);
@@ -144,6 +170,9 @@ namespace vknn {
                 ins[i].dmaBufFd     = t.dmaBufFd(); // zero-copy: the engine reads this fd as the GPU input buffer
                 ins[i].dmaBufFormat = t.dmaBufFormat();
                 ins[i].dmaBufDtype  = t.dmaBufDtype();
+            } else if (t.pinnedBlock())
+            {
+                ins[i].pinned = t.pinnedBlock(); // pinned: the engine binds (or copies from) the block
             } else
             {
                 const uint8_t *p = reinterpret_cast<const uint8_t *>(t.data());
@@ -155,7 +184,7 @@ namespace vknn {
         std::vector<IOTensor> outs;
         for (const auto &o: outputs)
         {
-            if (o.dmaBufFd() >= 0)
+            if (o.dmaBufFd() >= 0 || o.pinnedBlock())
             {
                 IOTensor b;
                 b.name         = o.name();
@@ -163,6 +192,7 @@ namespace vknn {
                 b.dmaBufFd     = o.dmaBufFd();
                 b.dmaBufFormat = o.dmaBufFormat();
                 b.dmaBufDtype  = o.dmaBufDtype();
+                b.pinned       = o.pinnedBlock();
                 outs.push_back(std::move(b));
             }
         }
@@ -176,6 +206,9 @@ namespace vknn {
             if (o.dmaBufFd >= 0)
             {
                 result.emplace_back(std::vector<float> {}, o.shape, o.name); // delivered to the caller's fd
+            } else if (o.pinned)
+            {
+                result.push_back(Tensor::pinned(o.pinned, o.shape, o.name)); // delivered into the caller's block
             } else
             {
                 // Widen by the declared dtype: a non-fp32 output (fp16 logits, uint8/int64) read as raw

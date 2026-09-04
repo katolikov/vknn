@@ -1,5 +1,6 @@
 #pragma once
 #include "vknn/dtype.h"
+#include "vknn/pinned_host_memory.h"
 #include "vknn/tensor_format.h"
 #include <string>
 #include <vector>
@@ -45,6 +46,20 @@ namespace vknn {
         /// @param dtype  Declared element type of the fd's bytes.
         /// @returns A zero-copy output Tensor carrying the fd (its host data vector is empty).
         static Tensor toDmaBuf(int fd, std::vector<int64_t> shape, std::string name = "", TensorFormat layout = TensorFormat::NCHW, DType dtype = DType::Float32);
+        /// A pinned host tensor: fp32 NCHW values in a PinnedHostMemory block the engine binds to the
+        /// GPU directly (no copy on a device that imports host memory; a copy elsewhere). Allocates a
+        /// block for the shape; write the values through data(). Reuse the tensor across runs: its
+        /// GPU binding is made once and kept while the block lives.
+        static Tensor pinned(std::vector<int64_t> shape, std::string name = "");
+        /// A pinned host tensor over an existing block (at least size() * 4 bytes).
+        static Tensor pinned(std::shared_ptr<PinnedHostMemory> block, std::vector<int64_t> shape, std::string name = "");
+        /// A pinned output binding: the run writes the named output into the tensor's block and the
+        /// returned output tensor aliases the same block (see Model::run).
+        static Tensor toPinned(std::vector<int64_t> shape, std::string name = "");
+        /// The pinned block behind a pinned tensor (null for a host or DMA-BUF tensor).
+        const std::shared_ptr<PinnedHostMemory> &pinnedBlock() const noexcept {
+            return pinned_;
+        }
         /// DMA-BUF file descriptor for zero-copy I/O, or -1 for a host-data tensor.
         int dmaBufFd() const noexcept {
             return fd_;
@@ -76,30 +91,32 @@ namespace vknn {
         int64_t dim(int i) const noexcept {
             return (i >= 0 && i < rank()) ? shape_[i] : 1;
         }
-        /// Total element count of the host data (0 for a zero-copy DMA-BUF tensor).
+        /// Total element count: of the host data, or of the shape for a pinned tensor (0 for a
+        /// zero-copy DMA-BUF tensor).
         int64_t size() const noexcept {
-            return (int64_t) data_.size();
+            return pinned_ ? shapeElems() : (int64_t) data_.size();
         }
-        /// True when there is no host element data.
+        /// True when there is no element data (host or pinned).
         bool empty() const noexcept {
-            return data_.empty();
+            return size() == 0;
         }
 
-        /// Pointer to the first host element (row-major fp32), or an empty-vector pointer if there is none.
+        /// Pointer to the first element (row-major fp32): the host data, or the pinned block.
         const float *data() const noexcept {
-            return data_.data();
+            return pinned_ ? reinterpret_cast<const float *>(pinned_->data()) : data_.data();
         }
-        /// Mutable pointer to the first host element (row-major fp32).
+        /// Mutable pointer to the first element (row-major fp32): the host data, or the pinned block.
         float *data() noexcept {
-            return data_.data();
+            return pinned_ ? reinterpret_cast<float *>(pinned_->data()) : data_.data();
         }
-        /// The host element data as a vector.
+        /// The host element data as a vector (empty for a pinned tensor, whose values live in the block:
+        /// read them through data()).
         const std::vector<float> &values() const noexcept {
             return data_;
         }
         /// Element `i` of the host data. Precondition: 0 <= i < size(); the index is not bounds-checked.
         float operator[](int64_t i) const noexcept {
-            return data_[i];
+            return data()[i];
         }
 
         /// Index of the largest value — the usual "predicted class" for a classifier output.
@@ -112,6 +129,8 @@ namespace vknn {
         std::string          name_;
         std::vector<int64_t> shape_;
         std::vector<float>   data_;
+        std::shared_ptr<PinnedHostMemory> pinned_;                 ///< Pinned block holding the values (null = data_).
+        int64_t                           shapeElems() const noexcept;
         int                  fd_           = -1;                 ///< DMA-BUF fd for zero-copy I/O (-1 = host data in data_).
         TensorFormat         dmaBufFormat_ = TensorFormat::NCHW; ///< Declared layout of the fd's bytes.
         DType                dmaBufDtype_  = DType::Float32;     ///< Declared dtype of the fd's bytes.

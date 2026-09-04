@@ -70,7 +70,7 @@ All of these run on the Android GPU today, from this repo:
    the first backend that supports it (Vulkan first, CPU as the loud fallback).
 4. **Execute** — the Vulkan backend packs tensors into an NC4HW4 layout (flat row-major for
    transformers), stores fp16 / accumulates fp32, pre-records one command buffer per segment, and
-   replays it every run. I/O can bind caller-owned DMA-BUF fds with zero copies.
+   replays it every run. I/O can bind caller-owned DMA-BUF fds or pinned host memory (`PinnedHostMemory`) with zero copies.
 
 Steps 1–2 happen once, offline, in `vknn_compile`. The documentation site
 (`./build.sh --docs` → `docs/site/index.html`) walks this pipeline interactively: **How VKNN works**

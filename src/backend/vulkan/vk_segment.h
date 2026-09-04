@@ -3,6 +3,7 @@
 #include "vk_common.h"
 #include "vk_op_env.h"
 #include "vknn/backend.h"
+#include "vknn/pinned_host_memory.h"
 #include <map>
 #include <memory>
 #include <set>
@@ -107,6 +108,19 @@ namespace vknn {
         };
         std::map<TensorId, Imported> imported_;
         static uint64_t              dmaBufId(int fd);
+        // Pinned host blocks (IOTensor::pinned) bound through VK_EXT_external_memory_host: the import
+        // is created once per block and kept while the block lives (a weak reference; the block frees
+        // itself and the binding is dropped when it is gone) and refreshed when the tensor moves to
+        // another block or a different byte count.
+        struct HostImported {
+            const void                     *ptr   = nullptr;
+            size_t                          bytes = 0;
+            std::weak_ptr<PinnedHostMemory> block;
+            std::shared_ptr<vk::Buffer>     buf;
+        };
+        std::map<TensorId, HostImported> hostImported_;
+        /// Whether `tid`'s convert reads/writes the pinned block bound this run.
+        bool pinnedBound(TensorId tid) const;
         // Declared-format zero-copy: boundary tensors whose declared dma-buf layout/dtype differs from the
         // device-native boundary, so the GPU converts between the imported buffer and the pooled boundary
         // buffer instead of binding the fd directly. `convert_` is rebuilt each run; `recordedConvert_` is
