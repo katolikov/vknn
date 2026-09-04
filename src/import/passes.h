@@ -51,6 +51,9 @@ namespace vknn {
     void fuseActivations(Graph &g);
     // Fuse a Squeeze-Excite scale chain (GAP->FC->relu->FC->hardsigmoid) into one kFusedSE node.
     void fuseSqueezeExcite(Graph &g);
+    /// Reshape -> Transpose -> Softmax -> Transpose -> Conv1x1 -> Reshape distribution-focal decode
+    /// (the YOLOv8-family detection head) -> one FusedDfl node (core/dfl.h).
+    void fuseDfl(Graph &g);
     // Fuse a depthwise-3x3 conv followed by a 1x1 project conv into one kFusedDwPw kernel.
     void fuseDwPw(Graph &g);
     // The general fusion: grow each maximal same-shape per-element region (fanout included) and
@@ -166,6 +169,9 @@ namespace vknn {
                                                                   // fp32, but the fp16 GPU path still diverges from the
                                                                   // unfused graph — opt in with --fuse-dwpw and measure)
         bool fusePointwiseChains = true;                          // the general pointwise-region fusion (default on)
+        bool fuseDfl             = true;                          // the DFL decode chain of a detection head -> FusedDfl
+                                                                  // (part of O1; the softmax and its expectation stay fp32
+                                                                  // inside one kernel, gated on the CPU oracle)
         bool fuseGridSampleWarp  = true;                          // fold a scaled-flow + base-grid coordinate chain into
                                                                   // GridSample (bit-exact; default on, part of O1)
         bool strictFuse = false;                                  // rounded steps everywhere: fused == unfused byte-identical
@@ -192,6 +198,7 @@ namespace vknn {
             PassOptions o;
             o.fusePointwiseChains = level >= 1;
             o.fuseGridSampleWarp  = level >= 1;
+            o.fuseDfl             = level >= 1;
             o.fuseSqueezeExcite   = level >= 2;
             o.fuseDwPw            = level >= 2;
             return o;

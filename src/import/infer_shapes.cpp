@@ -553,6 +553,16 @@ namespace vknn {
                     SH(o)  = {x.n, x.c, 1, 1}; // channel scale
                     break;
                 }
+                case OpType::FusedDfl: {
+                    const Shape &x    = SH(nd.inputs[0]); // [N, S*B, L]
+                    const int64_t bins = nd.attr.geti("bins", 0);
+                    if (x.size() != 3 || bins <= 0)
+                    {
+                        break;
+                    }
+                    SH(o) = {x[0], x[1] / bins, x[2]}; // [N, S, L]
+                    break;
+                }
                 case OpType::FusedDwPw: {
                     if (SH(nd.inputs[0]).empty())
                     {

@@ -19,7 +19,7 @@ namespace vknn {
         using L = LayoutClass;
 
         // The largest enum value with a table entry (the enum is append-only, so this only grows).
-        constexpr int kMaxOp = (int) OpType::Det;
+        constexpr int kMaxOp = (int) OpType::OpTypeEnd - 1; // every op type has a row; the sentinel keeps the table sized with the enum
 
         struct Table {
             OpDescriptor d[kMaxOp + 1];
@@ -70,6 +70,7 @@ namespace vknn {
                 set(OpType::Range, L::Flat, false, false);
                 set(OpType::ScatterND, L::ShapeDependent, false, false);
                 set(OpType::FusedDwPw, L::Nc4, false, true);
+                set(OpType::FusedDfl, L::Nc4, false, false); // reads the blocked [N,S*B,L] map the head's spatial concat produces
                 set(OpType::FusedPointwise, L::ShapeDependent, false, false);
                 set(OpType::ConvGemm, L::Nc4, false, true);
                 set(OpType::TopK, L::ShapeDependent, false, false);

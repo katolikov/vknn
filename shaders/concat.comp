@@ -1,5 +1,5 @@
 #version 450
-// Channel-axis Concat over NC4HW4 (fp32). One dispatch per input copies its [N][Cib][HW] blocks
+// Channel- or spatial-axis Concat over NC4HW4 (fp32). One dispatch per input copies its [N][Cib][HW] blocks
 // into the output at channel-block offset cbOff. Requires each input's channel count % 4 == 0.
 // The PW_EPI variant applies a fused pointwise unit at each store, indexed in output space.
 #include "common.glsl"
@@ -11,17 +11,21 @@
 layout(local_size_x = 64, local_size_x_id = 0) in; // spec 0 = device-resolved family width (env.flatLocalSize)
 layout(std430, binding = 0) readonly  buffer Src { vec4 src[]; };
 layout(std430, binding = 1) writeonly buffer Dst { vec4 dst[]; };
-layout(push_constant) uniform PC { int N, Cib, Cob, cbOff, HW; } pc;
+layout(push_constant) uniform PC { int N, Cib, Cob, cbOff, HWin, HWout, Win, Wout, hOff, wOff; } pc;
 void main() {
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-  if (gid >= uint(pc.N * pc.Cib * pc.HW)) return;
-  int hw = int(gid) % pc.HW;
-  int cb = (int(gid) / pc.HW) % pc.Cib;
-  int n = int(gid) / (pc.HW * pc.Cib);
-  int di = ((n * pc.Cob) + pc.cbOff + cb) * pc.HW + hw;
+  if (gid >= uint(pc.N * pc.Cib * pc.HWin)) return;
+  int hw = int(gid) % pc.HWin;
+  int cb = (int(gid) / pc.HWin) % pc.Cib;
+  int n = int(gid) / (pc.HWin * pc.Cib);
+  // The part's (h, w) lands at (hOff + h, wOff + w) of the output plane: a channel-axis part has
+  // hOff = wOff = 0 and the same plane; a spatial-axis part has cbOff = 0 and the same blocks.
+  int h = hw / pc.Win;
+  int w = hw % pc.Win;
+  int di = ((n * pc.Cob) + pc.cbOff + cb) * pc.HWout + (pc.hOff + h) * pc.Wout + pc.wOff + w;
 #ifdef PW_EPI
-  dst[di] = pw_apply4(src[((n * pc.Cib) + cb) * pc.HW + hw], di);
+  dst[di] = pw_apply4(src[((n * pc.Cib) + cb) * pc.HWin + hw], di);
 #else
-  dst[di] = src[((n * pc.Cib) + cb) * pc.HW + hw];
+  dst[di] = src[((n * pc.Cib) + cb) * pc.HWin + hw];
 #endif
 }

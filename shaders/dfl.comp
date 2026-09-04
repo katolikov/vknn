@@ -1,0 +1,41 @@
+#version 450
+#include "precision.glsl"
+#include "common.glsl"
+// Distribution-focal decode (core/dfl.h) over the blocked layout:
+//   y[n][s][l] = sum_b softmax_b(x[n][s*B+b][l]) * w[b]
+// x is the NC4HW4 [N, S*B, L] map (CbIn channel blocks, a rank-3 map's L on the row axis), y the
+// NC4HW4 [N, S, L] map (CbOut blocks). One thread per stored output lane (n, cbOut, l, lane):
+// consecutive threads write consecutive lanes and anchors, and read side s = cbOut*4+lane's bins
+// c = s*B+b from block c/4, lane c%4 at the same anchor. A padding lane past S stores zero. The
+// softmax and its expectation stay fp32 whatever the storage tier; the max-shifted exponent keeps
+// them finite.
+layout(local_size_x = 64, local_size_x_id = 0) in; // spec 0 = device-resolved family width (env.flatLocalSize)
+layout(std430, binding = 0) readonly  buffer S { STORE s[]; };  // [N][CbIn][L][4]
+layout(std430, binding = 1) readonly  buffer W { STORE w[]; };  // [B] bin weights
+layout(std430, binding = 2) writeonly buffer D { STORE d[]; };  // [N][CbOut][L][4]
+layout(push_constant) uniform PC { int N, S, B, L, CbIn, CbOut; uint total; } pc;
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= pc.total) return;
+  int lane  = int(gid) % 4;
+  int l     = (int(gid) / 4) % pc.L;
+  int cbOut = (int(gid) / (4 * pc.L)) % pc.CbOut;
+  int n     = int(gid) / (4 * pc.L * pc.CbOut);
+  int sd    = cbOut * 4 + lane;
+  if (sd >= pc.S) { d[gid] = STORE(0.0); return; }
+  int c0 = sd * pc.B; // the side's first bin channel
+  // bin b lives in channel c = c0 + b: block c / 4, lane c % 4, at anchor l
+  float m = float(s[((n * pc.CbIn + c0 / 4) * pc.L + l) * 4 + c0 % 4]);
+  for (int b = 1; b < pc.B; ++b) {
+    int c = c0 + b;
+    m = max(m, float(s[((n * pc.CbIn + c / 4) * pc.L + l) * 4 + c % 4]));
+  }
+  float sum = 0.0, acc = 0.0;
+  for (int b = 0; b < pc.B; ++b) {
+    int   c = c0 + b;
+    float e = exp(float(s[((n * pc.CbIn + c / 4) * pc.L + l) * 4 + c % 4]) - m);
+    sum += e;
+    acc += e * float(w[b]);
+  }
+  d[gid] = STORE(sum > 0.0 ? acc / sum : 0.0);
+}

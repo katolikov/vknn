@@ -128,6 +128,15 @@ namespace vknn {
                                  // (the engine's IR has no rank-0 activations). The GPU kernel
                                  // covers n <= kDetMaxAnalyticN by fixed-order cofactor expansion;
                                  // larger n runs on the CPU (partial-pivot LU) via the named gate.
+        FusedDfl,                // distribution-focal-loss decode (the YOLOv8-family detection head):
+                                 //   y[n][s][l] = sum_b softmax_b(x[n][s*B+b][l]) * w[b]
+                                 // over [N, S*B, L] with `bins` = B, one kernel replacing the
+                                 // Reshape -> Transpose -> Softmax -> Transpose -> Conv1x1 -> Reshape
+                                 // chain. Created by the import-time fuseDfl pass; serialized to .vxm.
+        // Sentinel, always last: one past the highest op type. Sizes the per-op tables
+        // (op_descriptor.cpp) so a newly appended op type is never served a default row. Never a
+        // node's type, never serialized.
+        OpTypeEnd,
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;

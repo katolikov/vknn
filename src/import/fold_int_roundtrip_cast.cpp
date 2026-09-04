@@ -53,6 +53,7 @@ namespace vknn {
                 case OpType::GridSample:
                 case OpType::FusedSE:
                 case OpType::FusedDwPw:
+                case OpType::FusedDfl:
                     return true;
                 default:
                     return false;

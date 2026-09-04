@@ -100,6 +100,8 @@ namespace vknn {
                 return "FusedSE";
             case OpType::FusedDwPw:
                 return "FusedDwPw";
+            case OpType::FusedDfl:
+                return "FusedDfl";
             case OpType::FusedPointwise:
                 return "FusedPointwise";
             case OpType::ConvertLayout:

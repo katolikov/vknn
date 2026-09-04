@@ -538,7 +538,7 @@ int main(int argc, char **argv) {
     {
         printf("usage: %s <model.onnx|model.vxm> <out.vxm> [--fp16] [--batch N] [--dim NAME=VALUE] [--list-dims] [--shape NAME=D0xD1x...] [--bucket "
                "\"NAME=...;dim:NAME2=VALUE;...\"] [-O0..-O3 | --opt N | -Os] "
-               "[--quant-bits 4|8] [--calib F0[,F1,...]] [--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]strict-fuse] [--[no-]lower-conv] "
+               "[--quant-bits 4|8] [--calib F0[,F1,...]] [--[no-]fuse-se] [--[no-]fuse-dwpw] [--[no-]fuse-pointwise] [--[no-]fuse-dfl] [--[no-]strict-fuse] [--[no-]lower-conv] "
                "[--no-dequantize] [--support-report <out.json>] [--dump-big]\n"
                "   or: %s <out.vxm> --graph \"FILE.onnx[;NAME=D0xD1x...;dim:NAME2=VALUE;...]\" [--graph ...] [shared flags as above]\n"
                "       each --graph occurrence compiles ONE bucket from its file (with its own shape/dim segments);\n"
@@ -657,6 +657,7 @@ int main(int argc, char **argv) {
     applyFlagOverride("--fuse-dwpw", "--no-fuse-dwpw", opt.fuseDwPw);
     applyFlagOverride("--fuse-pointwise", "--no-fuse-pointwise", opt.fusePointwiseChains);
     applyFlagOverride("--fuse-gridsample-warp", "--no-fuse-gridsample-warp", opt.fuseGridSampleWarp);
+    applyFlagOverride("--fuse-dfl", "--no-fuse-dfl", opt.fuseDfl);
     applyFlagOverride("--strict-fuse", "--no-strict-fuse", opt.strictFuse);
     applyFlagOverride("--lower-conv", "--no-lower-conv", opt.lowerConv);
     applyFlagOverride("--dequantize", "--no-dequantize", opt.dequantize);

@@ -152,6 +152,10 @@ namespace vknn {
         eliminateDeadNodes(g);
         inferShapes(g, batch, declared, bindings); // refresh shapes after fusion/folding
         fuseChannelShuffle(g);                     // Reshape/Transpose/Reshape group-interleave -> one ChannelShuffle
+        if (opt.fuseDfl)
+        {
+            fuseDfl(g); // detection-head DFL decode chain -> one FusedDfl (needs the resolved Reshape shapes)
+        }
                                                    // dispatch; needs the fixpoint-resolved Reshape shapes above, and
                                                    // runs before the pointwise fusion so the chain is claimed whole
         lowerRMSNorm(g);                           // Cast-free, shape-resolved decomposed RMSNorm chains -> one fp32-accumulate

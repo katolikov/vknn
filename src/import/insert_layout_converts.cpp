@@ -294,13 +294,30 @@ namespace vknn {
                 {
                     axis += rank;
                 }
+                // Only the concatenated parts decide the layout: inputs from pwCoreInputs on are
+                // fused-epilogue operands (broadcast scales etc.), not parts.
+                size_t parts = (size_t) pwCoreInputs(n);
+                // A spatial-axis concat (the rows of a rank-3 [N,C,L] map, the rows or columns of a
+                // rank-4 map) keeps every part's channel blocks and lays the parts side by side in
+                // the output plane, so it stays blocked whatever the channel count, as long as every
+                // part shares the output's N, C and other spatial extent.
+                const bool spatialAxis = (rank == 3 && axis == 2) || (rank == 4 && (axis == 2 || axis == 3));
+                if (spatialAxis)
+                {
+                    for (size_t e = 0; e < parts && e < n.inputs.size(); ++e)
+                    {
+                        const Shape &p = sh(n.inputs[e]);
+                        if ((int) p.size() != rank || p[0] != o[0] || p[1] != o[1] || (rank == 4 && p[axis == 2 ? 3 : 2] != o[axis == 2 ? 3 : 2]))
+                        {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
                 if (rank != 4 || axis != 1)
                 {
                     return true;
                 }
-                // Only the concatenated parts decide the layout: inputs from pwCoreInputs on are
-                // fused-epilogue operands (broadcast scales etc.), not parts.
-                size_t parts = (size_t) pwCoreInputs(n);
                 for (size_t e = 0; e < parts && e < n.inputs.size(); ++e)
                 {
                     if (sh(n.inputs[e]).size() != 4 || sh(n.inputs[e])[1] % 4 != 0)
@@ -376,7 +393,7 @@ namespace vknn {
             case OpType::Slice:
                 return "channel range not block-aligned, or carries an epilogue";
             case OpType::Concat:
-                return "not a 4D channel concat with every part 4-aligned";
+                return "neither a 4D channel concat with every part 4-aligned nor a spatial-axis concat of same-shaped parts";
             case OpType::Split:
                 return "not a 4D channel split with every part 4-aligned";
             case OpType::DepthToSpace:
