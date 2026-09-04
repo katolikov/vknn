@@ -19,8 +19,9 @@ namespace vknn {
         struct ConcatPC {
             int N, Cib, Cob, cbOff, HWin, HWout, Win, Wout, hOff, wOff;
         };
-        /// The concatenated axis in NCHW terms for a blocked Concat: 1 = channels, 2 = rows, 3 = columns
-        /// (a rank-3 [N,C,L] map concatenates its L along the rows, NCHW::from's h).
+        /// The concatenated axis of a blocked Concat, normalized: 1 = channels, 2 = rows, 3 = columns.
+        /// A rank-3 [N,C,L] map's axis 2 is its L, which NCHW::from places on the row axis, so the
+        /// normalized value already names the NCHW axis for both ranks.
         int blockedConcatAxis(const Node &node, const Shape &out) {
             const int rank = (int) out.size();
             int64_t   axis = node.attr.geti("axis", 1);
@@ -28,7 +29,7 @@ namespace vknn {
             {
                 axis += rank;
             }
-            return rank == 3 && axis == 2 ? 2 : (int) axis;
+            return (int) axis;
         }
 
         struct ConcatOp: VulkanOp {

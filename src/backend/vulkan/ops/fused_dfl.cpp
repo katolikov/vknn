@@ -15,7 +15,7 @@ namespace vknn {
         // [N, S*B, L] input (CbIn channel blocks) and the [N, S, L] output (CbOut blocks).
         struct DflPC {
             int      N, S, B, L, CbIn, CbOut;
-            uint32_t total; // N*CbOut*4*L stored lanes; unsigned so the shader's bound holds up to 2^32
+            uint32_t total; // N*CbOut*4*L stored lanes (checked against the int32 domain; the shader compares the unsigned gid to it)
         };
         struct FusedDflOp: VulkanOp {
             std::shared_ptr<vk::ComputePipeline> pipe;
@@ -32,9 +32,16 @@ namespace vknn {
                 const int64_t sides = x[1] / bins;
                 const int64_t cbIn = cBlocks(x[1]), cbOut = cBlocks(sides);
                 const int64_t total = x[0] * cbOut * kNC4Block * x[2];
-                if (total > (int64_t) UINT32_MAX)
+                // The kernel indexes both maps in signed int (the flat family's domain): the output
+                // lane count is the dispatch extent, the input lane count its largest index.
+                const int64_t inputLanes = x[0] * cbIn * kNC4Block * x[2];
+                if (!flat::dispatchExtentFits(total))
                 {
                     throw Error(Status::Unsupported, flat::dispatchExtentRefusal("FusedDfl '" + node.name + "'", "output lane count", total));
+                }
+                if (!flat::dispatchExtentFits(inputLanes))
+                {
+                    throw Error(Status::Unsupported, flat::dispatchExtentRefusal("FusedDfl '" + node.name + "'", "input lane count", inputLanes));
                 }
                 pc = {(int) x[0], (int) sides, (int) bins, (int) x[2], (int) cbIn, (int) cbOut, (uint32_t) total};
                 std::vector<float> w = initFloats(g, node.inputs[1]);

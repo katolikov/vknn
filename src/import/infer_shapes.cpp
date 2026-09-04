@@ -556,9 +556,9 @@ namespace vknn {
                 case OpType::FusedDfl: {
                     const Shape &x    = SH(nd.inputs[0]); // [N, S*B, L]
                     const int64_t bins = nd.attr.geti("bins", 0);
-                    if (x.size() != 3 || bins <= 0)
+                    if (x.size() != 3 || bins <= 0 || x[1] % bins != 0)
                     {
-                        break;
+                        break; // the channels must be whole sides of `bins`; the Vulkan op refuses the rest
                     }
                     SH(o) = {x[0], x[1] / bins, x[2]}; // [N, S, L]
                     break;
