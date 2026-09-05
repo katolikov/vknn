@@ -498,6 +498,34 @@ and the squeeze-excite chain fusion (generalized to Sigmoid / SiLU / HardSwish a
 0.025-0.23 ms per block against ~0.05 unfused: the two 1x1 convs on a [N,C,1,1] tensor already sit
 at the dispatch floor; it stays opt-in at `-O2`).
 
+### What remains is the platform's, measured
+
+Two residues were chased to their floor with a standalone Vulkan probe on the reference phone
+(the probe sources live outside the tree; the numbers are the point):
+
+- **The per-run gap between GPU busy time and the fence (0.4-0.8 ms warm, up to 1.5 ms after a
+  gap of 5 ms or more) is the GPU's clock governor and wake, not the engine.** The same
+  128-dispatch command buffer takes 2.2 ms of GPU time when submitted 1 ms after the previous one
+  and 8-10 ms after any gap of 5 ms or more; an empty submit-and-fence round trip is 0.15-0.2 ms and
+  a single tiny dispatch 0.5 ms. Pre-submitting the command buffer while the caller is idle, gated
+  on a timeline semaphore the host signals when the inputs are ready, hides nothing: the driver pays
+  the latency when the job starts, not when it is queued (1.43 ms against 1.37 ms with 20 ms gaps;
+  the parked job neither tripped the watchdog nor kept the GPU clocked, and its output was exact).
+  A heartbeat on the same queue, from one to 256 workgroups every 2 or 5 ms, leaves the main
+  buffer at its slow-clock time (10.3 ms). What the engine can do it does: `Config::power = High`
+  keeps the GPU from the deeper power collapse across long gaps (mnv2 at 400 ms gaps 3.94 -> 2.81
+  ms), the pre-wake fence wait removes the host's own wake-up, and a busy application holds the
+  clock itself. Raising the clock across idle gaps is the platform's performance-hint API, outside
+  the engine.
+- **DenseNet's 58 per-channel affine units cost 0.98 ms of 11.8 and stay.** In the first two
+  blocks they are bandwidth-bound passes of 14-60 us (40-50% of the 1x1 conv they feed); in the
+  last two they sit at the 8 us dispatch floor. Every fused form loses by measurement: the 1x1
+  conv's input-load prologue re-applies the affine once per output-channel group (16x with the
+  raced tiles) and measured 1.8-2.2x slower; the split-K kernel re-reads each input element once
+  per output block (32x); a per-pixel all-outputs form starves the device of parallelism 32x or
+  multiplies the split-K partial traffic. The ceiling of any of them is the 0.98 ms itself, and
+  none reaches it.
+
 ## YoNoSplat encoder (965M-param transformer)
 
 The feed-forward 3D-Gaussian-Splatting encoder (DINOv2 ViT-L/14 backbone + RoPE decoders + Gaussian /
