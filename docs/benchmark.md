@@ -350,7 +350,7 @@ Four further changes, all output-byte-identical to v1.4.0 per model at every tun
   workgroup), and on strided shapes a narrow two-pixel tile at two and four blocks per thread:
   a stride-2 row reads (WTILE-1)*2+3 columns per tile, so the 5-column narrow tile keeps twice
   the waves in flight of the 9-column default (16->32 s2 @360x480 0.338 -> 0.274 ms, 8->16 s2
-  @720x960 0.387 -> 0.329, YOLOv8n's two stride-2 stem convs -0.15 ms; at stride 1 the narrow
+  on the probe's map 0.387 -> 0.329, YOLOv8n's two stride-2 stem convs -0.15 ms; at stride 1 the narrow
   tile ties or loses and is not raced). Stride-2 3x3 convs on a shallow, huge-spatial net went 0.62 / 0.57 -> 0.42 / 0.38 ms,
   and a pointwise 64->64 @160x160 0.39 -> 0.14 ms.
 - **Depthwise 2x2 output tile** (`dwconv_t2`) and **output-channel-sliced dispatch** for the

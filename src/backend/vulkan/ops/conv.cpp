@@ -739,7 +739,7 @@ namespace vknn {
             // The narrow pixel tile raced on strided shapes: a stride-2 row reads (WTILE-1)*2+3
             // columns per tile, and at two pixels the 5-column segment leaves twice the waves in
             // flight of the 9-column default. Measured on the primary device: 16->32 s2 @360x480
-            // 0.332 -> 0.278 ms (OCB 4) / 0.291 (OCB 2), 8->16 s2 @720x960 0.378 -> 0.328; at stride
+            // 0.332 -> 0.278 ms (OCB 4) / 0.291 (OCB 2), 8->16 s2 on the probe's map 0.378 -> 0.328; at stride
             // 1 the narrow tile ties or loses, so it is not raced there.
             static constexpr uint32_t kWtileNarrow = 2;
             // The pixel tile a row choice carries: the WTILE field, with 0 (a choice cached before the
