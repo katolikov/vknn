@@ -498,9 +498,13 @@ push-constant members in order, each binding declaration, specialization-constan
 against `flat::kFlatLocalSize`, the shader's named constants against the test's. It skips only when the
 sources are unreadable (a test binary run on a device). Mode and layout values that the op and the test
 share live in a header free of Vulkan types (`src/backend/vulkan/ops/cast_modes.h`,
-`arg_extreme_plan.h`) so the host test includes the op's own definitions. Precedents:
+`arg_extreme_plan.h`) so the host test includes the op's own definitions; an interface that stays in an
+op file is read from that file's text. `tests/shader_source_check.h` carries the shared readers (function
+bodies, named constants, push-constant and struct members, bindings, local size). Precedents:
 `ModOps.ShaderTranscriptionMatchesCompSource`, `ArgExtremeShader.SourceMatchesTranscriptionAndInterface`,
-`CastShaderSource.TranscribedLinesAndModeValuesMatchCastComp`.
+`CastShaderSource.TranscribedLinesAndModeValuesMatchCastComp`,
+`BitwiseShaderSource.TranscriptionAndInterfaceMatchTheShaders`,
+`LogicalShaderSource.TranscriptionAndInterfaceMatchTheShaders`.
 
 ---
 

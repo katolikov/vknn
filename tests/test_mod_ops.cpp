@@ -11,6 +11,7 @@
 #include "backend/vulkan/ops/mod_operand_geometry.h"
 #include "import/mod_integer_operands.h"
 #include "import/passes.h"
+#include "shader_source_check.h"
 #include "vknn/binary_type.h"
 #include "vknn/graph.h"
 #include "vknn/session.h"
@@ -1533,6 +1534,25 @@ TEST(ModOps, ShaderTranscriptionMatchesCompSource) {
         {"kDivisorStrideBlock", kDivisorStrideBlock},
     };
     EXPECT_EQ(shaderIntegerConstants(shaderSource), transcribedConstants);
+
+    // The interface ModVk relies on: the push-constant members in order against its PC struct, the four
+    // buffer bindings against kModBufferCount, and the local size against flat::kFlatLocalSize.
+    const std::string shaderCode = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("shaders/mod.comp"));
+    const std::string opCode     = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("src/backend/vulkan/ops/mod.cpp"));
+    const std::string flatOps    = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("src/backend/vulkan/ops/flat_ops.h"));
+    ASSERT_FALSE(shaderCode.empty() || opCode.empty() || flatOps.empty()) << "cannot read the Mod sources from " << shader_source::repositoryRoot();
+    const std::vector<std::string> pushConstants = shader_source::pushConstantMembers(shaderCode);
+    EXPECT_EQ(pushConstants, (std::vector<std::string> {"int rank", "int total", "int fmodMode", "int integerOperands"}));
+    EXPECT_EQ(shader_source::structMembers(opCode, "PC"), pushConstants);
+    constexpr long long kAbsent     = -1;
+    const long long     bufferCount = shader_source::cppIntegerConstant(opCode, "kModBufferCount", kAbsent);
+    std::vector<int>    bindingOrder;
+    for (int binding = 0; binding < (int) bufferCount; ++binding)
+    {
+        bindingOrder.push_back(binding);
+    }
+    EXPECT_EQ(shader_source::bindingIndices(shaderCode), bindingOrder);
+    EXPECT_EQ(shader_source::localSizeX(shaderCode), shader_source::cppIntegerConstant(flatOps, "kFlatLocalSize", kAbsent));
 }
 
 // Config::cpuThreads never changes a byte: both the float and the int64 path partition the broadcast

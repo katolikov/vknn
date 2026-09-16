@@ -12,12 +12,15 @@
 // braced by the C++ format) so a reviewer can diff the two, and is swept bit for bit against the CPU
 // oracle's fp32 lane over integer operands within +-2^24, fractional and NaN operands, every width, and
 // shift counts 0..70; the BitwiseNot and BitShift sweeps add lanes just below 2^32, multiples of 2^32,
-// lanes that saturate the int64 range, and pseudo-random fp32 bit patterns.
+// lanes that saturate the int64 range, and pseudo-random fp32 bit patterns. A source test
+// (BitwiseShaderSource) ties every transcribed function and constant to the shaders token for token and
+// pins the kernels' push constants, bindings, local size and operator codes to their op files.
 #include "backend/cpu/bitwise_int.h"
 #include "backend/cpu/parallel.h"
 #include "core/bitwise_attrs.h"
 #include "core/vk_gates.h"
 #include "import/passes.h"
+#include "shader_source_check.h"
 #include "vknn/graph.h"
 #include "vknn/session.h"
 #include <cmath>
@@ -26,6 +29,7 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <limits>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -1258,4 +1262,107 @@ TEST(BitwiseShaderMath, BitShiftMatchesOracle) {
         }
     }
     EXPECT_EQ(mismatches, 0) << "of " << checked;
+}
+
+TEST(BitwiseShaderSource, TranscriptionAndInterfaceMatchTheShaders) {
+    // The glsl namespace above transcribes shaders/bitwise_int.glsl and the value functions of the three
+    // bitwise kernels; a shader edit it does not follow fails here. The kernels' interfaces are pinned to
+    // their op files: push-constant members in order, binding declarations against the buffer counts, the
+    // local size against flat::kFlatLocalSize, and bitwise.comp's operator codes against bitwise_vk.h.
+    const std::string testCode     = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("tests/test_bitwise_ops.cpp"));
+    const std::string integerCode  = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("shaders/bitwise_int.glsl"));
+    const std::string binaryCode   = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("shaders/bitwise.comp"));
+    const std::string notCode      = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("shaders/bitwise_not.comp"));
+    const std::string shiftCode    = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("shaders/bitshift.comp"));
+    const std::string bitwiseVk    = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("src/backend/vulkan/ops/bitwise_vk.h"));
+    const std::string bitshiftVk   = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("src/backend/vulkan/ops/bitshift.cpp"));
+    const std::string bitwiseNotVk = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("src/backend/vulkan/ops/bitwise_not.cpp"));
+    const std::string flatOps      = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("src/backend/vulkan/ops/flat_ops.h"));
+    if (testCode.empty() || integerCode.empty() || binaryCode.empty() || notCode.empty() || shiftCode.empty() || bitwiseVk.empty() || bitshiftVk.empty() ||
+        bitwiseNotVk.empty() || flatOps.empty())
+    {
+        GTEST_SKIP() << "the source tree is not readable from " << shader_source::repositoryRoot();
+    }
+    const std::string transcription = shader_source::blockAfter(testCode, "namespace glsl");
+    ASSERT_FALSE(transcription.empty());
+
+    struct TranscribedFunction {
+        const char        *name;
+        const std::string *shaderCode;
+        const char        *extraTranscriptionParameters; // parameters the transcription takes for a spec constant
+    };
+    const std::vector<TranscribedFunction> functions {
+        {"integerOperand", &integerCode, ""},
+        {"int32Operand", &integerCode, ""},
+        {"narrowWidthOperand", &integerCode, ""},
+        {"powerOfTwo", &integerCode, ""},
+        {"residueModPowerOfTwo", &integerCode, ""},
+        {"wrapToWidth", &integerCode, ""},
+        {"bitwiseValue", &binaryCode, ", int kOperator"},
+        {"bitwiseNotValue", &notCode, ""},
+        {"int64MaxShifted", &shiftCode, ""},
+        {"bitShiftValue", &shiftCode, ""},
+    };
+    for (const TranscribedFunction &function: functions)
+    {
+        const shader_source::FunctionTokens shader      = shader_source::functionTokens(*function.shaderCode, function.name);
+        const shader_source::FunctionTokens transcribed = shader_source::functionTokens(transcription, function.name);
+        ASSERT_TRUE(shader.found) << function.name << " is not defined in its shader";
+        ASSERT_TRUE(transcribed.found) << function.name << " is not transcribed";
+        EXPECT_EQ(shader.body, transcribed.body) << function.name;
+        std::vector<std::string>       expectedParameters = shader.parameters;
+        const std::vector<std::string> extra              = shader_source::normalizedTokens(function.extraTranscriptionParameters);
+        expectedParameters.insert(expectedParameters.end() - 1, extra.begin(), extra.end());
+        EXPECT_EQ(transcribed.parameters, expectedParameters) << function.name;
+    }
+
+    // Every named constant of bitwise_int.glsl and bitwise.comp's operator codes, and nothing else, is
+    // transcribed with the shader's type and value. The geometry stride index (kGeomBStrideArray) belongs to
+    // main(), which the transcription does not cover, and the operator specialization constant (kOperator)
+    // is the transcription's parameter.
+    std::map<std::string, std::string> shaderConstants = shader_source::constantDeclarations(integerCode);
+    for (const auto &[name, declaration]: shader_source::constantDeclarations(binaryCode))
+    {
+        if (name != "kGeomBStrideArray" && name != "kOperator")
+        {
+            shaderConstants[name] = declaration;
+        }
+    }
+    EXPECT_EQ(shader_source::constantDeclarations(transcription), shaderConstants);
+    EXPECT_EQ(shader_source::constantDeclarations(binaryCode).at("kGeomBStrideArray"), shader_source::constantDeclarations(shiftCode).at("kGeomBStrideArray"));
+
+    // bitwise.comp's operator codes are the specialization-constant values bitwise_vk.h passes.
+    const std::map<std::string, const char *> operatorCodes {
+        {"kOperatorAnd", "kBitwiseOperatorAnd"},
+        {"kOperatorOr", "kBitwiseOperatorOr"},
+        {"kOperatorXor", "kBitwiseOperatorXor"},
+    };
+    constexpr long long kAbsent = -1;
+    for (const auto &[shaderName, cppName]: operatorCodes)
+    {
+        EXPECT_EQ(shader_source::cppIntegerConstant(binaryCode, shaderName, kAbsent), shader_source::cppIntegerConstant(bitwiseVk, cppName, kAbsent)) << shaderName;
+    }
+    EXPECT_NE(binaryCode.find("layout(constant_id = 0) const int kOperator = 0;"), std::string::npos) << "the operator is specialization constant 0";
+
+    // Push constants, bindings and local size.
+    EXPECT_EQ(shader_source::pushConstantMembers(binaryCode), shader_source::structMembers(bitwiseVk, "PushConstants"));
+    EXPECT_EQ(shader_source::pushConstantMembers(shiftCode), shader_source::structMembers(bitshiftVk, "PushConstants"));
+    EXPECT_EQ(shader_source::pushConstantMembers(notCode), shader_source::structMembers(bitwiseNotVk, "PushConstants"));
+    const long long broadcastBuffers = shader_source::cppIntegerConstant(bitwiseVk, "kBroadcastBufferCount", kAbsent);
+    const long long notBuffers       = shader_source::cppIntegerConstant(bitwiseNotVk, "kBufferCount", kAbsent);
+    auto            sequence         = [](long long count) {
+        std::vector<int> indices;
+        for (int index = 0; index < (int) count; ++index)
+        {
+            indices.push_back(index);
+        }
+        return indices;
+    };
+    EXPECT_EQ(shader_source::bindingIndices(binaryCode), sequence(broadcastBuffers));
+    EXPECT_EQ(shader_source::bindingIndices(shiftCode), sequence(broadcastBuffers));
+    EXPECT_EQ(shader_source::bindingIndices(notCode), sequence(notBuffers));
+    const long long flatLocalSize = shader_source::cppIntegerConstant(flatOps, "kFlatLocalSize", kAbsent);
+    EXPECT_EQ(shader_source::localSizeX(binaryCode), flatLocalSize);
+    EXPECT_EQ(shader_source::localSizeX(shiftCode), flatLocalSize);
+    EXPECT_EQ(shader_source::localSizeX(notCode), flatLocalSize);
 }

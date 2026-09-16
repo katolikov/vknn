@@ -10,10 +10,14 @@
 // source and encoding) run for real, and the shader functions run as C++ transcriptions kept textually
 // parallel to shaders/logical_truth.glsl, or.comp, xor.comp and not.comp; both are checked against the
 // CPU oracle.
+// LogicalShaderSource: the shader text the transcriptions mirror (function and main() bodies, named
+// constants) and the kernels' interfaces (push constants, bindings, local size) are pinned to the shaders
+// and op files, so a shader edit the transcriptions do not follow fails a test.
 #include "backend/cpu/logical_ops.h"
 #include "backend/cpu/parallel.h"
 #include "backend/vulkan/ops/logical_geometry.h"
 #include "import/passes.h"
+#include "shader_source_check.h"
 #include "vknn/dtype.h"
 #include "vknn/graph.h"
 #include "vknn/session.h"
@@ -23,6 +27,7 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <limits>
+#include <map>
 #include <optional>
 #include <random>
 #include <string>
@@ -303,6 +308,36 @@ namespace {
         }
         result.at(elementIndex) = logicalIsTrue(operand.at(elementIndex)) ? kLogicalFalse : kLogicalTrue;
     }
+
+    // The shader text the transcriptions above mirror statement for statement (the C++ spells
+    // floatBitsToUint as a bit copy, a bounds-checked .at() for each buffer read or write, and the or/xor
+    // combination as a parameter). LogicalShaderSource compares each body with the shader's, so a shader
+    // edit fails a test until the transcription and these lines follow it.
+    const char *const kLogicalIsTrueShaderBody = "{ return (floatBitsToUint(value) << kLogicalSignBitDrop) != 0u; }";
+
+    // or.comp's main(); xor.comp's differs only in the combination operator (kLogicalXorCombination).
+    const char *const kLogicalBinaryShaderMainBody   = R"({
+        uint elementIndex = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+        if (elementIndex >= uint(pc.total)) return;
+        int remainingIndex = int(elementIndex), operandAIndex = 0, operandBIndex = 0;
+        for (int axis = pc.rank - 1; axis >= 0; --axis) {
+            int axisCoordinate = remainingIndex % geometry[axis];
+            remainingIndex /= geometry[axis];
+            operandAIndex += axisCoordinate * geometry[kGeomAStrideArray * pc.rank + axis];
+            operandBIndex += axisCoordinate * geometry[kGeomBStrideArray * pc.rank + axis];
+        }
+        bool combined = logicalIsTrue(float(operandA[operandAIndex])) COMBINATION logicalIsTrue(float(operandB[operandBIndex]));
+        result[elementIndex] = STORE(combined ? kLogicalTrue : kLogicalFalse);
+    })";
+    const char *const kLogicalCombinationPlaceholder = "COMBINATION";
+    const char *const kLogicalOrCombination          = "||";
+    const char *const kLogicalXorCombination         = "!=";
+
+    const char *const kLogicalNotShaderMainBody = R"({
+        uint elementIndex = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+        if (elementIndex >= uint(pc.total)) return;
+        result[elementIndex] = STORE(logicalIsTrue(float(operand[elementIndex])) ? kLogicalFalse : kLogicalTrue);
+    })";
 
     // The flat kernels' local_size_x (flat::kFlatLocalSize).
     constexpr uint32_t kFlatLocalSize = 256;
@@ -1190,4 +1225,76 @@ TEST(LogicalGpuRules, ReleasedConstantPayloadNeverReadsAsFalse) {
     NodeResult oracle = runOk(OpType::Not, {int64Input(maskShape, maskValues)});
     expectMatchesOracle(runNotTranscription(maskShape, fp32DeviceCopy).result, oracle, "shared fp32 copy");
     expectMatchesOracle(runNotTranscription(maskShape, fp16DeviceCopy).result, oracle, "shared fp16 copy");
+}
+
+TEST(LogicalShaderSource, TranscriptionAndInterfaceMatchTheShaders) {
+    const std::string testCode  = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("tests/test_logical_ops.cpp"));
+    const std::string truthCode = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("shaders/logical_truth.glsl"));
+    const std::string orCode    = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("shaders/or.comp"));
+    const std::string xorCode   = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("shaders/xor.comp"));
+    const std::string notCode   = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("shaders/not.comp"));
+    const std::string binaryVk  = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("src/backend/vulkan/ops/logical_binary_vk.h"));
+    const std::string notVk     = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("src/backend/vulkan/ops/not.cpp"));
+    const std::string flatOps   = shader_source::withoutCommentsAndDirectives(shader_source::readRepositoryFile("src/backend/vulkan/ops/flat_ops.h"));
+    if (testCode.empty() || truthCode.empty() || orCode.empty() || xorCode.empty() || notCode.empty() || binaryVk.empty() || notVk.empty() || flatOps.empty())
+    {
+        GTEST_SKIP() << "the source tree is not readable from " << shader_source::repositoryRoot();
+    }
+
+    // Bodies.
+    const shader_source::FunctionTokens truth = shader_source::functionTokens(truthCode, "logicalIsTrue");
+    ASSERT_TRUE(truth.found);
+    EXPECT_EQ(truth.body, shader_source::normalizedBlock(kLogicalIsTrueShaderBody));
+    auto binaryMain = [](const char *combination) {
+        std::string       body     = kLogicalBinaryShaderMainBody;
+        const std::string marker   = kLogicalCombinationPlaceholder;
+        const size_t      position = body.find(marker);
+        body.replace(position, marker.size(), combination);
+        return shader_source::normalizedBlock(body);
+    };
+    EXPECT_EQ(shader_source::functionTokens(orCode, "main").body, binaryMain(kLogicalOrCombination)) << "or.comp";
+    EXPECT_EQ(shader_source::functionTokens(xorCode, "main").body, binaryMain(kLogicalXorCombination)) << "xor.comp";
+    EXPECT_EQ(shader_source::functionTokens(notCode, "main").body, shader_source::normalizedBlock(kLogicalNotShaderMainBody)) << "not.comp";
+
+    // Every named constant of the shaders is transcribed with the same type and value.
+    const std::map<std::string, std::string> testConstants = shader_source::constantDeclarations(testCode, shader_source::DeclarationScope::AnyDepth);
+    for (const std::string *shaderCode: {&truthCode, &orCode, &xorCode, &notCode})
+    {
+        for (const auto &[name, declaration]: shader_source::constantDeclarations(*shaderCode))
+        {
+            const auto transcribed = testConstants.find(name);
+            ASSERT_NE(transcribed, testConstants.end()) << name << " is not transcribed";
+            EXPECT_EQ(transcribed->second, declaration) << name;
+        }
+    }
+
+    // Push constants: the shader block, the op's struct and the transcription's struct, member for member.
+    const std::vector<std::string> binaryMembers = shader_source::pushConstantMembers(orCode);
+    EXPECT_EQ(shader_source::pushConstantMembers(xorCode), binaryMembers);
+    EXPECT_EQ(shader_source::structMembers(binaryVk, "PC"), binaryMembers);
+    EXPECT_EQ(shader_source::structMembers(testCode, "BinaryPushConstant"), binaryMembers);
+    const std::vector<std::string> notMembers = shader_source::pushConstantMembers(notCode);
+    EXPECT_EQ(shader_source::structMembers(notVk, "PC"), notMembers);
+    EXPECT_EQ(shader_source::structMembers(testCode, "NotPushConstant"), notMembers);
+
+    // Bindings in declaration order against the ops' binding counts, and the local size.
+    constexpr long long kAbsent  = -1;
+    auto                sequence = [](long long count) {
+        std::vector<int> indices;
+        for (int index = 0; index < (int) count; ++index)
+        {
+            indices.push_back(index);
+        }
+        return indices;
+    };
+    const long long binaryBindings = shader_source::cppIntegerConstant(binaryVk, "kBindingCount", kAbsent);
+    EXPECT_EQ(shader_source::bindingIndices(orCode), sequence(binaryBindings));
+    EXPECT_EQ(shader_source::bindingIndices(xorCode), sequence(binaryBindings));
+    EXPECT_EQ(shader_source::bindingIndices(notCode), sequence(shader_source::cppIntegerConstant(notVk, "kBindingCount", kAbsent)));
+    const long long flatLocalSize = shader_source::cppIntegerConstant(flatOps, "kFlatLocalSize", kAbsent);
+    EXPECT_EQ(flatLocalSize, (long long) kFlatLocalSize);
+    for (const std::string *shaderCode: {&orCode, &xorCode, &notCode})
+    {
+        EXPECT_EQ(shader_source::localSizeX(*shaderCode), flatLocalSize);
+    }
 }
