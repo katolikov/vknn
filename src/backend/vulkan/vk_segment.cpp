@@ -1944,11 +1944,24 @@ namespace vknn {
                 {
                     bool         flat    = g_.desc(tid).gpuFlat;
                     TensorFormat devFmt  = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
-                    DType        devDt   = useFp16_ ? DType::Float16 : DType::Float32;
+                    DType        devDt   = boundaryDeviceDtype(useFp16_, g_.tensors[tid].storeFp32);
                     TensorFormat declFmt = rt.dmaBufFormat;
                     DType        declDt  = rt.dmaBufDtype;
                     bool         direct  = declFmt == TensorFormat::Auto || (declFmt == devFmt && declDt == devDt);
                     NCHW         x       = NCHW::from(rt.shape.empty() ? g_.tensors[tid].shape : rt.shape);
+                    if (!direct)
+                    {
+                        // A declared dtype the GPU cannot convert (no boundary_convert variant for the
+                        // pair, or an 8-bit variant on a device without 8-bit storage) is refused by name
+                        // before anything is imported: the fd has no host copy to fall back to.
+                        const DType convertSource      = isInput ? declDt : devDt;
+                        const DType convertDestination = isInput ? devDt : declDt;
+                        const auto &deviceCaps         = be_->ctx().caps();
+                        if (!boundaryConvertDeviceSupports(convertSource, convertDestination, deviceCaps.storage8bit, deviceCaps.shaderInt8))
+                        {
+                            throw Error(Status::Unsupported, "dma-buf " + std::string(isInput ? "input" : "output") + " '" + g_.tensors[tid].name + "': no GPU conversion from " + dtypeStr(convertSource) + " to " + dtypeStr(convertDestination) + (boundaryConvertHasVariant(convertSource, convertDestination) ? " on a device without 8-bit storage" : ""));
+                        }
+                    }
                     // Import sized for what the dma-buf actually holds: the device-native bytes for a
                     // direct bind, the declared-format bytes for a convert. Re-import when this
                     // tensor's fd or size changes.
@@ -2011,7 +2024,8 @@ namespace vknn {
             // and a boundary_convert(staging[declared] -> boundary[device-native]) so the raw caller
             // bytes are converted on the GPU. The staging buffer's stable identity keeps this a one-time
             // re-record. Skipped when a dma-buf fd is present (zero-copy wins) or the graph is not
-            // whole-GPU (ioGpuConvert off -> host packToBuffer path).
+            // whole-GPU (ioGpuConvert off -> host packToBuffer path). A raw 8-bit input left unstaged
+            // (a device without 8-bit storage) is decoded by the host upload below.
             if (ioGpuConvert)
             {
                 for (TensorId tid: boundaryInputs)
@@ -2033,10 +2047,12 @@ namespace vknn {
                     // converted input is byte-identical to the host pack. The rank-4 gate keeps the win
                     // on the large image inputs it targets (a [N,C,H,W] feature map) and off the tiny
                     // per-token fp32 boundaries (inputs_embeds [1,S,H], 1-D/2-D masks and index vectors,
-                    // scalars) where it is a no-win; Int8/Int32/Int64 have no boundary_convert variant.
+                    // scalars) where it is a no-win. The raw-byte dtypes are the ones the Session keeps
+                    // undecoded (boundaryStagesRawInputBytes); Int32/Int64 arrive host-decoded or as
+                    // int64 lanes and take the host upload.
                     const std::vector<int64_t> &inShape   = rt.shape.empty() ? g_.tensors[tid].shape : rt.shape;
                     const bool                  fp32Image = rt.dtype == DType::Float32 && inShape.size() == 4;
-                    if (rt.dtype != DType::UInt8 && rt.dtype != DType::Int8 && !fp32Image)
+                    if (!boundaryStagesRawInputBytes(rt.dtype) && !fp32Image)
                     {
                         continue;
                     }
@@ -2054,12 +2070,17 @@ namespace vknn {
                     }
                     bool         flat    = g_.desc(tid).gpuFlat;
                     TensorFormat devFmt  = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
-                    DType        devDt   = (useFp16_ && !g_.tensors[tid].storeFp32) ? DType::Float16 : DType::Float32;
+                    DType        devDt   = boundaryDeviceDtype(useFp16_, g_.tensors[tid].storeFp32);
                     TensorFormat declFmt = TensorFormat::NCHW; // caller image layout
                     DType        declDt  = rt.dtype;
                     NCHW         x       = NCHW::from(rt.shape.empty() ? g_.tensors[tid].shape : rt.shape);
                     auto        &st      = stagingIn_[tid];
                     size_t       need    = (size_t) (formatElems(declFmt, x) * dtypeSize(declDt));
+                    const auto  &caps    = be_->ctx().caps();
+                    if (!boundaryConvertDeviceSupports(declDt, devDt, caps.storage8bit, caps.shaderInt8))
+                    {
+                        continue; // no variant this device runs: the host upload decodes the declared bytes
+                    }
                     if (need == 0)
                     {
                         continue; // a zero-dim boundary input has no bytes to stage; vkCreateBuffer(size=0) is invalid -> keep the host path
@@ -2146,7 +2167,11 @@ namespace vknn {
                 // GPU image convert: raw memcpy the caller's declared bytes into the staging buffer; the
                 // recorded boundary_convert dispatch turns them into the device-native boundary. No host
                 // uint8->fp32->fp16 pack. The convert writes bit->second (the boundary), read by the ops.
-                std::memcpy(sit->second->host(), rt.host.bytes.data(), std::min(sit->second->bytes(), rt.host.bytes.size()));
+                // A short caller buffer leaves the rest of the staging buffer zero (the bindInput rule), so
+                // no earlier run's bytes survive into this one.
+                const size_t stagedBytes = std::min(sit->second->bytes(), rt.host.bytes.size());
+                std::memcpy(sit->second->host(), rt.host.bytes.data(), stagedBytes);
+                std::memset(static_cast<uint8_t *>(sit->second->host()) + stagedBytes, 0, sit->second->bytes() - stagedBytes);
                 rt.deviceValid  = true;
                 rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
             } else if (rt.hostValid && !alreadyHere && kvqCaches_.count(tid))
@@ -2159,33 +2184,26 @@ namespace vknn {
                 rt.deviceFormat = TensorFormat::NCHW;
             } else if (rt.hostValid && !alreadyHere)
             {
-                // The Vulkan device represents an integer tensor as its float value (index/shape ops
-                // upload int64 indices decoded to float), but rt.host for an int64/int32 boundary
-                // tensor holds raw integer bytes. packToBuffer reads host as fp32, so decode the
-                // integer host to fp32 first; a Float32 host packs directly. Without this, an int64
-                // boundary input crossing into a Vulkan segment (e.g. attention_mask when a mid-graph
-                // CPU island splits the graph) is reinterpreted as fp32 and comes out ~0.
-                if (rt.dtype == DType::Int64 || rt.dtype == DType::Int32)
+                // The Vulkan device represents every tensor as float lanes (index/shape ops upload
+                // int64 indices decoded to float), but rt.host for a non-fp32 boundary tensor holds its
+                // own dtype's bytes: int64/int32 lanes, or the raw uint8/int8 bytes the Session keeps for
+                // the staging conversion when that conversion did not run. packToBuffer reads host as
+                // fp32, so decode every non-fp32 host to fp32 first with the bindInput decode; a Float32
+                // host packs directly. Without this, an integer boundary input crossing into a Vulkan
+                // segment (e.g. attention_mask when a mid-graph CPU island splits the graph) is
+                // reinterpreted as fp32 and comes out ~0.
+                if (rt.dtype != DType::Float32)
                 {
-                    RtTensor f32 = rt;
-                    f32.dtype    = DType::Float32;
-                    int64_t n    = numElements(rt.shape);
+                    RtTensor      f32     = rt;
+                    const int64_t n       = numElements(rt.shape);
+                    const int64_t decoded = std::min<int64_t>(n, (int64_t) (rt.host.bytes.size() / boundaryHostLaneBytes(rt.dtype)));
+                    f32.dtype             = DType::Float32;
                     f32.host.resizeElems(n, DType::Float32);
                     float *d = f32.host.f32();
-                    if (rt.dtype == DType::Int64)
+                    decodeHostLanesToFloat32(rt.dtype, rt.host.bytes.data(), decoded, d);
+                    if (decoded < n)
                     {
-                        const int64_t *s = rt.host.i64();
-                        for (int64_t i = 0; i < n; ++i)
-                        {
-                            d[i] = (float) s[i];
-                        }
-                    } else
-                    {
-                        const int32_t *s = reinterpret_cast<const int32_t *>(rt.host.bytes.data());
-                        for (int64_t i = 0; i < n; ++i)
-                        {
-                            d[i] = (float) s[i];
-                        }
+                        std::memset(d + decoded, 0, (size_t) (n - decoded) * sizeof(float));
                     }
                     // A storeFp32 boundary (a pinned Gather index) keeps its 4-byte fp32 buffer, so an
                     // integer index above the fp16 range is not narrowed to +inf at upload.

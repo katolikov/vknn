@@ -1,5 +1,6 @@
 #include "vknn/session.h"
 #include "../import/passes.h"
+#include "core/boundary_convert_rule.h"
 #include "core/quant_weights.h"
 #include "vknn/logging.h"
 #include "vknn/op_descriptor.h"
@@ -43,54 +44,10 @@ namespace vknn {
         rt.dtype = DType::Float32;
         rt.host.resizeElems(elems, DType::Float32);
         float *f = rt.host.f32();
-        // Elements that fit in both the destination (elems) and the caller buffer at bytesPer each.
-        auto fitElems = [&](int64_t bytesPer) {
-            return std::min<int64_t>(elems, (int64_t) (in.size() / bytesPer));
-        };
-        int64_t filled = 0;
-        switch (src)
-        {
-            case DType::Float32: {
-                filled = fitElems(4);
-                std::memcpy(f, in.data(), (size_t) filled * 4);
-                break;
-            }
-            case DType::Float16: {
-                const fp16_t *h = reinterpret_cast<const fp16_t *>(in.data());
-                filled          = fitElems(2);
-                for (int64_t i = 0; i < filled; ++i)
-                {
-                    f[i] = halfToFloat(h[i]);
-                }
-                break;
-            }
-            case DType::UInt8:
-                filled = fitElems(1);
-                for (int64_t i = 0; i < filled; ++i)
-                {
-                    f[i] = (float) reinterpret_cast<const uint8_t *>(in.data())[i];
-                }
-                break;
-            case DType::Int8:
-                filled = fitElems(1);
-                for (int64_t i = 0; i < filled; ++i)
-                {
-                    f[i] = (float) reinterpret_cast<const int8_t *>(in.data())[i];
-                }
-                break;
-            case DType::Int32:
-                filled = fitElems(4);
-                for (int64_t i = 0; i < filled; ++i)
-                {
-                    f[i] = (float) reinterpret_cast<const int32_t *>(in.data())[i];
-                }
-                break;
-            default: {
-                filled = fitElems(4);
-                std::memcpy(f, in.data(), (size_t) filled * 4);
-                break;
-            }
-        }
+        // Elements that fit in both the destination (elems) and the caller buffer, decoded by the
+        // boundary host decode the GPU staging conversion reproduces (core/boundary_convert_rule.h).
+        const int64_t filled = std::min<int64_t>(elems, (int64_t) (in.size() / boundaryHostLaneBytes(src)));
+        decodeHostLanesToFloat32(src, in.data(), filled, f);
         if (filled < elems)
         {
             std::memset(f + filled, 0, (size_t) (elems - filled) * 4);
@@ -2167,14 +2124,17 @@ namespace vknn {
             {
                 rt.dtype     = io.dtype;
                 rt.hostValid = false; // zero-copy: the input comes straight from the fd, no host buffer
-            } else if (ioGpuConvert_ && (io.dtype == DType::UInt8 || io.dtype == DType::Int8) && !linkedInput(bucketIndex, id))
+            } else if (ioGpuConvert_ && boundaryStagesRawInputBytes(io.dtype) && !linkedInput(bucketIndex, id))
             {
                 // (A LINKED input takes the fp32 bindInput path below even for 8-bit data: the raw-
                 // byte staging convert re-runs every submit and would overwrite the resident state.)
                 // Whole-graph GPU run: keep the caller's raw 8-bit bytes (rt.dtype stays the declared 8-bit
-                // type) and let the GPU convert them at the boundary — uint8/int8 -> device fp16 + NC4HW4
-                // gather — skipping the host uint8->fp32->fp16 pack. The Vulkan backend recognizes the 8-bit
-                // rt.dtype, memcpys the raw NCHW bytes into a staging buffer, and dispatches boundary_convert.
+                // type) and let the GPU convert them at the boundary — uint8/int8 -> device fp16/fp32 +
+                // NC4HW4 gather, the integer value zero- or sign-extended — skipping the host
+                // uint8->fp32->fp16 pack. The Vulkan backend recognizes the 8-bit rt.dtype, memcpys the raw
+                // NCHW bytes into a staging buffer, and dispatches the boundary_convert variant for that
+                // dtype; when it cannot stage (no 8-bit storage on the device), its host upload decodes the
+                // raw bytes with the same decodeHostLanesToFloat32 bindInput uses.
                 rt.dtype      = io.dtype;
                 rt.host.bytes = io.data;
                 rt.hostValid  = true;
@@ -2405,10 +2365,11 @@ namespace vknn {
         info.dtype = g.tensors[id].dtype;
         info.elems = numElements(info.shape);
         // Zero-copy boundary buffer the caller provides: the segment's device layout for this tensor at
-        // the compute precision (fp16 -> 2 bytes/elem). Flat boundaries are row-major NCHW; the rest are
-        // NC4HW4 (channels in groups of 4, padded), whose byte size includes the channel padding.
-        int64_t elemSize = (prec == Precision::High) ? 4 : 2;
-        info.deviceDtype = (prec == Precision::High) ? DType::Float32 : DType::Float16;
+        // the compute precision (fp16 -> 2 bytes/elem), or fp32 for a tensor pinned to fp32 storage (the
+        // Vulkan segment's boundaryDeviceDtype). Flat boundaries are row-major NCHW; the rest are NC4HW4
+        // (channels in groups of 4, padded), whose byte size includes the channel padding.
+        info.deviceDtype = boundaryDeviceDtype(prec != Precision::High, g.desc(id).storeFp32);
+        int64_t elemSize = (int64_t) dtypeSize(info.deviceDtype);
         if (g.desc(id).gpuFlat)
         {
             info.deviceBytes  = info.elems * elemSize;
