@@ -64,6 +64,7 @@ namespace vknn { namespace onnx {
         kTensorInt64Data    = 7,  // TensorProto.int64_data
         kTensorName         = 8,  // TensorProto.name
         kTensorRawData      = 9,  // TensorProto.raw_data (bytes)
+        kTensorUint64Data   = 11, // TensorProto.uint64_data (packed varints; UINT32 and UINT64)
         kTensorExternalData = 13, // TensorProto.external_data (repeated StringStringEntryProto)
         kTensorDataLocation = 14, // TensorProto.data_location (DataLocation value)
     };
@@ -128,17 +129,18 @@ namespace vknn { namespace onnx {
     // exporter emits) keep weights in a sibling .onnx.data file and reference them via
     // external_data; resolved against the model dir at materialize time.
     struct TensorProto {
-        std::vector<int64_t> dims;
-        int32_t              dataType = (int32_t) OnnxType::Float;
-        std::string          name;
-        std::vector<uint8_t> raw;
-        std::vector<float>   floatData;
-        std::vector<int32_t> int32Data; // typed payload for INT32 and narrower (INT8/UINT8/INT16/UINT16/BOOL) plus FLOAT16 bit patterns
-        std::vector<int64_t> int64Data;
-        int32_t              dataLocation = kDataLocationDefault;
-        std::string          extLoc; // external file (relative to the model dir)
-        int64_t              extOffset = 0;
-        int64_t              extLength = -1;
+        std::vector<int64_t>  dims;
+        int32_t               dataType = (int32_t) OnnxType::Float;
+        std::string           name;
+        std::vector<uint8_t>  raw;
+        std::vector<float>    floatData;
+        std::vector<int32_t>  int32Data; // typed payload for INT32 and narrower (INT8/UINT8/INT16/UINT16/BOOL) plus FLOAT16 bit patterns
+        std::vector<int64_t>  int64Data;
+        std::vector<uint64_t> uint64Data; // typed payload for UINT32 and UINT64
+        int32_t               dataLocation = kDataLocationDefault;
+        std::string           extLoc; // external file (relative to the model dir)
+        int64_t               extOffset = 0;
+        int64_t               extLength = -1;
     };
 
 }} // namespace vknn::onnx

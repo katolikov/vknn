@@ -1,6 +1,6 @@
 // Reads a TensorProto off the wire and materializes it into a HostBuffer (raw_data / typed data /
-// external data), decoding FLOAT / FLOAT16 / DOUBLE / INT64 / INT32 / INT8 / UINT8 / BOOL to the
-// fp32 or int64 compute storage.
+// external data), decoding FLOAT / FLOAT16 / DOUBLE / INT32 / INT16 / UINT16 / INT8 / UINT8 / BOOL to fp32
+// and INT64 / UINT32 / UINT64 to int64 compute storage.
 #pragma once
 #include "onnx_reader.h"
 #include "onnx_types.h"
@@ -31,8 +31,9 @@ namespace vknn { namespace onnx {
         static void resolveExternal(const std::string &baseDir, TensorProto &t, std::map<std::string, std::vector<uint8_t>> &cache);
 
         // Materialize a TensorProto into a float32 HostBuffer, decoding whichever payload the proto
-        // carries: raw_data (FLOAT copied verbatim; FLOAT16 / DOUBLE / INT64 / INT32 / INT8 / UINT8
-        // / BOOL converted per element) or the typed float_data / int64_data / int32_data arrays.
+        // carries: raw_data (FLOAT copied verbatim; FLOAT16 / DOUBLE / INT64 / INT32 / INT16 / UINT16 /
+        // INT8 / UINT8 / BOOL converted per element) or the typed float_data / int64_data / int32_data
+        // arrays. UINT32 / UINT64 materialize through fillHostI64 instead.
         // `elems` is the element count implied by the tensor's shape; every copy is clamped to what
         // the payload actually holds (`min` / `i < avail`), so a truncated or shape-mismatched proto
         // leaves the tail zero rather than reading out of bounds.
@@ -47,10 +48,12 @@ namespace vknn { namespace onnx {
         // truncated or shape-mismatched tail zero.
         static void fillHostBytes(const TensorProto &t, HostBuffer &hb, int64_t elems, DType dt);
 
-        // Materialize as int64 (shape / index tensors that must stay exact). Only the two lossless
-        // int64 sources are honored: raw_data of dtype INT64, or the typed int64_data array; any
-        // other dtype leaves the buffer zero-filled. Copies are clamped to the payload the same way
-        // as fillHostFloat.
+        // Materialize as int64 (shape / index tensors and unsigned 32/64-bit values that must stay
+        // exact). The honored sources: raw_data of dtype INT64 or UINT64 (8 bytes/elem, a UINT64 value
+        // at or above 2^63 keeping its bit pattern), raw_data of dtype UINT32 (zero-extended), the typed
+        // int64_data array, the typed uint64_data array (UINT32 / UINT64), and a UINT32 payload written
+        // to int32_data (zero-extended). Any other payload leaves the buffer zero-filled. Copies are
+        // clamped to the payload the same way as fillHostFloat.
         static void fillHostI64(const TensorProto &t, HostBuffer &hb, int64_t elems);
     };
 

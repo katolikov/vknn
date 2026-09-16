@@ -1,0 +1,48 @@
+#version 450
+// Integer results store through the explicit integer-exact rounding (vknnRte16) in the fp16 variant.
+#define VKNN_NO_RTE 1
+#include "precision.glsl"
+// Flat broadcasting BitShift of operand a by operand b at the operand's integer width (push constant
+// intBits, from the node's int_bits attribute; directionLeft is 1 for LEFT, 0 for RIGHT). Power-of-two
+// float scaling reproduces the CPU oracle's bit arithmetic on the integer values (see bitShiftValue);
+// exact while operands and results stay within +-2^24. The per-axis output dims and operand strides live
+// in a geometry SSBO (binding 3) packed back-to-back: outDim = g[0..rank), aStride = g[rank..2*rank),
+// bStride = g[2*rank..3*rank).
+#include "bitwise_int.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
+layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
+layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
+layout(std430, binding = 3) readonly  buffer G { int g[]; } geom;
+layout(push_constant) uniform PC { int rank, total, directionLeft, intBits; } pc;
+
+// value shifted by shift at intBits width. A shift count outside [0, intBits) yields 0 (checked on the
+// float before any int conversion). LEFT: the low intBits bits of value * 2^s. RIGHT: the logical shift
+// of value's low intBits bits, which equals floor(value / 2^s) reduced modulo 2^(intBits - s); a zero
+// shift is value's own intBits-wide wrap (signed at 64 bits, like the oracle's int64 view).
+float bitShiftValue(float value, float shift, int directionLeft, int intBits) {
+  float shiftCount = integerOperand(shift);
+  if (shiftCount < 0.0 || shiftCount >= float(intBits)) return 0.0;
+  int s = int(shiftCount);
+  float operand = integerOperand(value);
+  if (directionLeft != 0) {
+    precise float shifted = operand * powerOfTwo(s);
+    return wrapToWidth(shifted, intBits);
+  }
+  if (s == 0) return wrapToWidth(operand, intBits);
+  precise float quotient = floor(operand / powerOfTwo(s));
+  return residueModPowerOfTwo(quotient, intBits - s);
+}
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.total)) return;
+  int rem = int(gid), ai = 0, bi = 0;
+  for (int k = pc.rank - 1; k >= 0; --k) {
+    int c = rem % geom.g[k];
+    rem /= geom.g[k];
+    ai += c * geom.g[pc.rank + k];
+    bi += c * geom.g[2 * pc.rank + k];
+  }
+  d[gid] = TO_STORE(bitShiftValue(float(a[ai]), float(b[bi]), pc.directionLeft, pc.intBits));
+}

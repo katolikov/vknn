@@ -3,7 +3,7 @@
 
 namespace vknn { namespace onnx {
 
-    void NodeParser::parseAttr(Reader r, Node &node, const std::string &baseDir, std::map<std::string, std::vector<uint8_t>> *extCache) {
+    void NodeParser::parseAttr(Reader r, Node &node, const std::string &baseDir, std::map<std::string, std::vector<uint8_t>> *extCache, int32_t *tensorElemType) {
         std::string name;
         Attr        a;
         uint32_t    f, w;
@@ -81,6 +81,10 @@ namespace vknn { namespace onnx {
             {
                 TensorProtoParser::resolveExternal(baseDir, tp, *extCache);
             }
+            if (tensorElemType)
+            {
+                *tensorElemType = tp.dataType;
+            }
             // A tensor-valued attribute (Constant.value, ConstantOfShape, etc.) is flattened into
             // the same numeric attribute storage as inline floats/ints: int64 tensors -> `ints`,
             // every other numeric dtype -> `floats`. `n` is the element count the decode loops
@@ -94,9 +98,17 @@ namespace vknn { namespace onnx {
             }
             if (tp.dims.empty())
             {
-                n = std::max<int64_t>(1, (int64_t) std::max({tp.floatData.size(), tp.int32Data.size(), tp.int64Data.size()}));
+                n = std::max<int64_t>(1, (int64_t) std::max({tp.floatData.size(), tp.int32Data.size(), tp.int64Data.size(), tp.uint64Data.size()}));
             }
-            if (!tp.int64Data.empty() || isType(tp.dataType, OnnxType::Int64))
+            if (isType(tp.dataType, OnnxType::Uint32) || isType(tp.dataType, OnnxType::Uint64))
+            {
+                // Unsigned 32/64-bit values exceed fp32's exact range: materialize them as int64 like a
+                // graph initializer (fillHostI64), sized from the buffer's real length.
+                HostBuffer hb;
+                TensorProtoParser::fillHostI64(tp, hb, n);
+                a.kind = Attr::Ints;
+                a.ints.assign(hb.i64(), hb.i64() + hb.bytes.size() / sizeof(int64_t));
+            } else if (!tp.int64Data.empty() || isType(tp.dataType, OnnxType::Int64))
             {
                 a.kind = Attr::Ints;
                 if (!tp.int64Data.empty())
@@ -203,7 +215,7 @@ namespace vknn { namespace onnx {
         }
     }
 
-    void NodeParser::parseNode(Reader r, Node &node, std::vector<std::string> &ins, std::vector<std::string> &outs, const std::string &baseDir, std::map<std::string, std::vector<uint8_t>> *extCache) {
+    void NodeParser::parseNode(Reader r, Node &node, std::vector<std::string> &ins, std::vector<std::string> &outs, const std::string &baseDir, std::map<std::string, std::vector<uint8_t>> *extCache, NodeWireInfo *wireInfo) {
         uint32_t    f, w;
         std::string opType;
         while (r.tag(f, w))
@@ -223,7 +235,7 @@ namespace vknn { namespace onnx {
                     opType = r.str();
                     break;
                 case kNodeAttribute:
-                    parseAttr(r.sub(), node, baseDir, extCache);
+                    parseAttr(r.sub(), node, baseDir, extCache, wireInfo ? &wireInfo->tensorAttrElemType : nullptr);
                     break;
                 default:
                     r.skip(w);
@@ -242,6 +254,10 @@ namespace vknn { namespace onnx {
         // (Unary/Binary/Reduce), a `subOp` selecting the concrete variant. Activation ops carry
         // their curve parameters in attributes, applied here with the ONNX-specified defaults so
         // an exporter that omits them still lowers to the correct activation.
+        if (wireInfo)
+        {
+            wireInfo->opType = opType;
+        }
         node.type = opTypeFromOnnx(opType);
         if (node.type == OpType::Unary)
         {

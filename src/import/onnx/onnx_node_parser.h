@@ -16,6 +16,13 @@
 
 namespace vknn { namespace onnx {
 
+    // Wire facts about a NodeProto that the IR node does not keep, recorded for import-time analyses
+    // (the integer element-type resolution of GraphBuilder::stampIntegerWidths).
+    struct NodeWireInfo {
+        std::string opType;                                             // NodeProto.op_type as spelled on the wire
+        int32_t     tensorAttrElemType = (int32_t) OnnxType::Undefined; // data_type of a tensor-valued attribute (a Constant's `value`)
+    };
+
     class NodeParser {
       public:
         // ----------------------------- AttributeProto -----------------------------
@@ -24,7 +31,10 @@ namespace vknn { namespace onnx {
         // A tensor-valued attribute (Constant.value, ConstantOfShape.value) may hold its payload in a
         // sibling external-data file exactly like a graph initializer; @p baseDir and @p extCache let it
         // resolve that reference before materializing, so an external Constant is not read as all-zeros.
-        static void parseAttr(Reader r, Node &node, const std::string &baseDir = std::string(), std::map<std::string, std::vector<uint8_t>> *extCache = nullptr);
+        // An INT64 / UINT32 / UINT64 tensor becomes `ints` (a UINT64 value at or above 2^63 keeps its bit
+        // pattern); every other numeric tensor becomes `floats`. When @p tensorElemType is non-null it
+        // receives the tensor's data_type (left unchanged for a non-tensor attribute).
+        static void parseAttr(Reader r, Node &node, const std::string &baseDir = std::string(), std::map<std::string, std::vector<uint8_t>> *extCache = nullptr, int32_t *tensorElemType = nullptr);
 
         // ----------------------------- ValueInfoProto -----------------------------
         // field 1 = name, field 2 = type(TypeProto); TypeProto field1=tensor_type;
@@ -44,7 +54,9 @@ namespace vknn { namespace onnx {
         // to ids here; GraphBuilder resolves them in its SSA pass so a trace that REUSES a tensor name
         // (two nodes both writing "Cast_output_0" — common in un-deduped PyTorch exports) does not
         // collapse onto one TensorId.
-        static void parseNode(Reader r, Node &node, std::vector<std::string> &ins, std::vector<std::string> &outs, const std::string &baseDir = std::string(), std::map<std::string, std::vector<uint8_t>> *extCache = nullptr);
+        // When @p wireInfo is non-null it receives the op_type spelling and the data_type of a
+        // tensor-valued attribute.
+        static void parseNode(Reader r, Node &node, std::vector<std::string> &ins, std::vector<std::string> &outs, const std::string &baseDir = std::string(), std::map<std::string, std::vector<uint8_t>> *extCache = nullptr, NodeWireInfo *wireInfo = nullptr);
     };
 
 }} // namespace vknn::onnx

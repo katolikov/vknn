@@ -1,0 +1,44 @@
+#version 450
+// Integer results store through the explicit integer-exact rounding (vknnRte16) in the fp16 variant.
+#define VKNN_NO_RTE 1
+#include "precision.glsl"
+// Flat broadcasting two's-complement BitwiseAnd / BitwiseOr / BitwiseXor. Each operand lane reads as
+// int32 (NaN -> 0, saturated, truncated toward zero; see int32Operand), the operator applies in int32 and
+// the result stores as its float value. Sign extension commutes with the operators, so the result equals
+// the CPU oracle's int64 result for operands in the int32 range, and is exact within +-2^24.
+// The operator is specialization constant 0 (values below; the C++ side names the same codes in
+// src/backend/vulkan/ops/bitwise_vk.h). The per-axis output dims and operand strides live in a geometry
+// SSBO (binding 3) packed back-to-back: outDim = g[0..rank), aStride = g[rank..2*rank),
+// bStride = g[2*rank..3*rank).
+#include "bitwise_int.glsl"
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const int kOperator = 0;
+const int kOperatorAnd = 0;
+const int kOperatorOr  = 1;
+const int kOperatorXor = 2;
+layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
+layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
+layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
+layout(std430, binding = 3) readonly  buffer G { int g[]; } geom;
+layout(push_constant) uniform PC { int rank, total; } pc;
+
+// The operator on int32 lanes, returned as the float value of the int32 result.
+float bitwiseValue(float left, float right) {
+  int lhs = int32Operand(left);
+  int rhs = int32Operand(right);
+  int result = kOperator == kOperatorAnd ? (lhs & rhs) : (kOperator == kOperatorOr ? (lhs | rhs) : (lhs ^ rhs));
+  return float(result);
+}
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.total)) return;
+  int rem = int(gid), ai = 0, bi = 0;
+  for (int k = pc.rank - 1; k >= 0; --k) {
+    int c = rem % geom.g[k];
+    rem /= geom.g[k];
+    ai += c * geom.g[pc.rank + k];
+    bi += c * geom.g[2 * pc.rank + k];
+  }
+  d[gid] = TO_STORE(bitwiseValue(float(a[ai]), float(b[bi])));
+}
