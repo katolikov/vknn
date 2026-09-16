@@ -3,6 +3,8 @@
 #include "vknn/binary_type.h"
 #include "vknn/reduce_type.h"
 #include "vknn/unary_type.h"
+#include <algorithm>
+#include <limits>
 
 namespace vknn {
 
@@ -401,23 +403,36 @@ namespace vknn {
             return mod.attr.geti("fmod", kModIntegerRemainder) == kModIntegerRemainder || modOperandsAreInteger(g, mod, producer);
         }
 
-        // Operand count of an op that reads its element values from operand 0 alone.
-        constexpr size_t kSingleDataOperand = 1;
-        // Where operand slots holding the selected values [first, end); operand 0 is the condition.
-        constexpr size_t kWhereFirstValueOperand = 1;
-        constexpr size_t kWhereEndValueOperand   = 3;
-        // Clip operand slots [0, end): the data and its optional min and max share one element type.
-        constexpr size_t kClipEndOperand = 3;
-        // Range operand slots [0, end): start, limit and delta share one element type.
-        constexpr size_t kRangeEndOperand = 3;
-        // Pow operand slots: the base [0, kPowBaseEndOperand) types the result; the exponent
-        // [kPowBaseEndOperand, kPowExponentEndOperand) does not.
-        constexpr size_t kPowBaseEndOperand     = 1;
-        constexpr size_t kPowExponentEndOperand = 2;
-        // Operand slots [0, end) of a two-operand comparison.
-        constexpr size_t kComparisonEndOperand = 2;
+        // Operand slots an IntegerDataSlots mask names, one bit per slot. An op whose data operands are all
+        // of its operands (a variadic Concat) sets everyCoreOperand instead of a mask.
+        constexpr size_t kMaskedOperandSlots = 32;
+        // IntegerDataSlots::dataOutputEnd of an op whose every output holds element values of its data.
+        constexpr size_t kEveryOutput = std::numeric_limits<size_t>::max();
+
+        // The data operand of a movement op, a reduction and a unary function, and the base of a Pow.
+        constexpr size_t kLeadingOperandSlot = 0;
+        // Where: operand 0 is the condition; operands 1 and 2 are the selected values.
+        constexpr size_t kWhereTrueValueSlot  = 1;
+        constexpr size_t kWhereFalseValueSlot = 2;
+        // Clip data, min and max; Range start, limit and delta: three operands of one element type.
+        constexpr size_t kSecondOperandSlot = 1;
+        constexpr size_t kThirdOperandSlot  = 2;
+        // Pow's exponent: read exactly, but it does not type the result.
+        constexpr size_t kPowExponentSlot = 1;
+        // Pad: operand 1 holds the pads; operand 2 is the constant fill value, of the data's element type.
+        constexpr size_t kPadFillValueSlot = 2;
+        // ScatterND: operand 1 holds the indices; operand 2 holds the updates, of the data's element type.
+        constexpr size_t kScatterUpdatesSlot = 2;
+        // TopK: output 0 holds the selected values; outputs from here on (the int64 indices) do not.
+        constexpr size_t kTopKValuesOutputEnd = 1;
         // TopK output slot holding the int64 indices (output 0 holds the values).
         constexpr size_t kTopKIndicesOutput = 1;
+        // The first output after a node's primary output 0.
+        constexpr size_t kFirstSecondaryOutput = 1;
+
+        constexpr uint32_t operandSlotBit(size_t slot) {
+            return uint32_t {1} << slot;
+        }
 
         // How a node's result relates to integer element values in its data operand slots.
         enum class IntegerFlow : uint8_t {
@@ -428,44 +443,64 @@ namespace vknn {
             Compares, // a 0/1 result that is right only when the compared integers are read exactly
         };
 
-        // A node's IntegerFlow and the data operand slots [first, end) it applies to, followed by the
-        // operands [end, exactEnd) an integer computation reads exactly without taking its element type
-        // from them (Pow's exponent: (-1)^2049 is -1, but fp16 stores 2049 as 2048). The other inputs are
-        // shape, index, axis, condition or count parameters.
+        // A node's IntegerFlow, the data operand slots it applies to, the operands an integer computation
+        // reads exactly without taking its element type from them (Pow's exponent: (-1)^2049 is -1, but
+        // fp16 stores 2049 as 2048), and the outputs holding the data's element values. The other inputs
+        // are shape, index, axis, condition, count or fill-geometry parameters, and operands from
+        // pwCoreInputs on feed a fused unit.
         struct IntegerDataSlots {
-            IntegerFlow flow     = IntegerFlow::None;
-            size_t      first    = 0;
-            size_t      end      = 0;
-            size_t      exactEnd = 0;
+            IntegerFlow flow             = IntegerFlow::None;
+            size_t      coreOperands     = 0;
+            bool        everyCoreOperand = false;
+            uint32_t    dataSlotMask     = 0;
+            uint32_t    exactSlotMask    = 0;
+            size_t      dataOutputEnd    = kEveryOutput;
 
-            bool contains(size_t slot) const noexcept {
-                return slot >= first && slot < end;
+            bool readsData(size_t slot) const noexcept {
+                return slot < coreOperands && (everyCoreOperand || (slot < kMaskedOperandSlots && (dataSlotMask & operandSlotBit(slot)) != 0));
+            }
+            bool readsExactlyWithoutTyping(size_t slot) const noexcept {
+                return slot < coreOperands && slot < kMaskedOperandSlots && (exactSlotMask & operandSlotBit(slot)) != 0;
+            }
+            bool writesData(size_t outputIndex) const noexcept {
+                return outputIndex < dataOutputEnd;
             }
         };
 
-        // The integer role of every op the region extends through, following the CPU kernels (the oracle):
-        // the movement and selection ops copy int64 elements, Add, Binary (Add/Sub/Mul/Div/Max/Min/Pow) and
-        // ReduceSum/Max/Min/Prod store an int64 result when an operand is Int64, Range does when its
-        // operands are, and Clip, Neg and Abs keep fp32-carried integers (an INT32 input) integer-valued.
-        // Every other op is None: float math (ReduceMean/L2, the other unary functions, MatMul, ...), and a
-        // node hosting a fused pointwise chain, whose steps compute new values of their own type.
+        // The integer role of every op the region extends through. The movement and selection ops are the
+        // ones modOperandsAreInteger resolves as sharing their data's element type (layout and dtype
+        // converts, Identity, metadata reshapes, Slice, Transpose, Expand, Tile, Split, Gather, Pad and its
+        // fill value, DepthToSpace, ScatterND and its updates, TopK's values, Concat, Where's values), plus
+        // ChannelShuffle, a channel permutation: their GPU kernels copy element values at the node's
+        // storage precision, and the CPU op keeps int64 elements wherever it has an int64 path. Add, Binary
+        // (Add/Sub/Mul/Div/Max/Min/Pow) and ReduceSum/Max/Min/Prod store an int64 result when an operand is
+        // Int64 on the CPU, Range does when its operands are, and Clip, Neg and Abs keep fp32-carried
+        // integers (an INT32 input) integer-valued. Every other op is None: float math (ReduceMean/L2, the
+        // other unary functions, MatMul, ...), and a node hosting a fused pointwise chain, whose steps
+        // compute new values of their own type.
         IntegerDataSlots integerDataSlots(const Node &nd) {
             if (nd.attr.has("pw_steps"))
             {
                 return {};
             }
-            const size_t coreInputs = pwCoreInputs(nd);
-            auto         slots      = [&](IntegerFlow flow, size_t first, size_t end) {
+            auto slots = [&](IntegerFlow flow, uint32_t dataSlotMask) {
                 IntegerDataSlots dataSlots;
-                dataSlots.flow     = flow;
-                dataSlots.first    = std::min(first, coreInputs);
-                dataSlots.end      = std::min(end, coreInputs);
-                dataSlots.exactEnd = dataSlots.end;
+                dataSlots.flow         = flow;
+                dataSlots.coreOperands = std::min(nd.inputs.size(), (size_t) pwCoreInputs(nd));
+                dataSlots.dataSlotMask = dataSlotMask;
                 return dataSlots;
             };
+            auto everyOperand = [&](IntegerFlow flow) {
+                IntegerDataSlots dataSlots = slots(flow, 0);
+                dataSlots.everyCoreOperand = true;
+                return dataSlots;
+            };
+            const uint32_t leading    = operandSlotBit(kLeadingOperandSlot);
+            const uint32_t threeSlots = leading | operandSlotBit(kSecondOperandSlot) | operandSlotBit(kThirdOperandSlot);
             switch (nd.type)
             {
                 case OpType::ConvertLayout:
+                case OpType::ConvertDtype:
                 case OpType::Identity:
                 case OpType::Reshape:
                 case OpType::Flatten:
@@ -476,26 +511,39 @@ namespace vknn {
                 case OpType::Expand:
                 case OpType::Tile:
                 case OpType::Split:
+                case OpType::DepthToSpace:
+                case OpType::ChannelShuffle:
                 case OpType::Gather: // data operand 0; the index (operand 1) is pinned by pinGatherIndexFp32
-                    return slots(IntegerFlow::Moves, 0, kSingleDataOperand);
+                    return slots(IntegerFlow::Moves, leading);
+                case OpType::Pad:
+                    return slots(IntegerFlow::Moves, leading | operandSlotBit(kPadFillValueSlot));
+                case OpType::ScatterND:
+                    return slots(IntegerFlow::Moves, leading | operandSlotBit(kScatterUpdatesSlot));
+                case OpType::TopK: {
+                    // The values are copied from the data; the indices are integers whatever the data holds
+                    // (producesIntegers), so a float score tensor never joins through them.
+                    IntegerDataSlots topKSlots = slots(IntegerFlow::Moves, leading);
+                    topKSlots.dataOutputEnd    = kTopKValuesOutputEnd;
+                    return topKSlots;
+                }
                 case OpType::Concat:
-                    return slots(IntegerFlow::Moves, 0, coreInputs);
+                    return everyOperand(IntegerFlow::Moves);
                 case OpType::Where:
-                    return slots(IntegerFlow::Moves, kWhereFirstValueOperand, kWhereEndValueOperand);
+                    return slots(IntegerFlow::Moves, operandSlotBit(kWhereTrueValueSlot) | operandSlotBit(kWhereFalseValueSlot));
                 case OpType::Cast:
-                    return slots(IntegerFlow::Casts, 0, kSingleDataOperand);
+                    return slots(IntegerFlow::Casts, leading);
                 case OpType::Add:
-                    return slots(IntegerFlow::Computes, 0, coreInputs);
+                    return everyOperand(IntegerFlow::Computes);
                 case OpType::Binary: {
                     // Div and Pow on an Int64 operand keep the CPU op (vkNodeGate), whose int64 result feeds
                     // the region like any other. Pow's result has its base's element type, whatever the
                     // exponent's.
                     if ((BinaryType) nd.subOp != BinaryType::Pow)
                     {
-                        return slots(IntegerFlow::Computes, 0, coreInputs);
+                        return everyOperand(IntegerFlow::Computes);
                     }
-                    IntegerDataSlots powSlots = slots(IntegerFlow::Computes, 0, kPowBaseEndOperand);
-                    powSlots.exactEnd         = std::min(kPowExponentEndOperand, coreInputs);
+                    IntegerDataSlots powSlots = slots(IntegerFlow::Computes, leading);
+                    powSlots.exactSlotMask    = operandSlotBit(kPowExponentSlot);
                     return powSlots;
                 }
                 case OpType::Reduce:
@@ -505,20 +553,19 @@ namespace vknn {
                         case ReduceType::Max:
                         case ReduceType::Min:
                         case ReduceType::Prod:
-                            return slots(IntegerFlow::Computes, 0, kSingleDataOperand);
+                            return slots(IntegerFlow::Computes, leading);
                         default:
                             return {}; // Mean and L2 are float results on integer data too (the CPU op stores fp32)
                     }
                 case OpType::Clip:
-                    return slots(IntegerFlow::Computes, 0, kClipEndOperand);
                 case OpType::Range:
-                    return slots(IntegerFlow::Computes, 0, kRangeEndOperand);
+                    return slots(IntegerFlow::Computes, threeSlots);
                 case OpType::Unary:
                     switch ((UnaryType) nd.subOp)
                     {
                         case UnaryType::Neg:
                         case UnaryType::Abs:
-                            return slots(IntegerFlow::Computes, 0, kSingleDataOperand);
+                            return slots(IntegerFlow::Computes, leading);
                         default:
                             return {}; // the other unary functions are float math
                     }
@@ -527,10 +574,86 @@ namespace vknn {
                 case OpType::GreaterEqual:
                 case OpType::Less:
                 case OpType::LessEqual:
-                    return slots(IntegerFlow::Compares, 0, kComparisonEndOperand);
+                    return slots(IntegerFlow::Compares, leading | operandSlotBit(kSecondOperandSlot));
                 default:
                     return {};
             }
+        }
+
+        // Whether a GPU kernel uploads a constant operand itself, at the node's own precision (operandBuf,
+        // or a constant operand buffer of its own). The segment fills a constant operand 0 into a shared
+        // activation buffer at the segment's storage precision for the kernels that read operand 0 through
+        // env.devBuf, so such a kernel reads that constant correctly only while it runs at the segment's
+        // precision: the NC4HW4 Concat (which reads every part that way) and Split, Reduce, DepthToSpace,
+        // TopK, the layout converts and the float kernels. A kernel not listed here counts as one of them.
+        bool uploadsConstantOperandsItself(const Graph &g, const Node &nd) {
+            switch (nd.type)
+            {
+                case OpType::Reshape:
+                case OpType::Flatten:
+                case OpType::Squeeze:
+                case OpType::Unsqueeze:
+                case OpType::Cast:
+                case OpType::Unary:
+                case OpType::ChannelShuffle:
+                case OpType::Slice:
+                case OpType::Transpose:
+                case OpType::Expand:
+                case OpType::Tile:
+                case OpType::Pad:
+                case OpType::Gather:
+                case OpType::ScatterND:
+                case OpType::Where:
+                case OpType::Clip:
+                case OpType::Range:
+                case OpType::Equal:
+                case OpType::Greater:
+                case OpType::GreaterEqual:
+                case OpType::Less:
+                case OpType::LessEqual:
+                case OpType::ArgMax:
+                case OpType::ArgMin:
+                case OpType::Mod:
+                case OpType::BitShift:
+                case OpType::BitwiseAnd:
+                case OpType::BitwiseOr:
+                case OpType::BitwiseXor:
+                case OpType::BitwiseNot:
+                case OpType::MatMul:
+                case OpType::Einsum:
+                case OpType::And:
+                case OpType::Or:
+                case OpType::Xor:
+                case OpType::Not:
+                    return true;
+                case OpType::Add:
+                case OpType::Binary:
+                case OpType::Concat:
+                case OpType::Split:
+                    // The flat kernels upload constants themselves; the NC4HW4 ones read the segment's buffer.
+                    return !nd.outputs.empty() && nd.outputs[0] != kNoTensor && g.desc(nd.outputs[0]).gpuFlat;
+                default:
+                    return false;
+            }
+        }
+
+        // Operand slots [0, end) the segment fills from a constant into a shared activation buffer: operand
+        // 0 of every node. A Concat reads each of its parts as an activation, so all of them count.
+        constexpr size_t kSegmentFilledOperandEnd = 1;
+
+        // Whether a node reads a constant operand through the segment's shared activation buffer, so its
+        // output must keep the segment's storage precision.
+        bool readsConstantAtSegmentPrecision(const Graph &g, const Node &nd) {
+            const size_t coreOperands = std::min(nd.inputs.size(), (size_t) pwCoreInputs(nd));
+            const size_t filledEnd    = nd.type == OpType::Concat ? coreOperands : std::min(coreOperands, kSegmentFilledOperandEnd);
+            for (size_t slot = 0; slot < filledEnd; ++slot)
+            {
+                if (nd.inputs[slot] != kNoTensor && g.isInitializer(nd.inputs[slot]))
+                {
+                    return !uploadsConstantOperandsItself(g, nd);
+                }
+            }
+            return false;
         }
 
         // Whether output `output` of `nd` holds integers whatever its operands hold: a Cast to an integer
@@ -594,22 +717,28 @@ namespace vknn {
         // Whether a tensor may take fp32 storage: a runtime tensor that is flat (every flat kernel has an
         // fp32 variant), or an NC4HW4 tensor no fp16-only kernel writes -- a graph input (the boundary
         // packs it at its storage precision), the output of a layout convert, a metadata reshape (a buffer
-        // copy) or a Cast (cast.comp has an fp32 variant), or of Add, Binary, Unary or Concat, whose NC4HW4
-        // kernels have fp32 variants too. The layout pass keeps an agnostic chain rooted at a graph input
-        // NC4HW4 until a reader changes the channel count, and a same-shape rank-4 Add/Binary of runtime
-        // operands runs NC4HW4, so an integer region often crosses such tensors. The NC4HW4 conv family is
-        // hand-written fp16-only, so its outputs are never pinned; markFp32 bridges them instead.
+        // copy) or a Cast (cast.comp has an fp32 variant), or of Add, Binary, Unary, Concat or ChannelShuffle,
+        // whose NC4HW4 kernels have fp32 variants too, or of a Split, whose NC4HW4 kernel copies channel
+        // blocks at the node's element width (the segment planner keeps an fp32 Concat or Split out of its
+        // zero-copy views). The layout pass keeps an agnostic chain rooted at a
+        // graph input NC4HW4 until a reader changes the channel count, a same-shape rank-4 Add/Binary of
+        // runtime operands runs NC4HW4, and a channel-axis Concat or Split of 4-aligned parts does too, so
+        // an integer region often crosses such tensors. The NC4HW4 conv family is hand-written fp16-only,
+        // so its outputs are never pinned; markFp32 bridges them instead. In either layout, a node reading a
+        // constant through the segment's shared activation buffer (readsConstantAtSegmentPrecision: an
+        // NC4HW4 Concat with a constant part, among others) keeps the segment's precision, since an fp32
+        // kernel would read that fp16-filled buffer as fp32.
         auto storageCanPin = [&](TensorId t) {
             if (t == kNoTensor || g.isInitializer(t))
             {
                 return false;
             }
-            if (g.desc(t).gpuFlat)
-            {
-                return true;
-            }
             const int p = producer[(size_t) t];
-            if (p < 0)
+            if (p >= 0 && readsConstantAtSegmentPrecision(g, g.nodes[(size_t) p]))
+            {
+                return false;
+            }
+            if (g.desc(t).gpuFlat || p < 0)
             {
                 return true;
             }
@@ -630,6 +759,8 @@ namespace vknn {
                 case OpType::Binary:
                 case OpType::Unary:
                 case OpType::Concat:
+                case OpType::Split:
+                case OpType::ChannelShuffle:
                     return true;
                 default:
                     return false;
@@ -683,19 +814,22 @@ namespace vknn {
             {
                 const Node            &rn        = g.nodes[(size_t) readerIndex];
                 const IntegerDataSlots dataSlots = integerDataSlots(rn);
-                if ((dataSlots.flow == IntegerFlow::Moves || dataSlots.flow == IntegerFlow::Computes) && dataSlots.contains(slot))
+                if ((dataSlots.flow == IntegerFlow::Moves || dataSlots.flow == IntegerFlow::Computes) && dataSlots.readsData(slot))
                 {
-                    for (TensorId o: rn.outputs)
+                    for (size_t outputIndex = 0; outputIndex < rn.outputs.size(); ++outputIndex)
                     {
-                        markIntegerValued(o);
+                        if (dataSlots.writesData(outputIndex))
+                        {
+                            markIntegerValued(rn.outputs[outputIndex]);
+                        }
                     }
                 }
             }
         }
         auto readsIntegerValues = [&](const Node &nd, const IntegerDataSlots &dataSlots) {
-            for (size_t slot = dataSlots.first; slot < dataSlots.end; ++slot)
+            for (size_t slot = 0; slot < nd.inputs.size(); ++slot)
             {
-                if (nd.inputs[slot] != kNoTensor && integerValued[(size_t) nd.inputs[slot]])
+                if (dataSlots.readsData(slot) && nd.inputs[slot] != kNoTensor && integerValued[(size_t) nd.inputs[slot]])
                 {
                     return true;
                 }
@@ -719,22 +853,36 @@ namespace vknn {
         // The operands of a node computing integers: its data operands are integers, and an operand it only
         // reads exactly is followed toward its source unless it holds integers itself.
         auto enqueueIntegerOperands = [&](const Node &nd, const IntegerDataSlots &dataSlots) {
-            for (size_t slot = dataSlots.first; slot < dataSlots.end; ++slot)
-            {
-                enqueue(nd.inputs[slot], Reach::Integer);
-            }
-            for (size_t slot = dataSlots.end; slot < dataSlots.exactEnd; ++slot)
+            for (size_t slot = 0; slot < nd.inputs.size(); ++slot)
             {
                 const TensorId operand = nd.inputs[slot];
-                enqueue(operand, operand != kNoTensor && integerValued[(size_t) operand] ? Reach::Integer : Reach::Upstream);
+                if (dataSlots.readsData(slot))
+                {
+                    enqueue(operand, Reach::Integer);
+                    continue;
+                }
+                if (dataSlots.readsExactlyWithoutTyping(slot))
+                {
+                    enqueue(operand, operand != kNoTensor && integerValued[(size_t) operand] ? Reach::Integer : Reach::Upstream);
+                }
+            }
+        };
+        // The outputs of a node holding its data's element values, at one reach.
+        auto enqueueDataOutputs = [&](const Node &nd, const IntegerDataSlots &dataSlots, Reach r) {
+            for (size_t outputIndex = 0; outputIndex < nd.outputs.size(); ++outputIndex)
+            {
+                if (dataSlots.writesData(outputIndex))
+                {
+                    enqueue(nd.outputs[outputIndex], r);
+                }
             }
         };
 
         // Seeds: the integer results of the integer ops and the operands of the ops whose operands are
-        // integers too; every Computes node reading an integer value (its result and its operands); and the
-        // operands of a comparison reading an integer value, with its 0/1 result pinned so the kernel
-        // compares at fp32. A constant operand is uploaded by the op itself at the node's (pinned)
-        // precision, so only runtime tensors are pinned.
+        // integers too; the integer data a ranking reads (ArgMax/ArgMin, TopK); every Computes node reading
+        // an integer value (its result and its operands); and the operands of a comparison reading an
+        // integer value, with its 0/1 result pinned so the kernel compares at fp32. A constant operand is
+        // uploaded by the op itself at the node's (pinned) precision, so only runtime tensors are pinned.
         for (const Node &nd: g.nodes)
         {
             bool integerResult   = false;
@@ -746,6 +894,15 @@ namespace vknn {
                     // int64 indices; the data joins only when it holds integers (a float scan needs no extra
                     // precision, so markFp32 leaves it at its own storage precision).
                     integerResult = true;
+                    if (!nd.inputs.empty() && nd.inputs[0] != kNoTensor && integerValued[(size_t) nd.inputs[0]])
+                    {
+                        enqueue(nd.inputs[0], Reach::Integer);
+                    }
+                    break;
+                case OpType::TopK:
+                    // The ranking compares the data: integer data is read exactly (fp16 stores 70000 and
+                    // 70001 as one value), and the values follow it into the region. Float scores keep their
+                    // storage precision, and the indices are pinned only where a reader needs them exact.
                     if (!nd.inputs.empty() && nd.inputs[0] != kNoTensor && integerValued[(size_t) nd.inputs[0]])
                     {
                         enqueue(nd.inputs[0], Reach::Integer);
@@ -784,10 +941,7 @@ namespace vknn {
             if ((dataSlots.flow == IntegerFlow::Computes || dataSlots.flow == IntegerFlow::Compares) && readsIntegerValues(nd, dataSlots))
             {
                 enqueueIntegerOperands(nd, dataSlots);
-                for (TensorId o: nd.outputs)
-                {
-                    enqueue(o, dataSlots.flow == IntegerFlow::Computes ? Reach::Integer : Reach::Upstream);
-                }
+                enqueueDataOutputs(nd, dataSlots, dataSlots.flow == IntegerFlow::Computes ? Reach::Integer : Reach::Upstream);
             }
         }
 
@@ -811,27 +965,25 @@ namespace vknn {
             const int p = producer[(size_t) t];
             if (p >= 0)
             {
-                const Node &pn = g.nodes[(size_t) p];
-                // markFp32 gives every output of a node outputs[0]'s precision, so a pin on a secondary
-                // output survives only if the producer's primary output is pinned too.
-                if (pn.outputs.size() > 1 && pn.outputs[0] != t)
-                {
-                    pin(pn.outputs[0]);
-                }
-                const IntegerDataSlots dataSlots = integerDataSlots(pn);
-                switch (dataSlots.flow)
+                const Node            &pn          = g.nodes[(size_t) p];
+                const IntegerDataSlots dataSlots   = integerDataSlots(pn);
+                const size_t           outputIndex = (size_t) (std::find(pn.outputs.begin(), pn.outputs.end(), t) - pn.outputs.begin());
+                // A secondary output that holds no data values (TopK's indices) says nothing about the
+                // operands: the pinned output runs its node fp32 via nodeFp32.
+                const IntegerFlow producerFlow = dataSlots.writesData(outputIndex) ? dataSlots.flow : IntegerFlow::None;
+                switch (producerFlow)
                 {
                     case IntegerFlow::Moves:
-                        for (size_t slot = dataSlots.first; slot < dataSlots.end; ++slot)
+                        for (size_t slot = 0; slot < pn.inputs.size(); ++slot)
                         {
-                            enqueue(pn.inputs[slot], r);
+                            if (dataSlots.readsData(slot))
+                            {
+                                enqueue(pn.inputs[slot], r);
+                            }
                         }
                         if (r == Reach::Integer)
                         {
-                            for (TensorId sibling: pn.outputs)
-                            {
-                                enqueue(sibling, Reach::Integer); // the other parts of a Split
-                            }
+                            enqueueDataOutputs(pn, dataSlots, Reach::Integer); // the other parts of a Split
                         }
                         break;
                     case IntegerFlow::Computes:
@@ -843,9 +995,12 @@ namespace vknn {
                         }
                         break;
                     case IntegerFlow::Casts:
-                        for (size_t slot = dataSlots.first; slot < dataSlots.end; ++slot)
+                        for (size_t slot = 0; slot < pn.inputs.size(); ++slot)
                         {
-                            enqueue(pn.inputs[slot], Reach::Upstream);
+                            if (dataSlots.readsData(slot))
+                            {
+                                enqueue(pn.inputs[slot], Reach::Upstream);
+                            }
                         }
                         break;
                     default:
@@ -860,7 +1015,7 @@ namespace vknn {
             {
                 const Node            &rn        = g.nodes[(size_t) readerIndex];
                 const IntegerDataSlots dataSlots = integerDataSlots(rn);
-                if (!dataSlots.contains(slot))
+                if (!dataSlots.readsData(slot))
                 {
                     continue; // a parameter slot, or a float reader
                 }
@@ -879,13 +1034,30 @@ namespace vknn {
                     default:
                         break;
                 }
-                for (TensorId o: rn.outputs)
-                {
-                    enqueue(o, resultReach);
-                }
+                enqueueDataOutputs(rn, dataSlots, resultReach);
                 if (dataSlots.flow != IntegerFlow::Casts)
                 {
                     enqueueIntegerOperands(rn, dataSlots); // the other parts of a Concat, the other operands
+                }
+            }
+        }
+
+        // markFp32 gives every output of a node outputs[0]'s precision, so a pin on a secondary output --
+        // from this region, or from pinGatherIndexFp32 on a TopK's indices -- survives only if the node's
+        // primary output is pinned too. A Gather reads its index as fp32 whatever its storage, so an
+        // unpinned TopK would hand it fp16 bytes.
+        for (const Node &nd: g.nodes)
+        {
+            if (nd.outputs.empty() || nd.outputs[0] == kNoTensor || g.desc(nd.outputs[0]).storeFp32)
+            {
+                continue;
+            }
+            for (size_t outputIndex = kFirstSecondaryOutput; outputIndex < nd.outputs.size(); ++outputIndex)
+            {
+                if (nd.outputs[outputIndex] != kNoTensor && g.desc(nd.outputs[outputIndex]).storeFp32)
+                {
+                    pin(nd.outputs[0]);
+                    break;
                 }
             }
         }

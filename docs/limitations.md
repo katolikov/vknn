@@ -103,14 +103,21 @@ approximate on the overflowing tensors.
 fp16 or fp32 floats. An fp32 lane holds every integer within ±2^24 (fp16: ±2^11, saturating at 65504),
 so the load-time `pinIntegerResultsFp32` pass keeps integer regions at fp32 storage at every precision
 tier — ArgMax/ArgMin indices, BitShift / BitwiseAnd / BitwiseOr / BitwiseXor / BitwiseNot results and
-operands, Mod with `fmod` 0 or integer operands, and the value-preserving hops (layout converts,
-reshapes, integer Casts, movement ops) that connect them to graph inputs and outputs. Past ±2^24 a GPU
-integer result rounds, and the GPU BitwiseAnd/Or/Xor kernel also clamps its operands to the int32 range;
-the CPU op computes int64 values exactly. Two int64 forms are not computed in float at all: a Binary
-`Div` with an Int64-typed operand (the CPU truncates toward zero, 7 / 2 = 3) and a `Pow` with an
-Int64-typed base (an integer power, 2^−1 = 0) keep the CPU op on a GPU plan, listed in the support
-report as `Binary: integer Div on an int64 operand` / `Binary: integer Pow on an int64 base` — a CPU
-segment and its boundary round trip. These decisions read the recorded element type: an int64
+operands, Mod with `fmod` 0 or integer operands, integer arithmetic and its operands (Add, Sub, Mul,
+Max, Min, the lowered variadic Max/Min/Sum chains, Pow of an integer base with its exponent,
+ReduceSum/Max/Min/Prod, Range, Clip, Neg, Abs), the operands of an integer comparison (Equal, Greater,
+Less and their OrEqual forms), integer TopK and ArgMax/ArgMin data, and the value-preserving hops that
+connect them to graph inputs and outputs (layout converts, reshapes, integer Casts, Where's values and
+the movement ops: Slice, Transpose, Expand, Tile, Split, Gather, Pad, DepthToSpace, ChannelShuffle,
+ScatterND, TopK's values, Concat). A node whose kernel reads a constant operand through the activation
+buffer the segment fills at its own precision — an NC4HW4 channel Concat with a constant part is the
+reachable case — keeps that precision, so a constant integer part past 65504 still saturates at `Low`
+there. Past ±2^24 a GPU integer result rounds, and the GPU BitwiseAnd/Or/Xor kernel also clamps its
+operands to the int32 range; the CPU op computes int64 values exactly. Two int64 forms are not computed
+in float at all: a Binary `Div` with an Int64-typed operand (the CPU truncates toward zero, 7 / 2 = 3)
+and a `Pow` with an Int64-typed base (an integer power, 2^−1 = 0) keep the CPU op on a GPU plan, listed
+in the support report as `Binary: integer Div on an int64 operand` / `Binary: integer Pow on an int64
+base` — a CPU segment and its boundary round trip. These decisions read the recorded element type: an int64
 intermediate the importer did not type stays on the float kernel, and a Mod whose only integer evidence
 is an INT32 / INT16 / UINT16 initializer (imported as Float32) computes the float remainder (a zero
 divisor under `fmod` 1 is NaN rather than 0). Outside the integer regions, a data tensor that stays

@@ -67,10 +67,16 @@ The GPU stores every tensor as fp16 or fp32 float lanes, so an integer value is 
 holds it: every integer within **±2^24** at fp32 (±2^11 at fp16, which saturates at 65504). The load-time
 pass `pinIntegerResultsFp32` pins integer regions to fp32 storage at every precision tier: the outputs of
 ArgMax, ArgMin, BitShift, BitwiseAnd/Or/Xor/Not and a Mod with `fmod` 0 or integer operands, the runtime
-operands of those Mod and bitwise nodes, Int32/Int64-typed ArgMax/ArgMin data, and the value-preserving
-region around each (layout converts, Identity, metadata reshapes, Cast to an integer type, movement and
-selection ops), so an integer graph input packs at fp32 and an integer result reaches a graph output or
-the next integer op without an fp16 narrowing. Past ±2^24 a GPU result rounds while the CPU op stays
+operands of those Mod and bitwise nodes, integer ArgMax/ArgMin/TopK data, every integer arithmetic node
+with its operands (Add, Binary Add/Sub/Mul/Div/Max/Min, Pow of an integer base with its exponent,
+ReduceSum/Max/Min/Prod, Range, Clip, Neg, Abs), the operands and 0/1 result of an Equal / Greater /
+GreaterEqual / Less / LessEqual comparing integers, and the value-preserving region around each (layout
+converts, Identity, metadata reshapes, Cast to an integer type, Where's values, and the movement and
+selection ops Slice, Transpose, Expand, Tile, Split, Gather, Pad, DepthToSpace, ChannelShuffle,
+ScatterND, TopK's values and Concat), so an integer graph input packs at fp32 and an integer result
+reaches a graph output or the next integer op without an fp16 narrowing. A node reading a constant
+operand through the segment's fp16-filled activation buffer (an NC4HW4 channel Concat with a constant
+part) stays at the segment's precision. Past ±2^24 a GPU result rounds while the CPU op stays
 exact. Two int64 forms keep the CPU op on a GPU plan instead of computing in float: a Binary `Div` with an
 Int64-typed operand and a `Pow` with an Int64-typed base (support-report reasons `Binary: integer Div on
 an int64 operand` / `Binary: integer Pow on an int64 base`). Both refusals read the tensor's recorded

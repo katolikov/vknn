@@ -318,24 +318,29 @@ namespace vknn {
     // (initializers included), a result that is an integer whatever its operands hold (a Cast to an integer
     // type, Shape, ArgMax/ArgMin, TopK's indices, an integer-filled ConstantOfShape, the bitwise ops, an
     // integer Mod), or a value copied or computed from integer values: movement and selection ops (layout
-    // converts, Identity, metadata reshapes, Slice, Transpose, Expand, Tile, Split, Gather data, Concat,
-    // Where values), Add, Binary Add/Sub/Mul/Div/Max/Min, Pow of an integer base, ReduceSum/Max/Min/Prod,
-    // Range, Clip, Neg and Abs. Integer values are pinned where a node needs them exact. Seeds: the flat
-    // outputs of ArgMax, ArgMin, Mod with fmod == 0 or integer operands (modOperandsAreInteger), BitShift,
-    // BitwiseAnd, BitwiseOr, BitwiseXor and BitwiseNot; the runtime operands of those Mod and bitwise ops;
-    // integer ArgMax/ArgMin data; every arithmetic node above reading an integer value (its result, its
-    // operands, and Pow's exponent); and the operands of an Equal/Greater/GreaterEqual/Less/LessEqual
-    // reading an integer value, with its 0/1 result pinned without spreading so the comparison runs fp32.
-    // From every seed the pin floods the region: toward sources through the movement ops, the arithmetic
-    // ops and Cast (so an integer graph input packs at fp32), and toward consumers through the movement and
-    // arithmetic ops and a Cast to an integer type, so an integer result reaches a graph output or the next
-    // integer op without an fp16 narrowing. A Cast's operand is followed toward its source only. An integer
-    // value no node computes on (an int64 mask read only through reshapes into a Cast to float) keeps its
-    // storage precision, and a graph with no integer value pins nothing. A tensor is pinned while it can take fp32 storage:
-    // flat, or NC4HW4 written by no fp16-only kernel (a graph input, a layout convert, a metadata reshape, a
-    // Cast, Add, Binary, Unary or Concat); the region stops at an NC4HW4 conv-family output, which markFp32
-    // bridges. A hop that is a secondary output of a multi-output producer also pins that producer's
-    // outputs[0], since markFp32 aligns every output of a node to outputs[0]. Runs at load, after
+    // and dtype converts, Identity, metadata reshapes, Slice, Transpose, Expand, Tile, Split, Gather data,
+    // Pad and its fill value, DepthToSpace, ChannelShuffle, ScatterND data and updates, TopK's values,
+    // Concat, Where values), Add, Binary Add/Sub/Mul/Div/Max/Min, Pow of an integer base,
+    // ReduceSum/Max/Min/Prod, Range, Clip, Neg and Abs. Integer values are pinned where a node needs them
+    // exact. Seeds: the flat outputs of ArgMax, ArgMin, Mod with fmod == 0 or integer operands
+    // (modOperandsAreInteger), BitShift, BitwiseAnd, BitwiseOr, BitwiseXor and BitwiseNot; the runtime
+    // operands of those Mod and bitwise ops; integer ArgMax/ArgMin/TopK data; every arithmetic node above
+    // reading an integer value (its result, its operands, and Pow's exponent); and the operands of an
+    // Equal/Greater/GreaterEqual/Less/LessEqual reading an integer value, with its 0/1 result pinned without
+    // spreading so the comparison runs fp32. From every seed the pin floods the region: toward sources
+    // through the movement ops, the arithmetic ops and Cast (so an integer graph input packs at fp32), and
+    // toward consumers through the movement and arithmetic ops and a Cast to an integer type, so an integer
+    // result reaches a graph output or the next integer op without an fp16 narrowing. A Cast's operand is
+    // followed toward its source only, and a TopK's indices never pull its data in. An integer value no
+    // node computes on (an int64 mask read only through reshapes into a Cast to float) keeps its storage
+    // precision, and a graph with no integer value pins nothing. A tensor is pinned while it can take fp32
+    // storage: flat, or NC4HW4 written by no fp16-only kernel (a graph input, a layout convert, a metadata
+    // reshape, a Cast, Add, Binary, Unary, Concat, Split or ChannelShuffle); the region stops at an NC4HW4
+    // conv-family output, which markFp32 bridges, and at a node whose kernel reads a constant operand
+    // through the activation buffer the segment fills at its own storage precision (an NC4HW4 Concat with a
+    // constant part, an NC4HW4 Split, Reduce, DepthToSpace or TopK of a constant). Last, every node with a
+    // pinned secondary output (from this pass, or a TopK's indices pinned by pinGatherIndexFp32) gets its
+    // outputs[0] pinned, since markFp32 aligns every output of a node to outputs[0]. Runs at load, after
     // insertLayoutConverts, before markFp32.
     void pinIntegerResultsFp32(Graph &g);
 

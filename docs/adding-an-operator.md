@@ -445,16 +445,35 @@ inclusion, `VKNN_NO_RTE` ordering).
 ### 3f. Integer results and storage precision
 
 The GPU stores every tensor as fp16 or fp32 float lanes: an fp16 lane holds consecutive integers only up
-to 2^11 and saturates at 65504, an fp32 lane up to 2^24. An op whose result holds integers that must stay
-exact (indices, bit patterns, integer remainders) seeds `pinIntegerResultsFp32`
-(`src/import/mark_fp32.cpp`): add its OpType to the seed `switch`, marking its outputs as integer
-results and — when its operands are integers too — its runtime operands. The pass floods `storeFp32`
-through the value-preserving region around each seed (layout converts, Identity, metadata reshapes, Cast
-to an integer type, movement and selection ops), stopping where a reader computes a float, so the node
-selects its fp32 variant (`env.useFp16` is false for a pinned output) and `markFp32` bridges the region's
-float frontier. A kernel that reads an input at that input's own storage precision instead of through a
-bridge takes an exemption in `markFp32`'s frontier walk (ArgMax/ArgMin input 0, beside the GridSample and
-Gather precedents) and picks its shader variant from that input's `storeFp32`.
+to 2^11 and saturates at 65504, an fp32 lane up to 2^24. `pinIntegerResultsFp32`
+(`src/import/mark_fp32.cpp`) keeps integer values at fp32 storage wherever a node needs them exact. It
+reads three tables in that file, and an op with integer semantics registers in the one that matches:
+
+- `producesIntegers`: an output that holds integers whatever the operands hold (Shape, ArgMax/ArgMin,
+  TopK's indices, a Cast to an integer type, the bitwise ops, an integer Mod). The op's seed in the
+  pass's seed `switch` says whether the result is always pinned (ArgMax, the bitwise ops, Mod) and whether
+  its runtime operands or its integer data join the region with it.
+- `integerDataSlots`: how the result relates to the integer values in the op's data operands, with the
+  data slots, the operands read exactly without typing the result, and the outputs holding the data's
+  values. `Moves` copies or selects values (movement ops, Pad and its fill value, ScatterND and its
+  updates, TopK's values, Concat, Where's values); `Computes` is integer arithmetic (Add, Binary, the
+  integer Reduce kinds, Range, Clip, Neg, Abs, and Pow with its exponent read exactly); `Compares` is a
+  0/1 result read from exactly compared integers (Equal, Greater, Less and their OrEqual forms); `Casts`
+  is a Cast. Follow the CPU op: an operand whose int64 input makes an int64 result is a data slot. Keep
+  the `Moves` entries in step with `producerElementType` in `src/import/mod_integer_operands.cpp`; the
+  `MovementOpsCarryTheRegionToTheirIntegerSources` test checks both on every movement op.
+- `storageCanPin` and `uploadsConstantOperandsItself`: an NC4HW4 output takes fp32 storage only when its
+  kernel has an fp32 variant (list the op in `storageCanPin`), and any output only when its kernel reads
+  a constant operand 0 at its own precision (`operandBuf` or a constant buffer of its own; list the op in
+  `uploadsConstantOperandsItself`). A kernel reading a constant through `env.devBuf` gets the buffer the
+  segment fills at its own storage precision, so an fp32 node would read fp16 bytes.
+
+The pass floods `storeFp32` from each seed through the `Moves` and `Computes` ops toward the sources and
+the consumers, stopping where a reader computes a float, so the node selects its fp32 variant
+(`env.useFp16` is false for a pinned output) and `markFp32` bridges the region's float frontier. A kernel
+that reads an input at that input's own storage precision instead of through a bridge takes an exemption
+in `markFp32`'s frontier walk (ArgMax/ArgMin input 0, beside the GridSample and Gather precedents) and
+picks its shader variant from that input's `storeFp32`.
 
 The session runs the layout and precision passes as one function, `planFlatLayoutAndStorage`
 (`insertLayoutConverts` → `pinGatherIndexFp32` → `pinGridSampleGridFp32` → `pinIntegerResultsFp32` →
@@ -654,9 +673,12 @@ Vulkan/CPU segments while keeping the output bit-comparable).
       also needs a per-node arm in `gpuFlatNode` (`src/import/insert_layout_converts.cpp`), kept in
       sync with its `vkNodeGate` case. A row raises `kMaxOp` to the last enumerator, and the
       `LayoutClassAgreesWithGpuFlatNode` loop bound in `tests/test_support_report.cpp` follows it.
-- [ ] An op with integer results on the GPU: a seed in `pinIntegerResultsFp32`
-      (`src/import/mark_fp32.cpp`, §3f), tested through `planFlatLayoutAndStorage`; a node whose float
-      kernel would change the integer answer is refused in `vkNodeGate` by name.
+- [ ] An op with integer semantics on the GPU: its row in `pinIntegerResultsFp32`'s tables
+      (`src/import/mark_fp32.cpp`, §3f) — `producesIntegers` for an always-integer result,
+      `integerDataSlots` (`Moves` / `Computes` / `Compares`) for values copied or computed from integer
+      operands, and `storageCanPin` / `uploadsConstantOperandsItself` for the kernel's fp32 and constant
+      operand facts — tested through `planFlatLayoutAndStorage`; a node whose float kernel would change
+      the integer answer is refused in `vkNodeGate` by name.
 - [ ] For a **producer** op that should host a fused pointwise-chain epilogue (§3e):
       `#include "pw_epilogue.glsl"` under `#ifdef PW_EPI` in the shader (auto-derives the
       `_epi` variants), `PwEpi` wiring in the op, and set the descriptor row's `pwEpilogue`.

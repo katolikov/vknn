@@ -5,10 +5,12 @@
 // (planFlatLayoutAndStorage) on a hand-built graph, or runStandardPasses first where the import lowering
 // is part of the case, and checks the storeFp32 marks and the ConvertDtype bridges markFp32 places.
 #include "core/vk_gates.h"
+#include "import/mod_integer_operands.h"
 #include "import/passes.h"
 #include "vknn/binary_type.h"
 #include "vknn/graph.h"
 #include "vknn/reduce_type.h"
+#include "vknn/shape.h"
 #include "vknn/unary_type.h"
 #include <gtest/gtest.h>
 
@@ -23,6 +25,9 @@ namespace {
 
     // An integer beyond fp16's range (it would store as 65504) and above fp16's exact-integer range.
     constexpr int64_t kBeyondHalfRange = 70000;
+
+    // Parts of the two-part Concat the constant-part test builds.
+    constexpr size_t kConcatPartCount = 2;
 
     Attr intAttr(int64_t value) {
         Attr attribute;
@@ -71,6 +76,11 @@ namespace {
         return id;
     }
 
+    // Every element of a tensor of `shape` holding `value`.
+    template <typename Element> std::vector<Element> filledElements(const Shape &shape, Element value) {
+        return std::vector<Element>((size_t) numElements(shape), value);
+    }
+
     TensorId addFloatInitializer(Graph &g, const std::string &name, Shape shape, const std::vector<float> &values) {
         TensorId id              = addTensor(g, name, std::move(shape), DType::Float32);
         g.desc(id).isInitializer = true;
@@ -82,6 +92,10 @@ namespace {
         }
         g.initializers[id] = buffer;
         return id;
+    }
+
+    void setAttr(Node &node, const char *key, Attr value) {
+        node.attr.map[key] = std::move(value);
     }
 
     Node &addNode(Graph &g, OpType type, const std::string &name, std::vector<TensorId> inputs, std::vector<TensorId> outputs) {
@@ -624,5 +638,451 @@ TEST(IntegerArithmeticPins, ArgMaxOfIntegerCastDataReadsTheDataExactly) {
     EXPECT_TRUE(g.desc(asInt).storeFp32);
     EXPECT_TRUE(g.desc(x).storeFp32);
     EXPECT_TRUE(g.desc(indices).storeFp32);
+    EXPECT_EQ(countNodes(g, OpType::ConvertDtype), 0);
+}
+
+namespace {
+
+    // Builders of one movement op reading the int64 graph input `ids`: each adds the op and returns the
+    // tensor holding the moved values, appending every other runtime integer operand it creates.
+    using MovementBuilder = TensorId (*)(Graph &, TensorId, std::vector<TensorId> &);
+
+    TensorId buildReshape(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        TensorId shape = addInt64Initializer(g, "shape", {2}, {2, 4});
+        TensorId moved = addTensor(g, "moved", {2, 4});
+        addNode(g, OpType::Reshape, "op", {ids, shape}, {moved});
+        return moved;
+    }
+
+    TensorId buildFlatten(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        TensorId moved        = addTensor(g, "moved", {1, 8});
+        Node    &node         = addNode(g, OpType::Flatten, "op", {ids}, {moved});
+        node.attr.map["axis"] = intAttr(1);
+        return moved;
+    }
+
+    TensorId buildSqueeze(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        TensorId axes  = addInt64Initializer(g, "axes", {1}, {0});
+        TensorId moved = addTensor(g, "moved", {8});
+        addNode(g, OpType::Squeeze, "op", {ids, axes}, {moved});
+        return moved;
+    }
+
+    TensorId buildUnsqueeze(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        TensorId axes  = addInt64Initializer(g, "axes", {1}, {0});
+        TensorId moved = addTensor(g, "moved", {1, 1, 8});
+        addNode(g, OpType::Unsqueeze, "op", {ids, axes}, {moved});
+        return moved;
+    }
+
+    TensorId buildSlice(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        TensorId starts = addInt64Initializer(g, "starts", {1}, {1});
+        TensorId ends   = addInt64Initializer(g, "ends", {1}, {5});
+        TensorId axes   = addInt64Initializer(g, "axes", {1}, {1});
+        TensorId moved  = addTensor(g, "moved", {1, 4});
+        addNode(g, OpType::Slice, "op", {ids, starts, ends, axes}, {moved});
+        return moved;
+    }
+
+    TensorId buildTranspose(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        TensorId moved        = addTensor(g, "moved", {4, 2});
+        Node    &node         = addNode(g, OpType::Transpose, "op", {ids}, {moved});
+        node.attr.map["perm"] = intsAttr({1, 0});
+        return moved;
+    }
+
+    TensorId buildExpand(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        TensorId shape = addInt64Initializer(g, "shape", {2}, {2, 8});
+        TensorId moved = addTensor(g, "moved", {2, 8});
+        addNode(g, OpType::Expand, "op", {ids, shape}, {moved});
+        return moved;
+    }
+
+    TensorId buildTile(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        TensorId repeats = addInt64Initializer(g, "repeats", {2}, {2, 1});
+        TensorId moved   = addTensor(g, "moved", {2, 8});
+        addNode(g, OpType::Tile, "op", {ids, repeats}, {moved});
+        return moved;
+    }
+
+    TensorId buildSplitHalves(Graph &g, TensorId ids, Shape halfShape) {
+        TensorId sizes        = addInt64Initializer(g, "sizes", {2}, {4, 4});
+        TensorId moved        = addTensor(g, "moved", halfShape);
+        TensorId rest         = addTensor(g, "rest", halfShape);
+        Node    &node         = addNode(g, OpType::Split, "op", {ids, sizes}, {moved, rest});
+        node.attr.map["axis"] = intAttr(1);
+        return moved;
+    }
+
+    TensorId buildFlatSplit(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        return buildSplitHalves(g, ids, {1, 4});
+    }
+
+    TensorId buildChannelSplit(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        return buildSplitHalves(g, ids, {1, 4, 2, 2});
+    }
+
+    TensorId buildGather(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        TensorId index        = addInt64Initializer(g, "index", {2}, {0, 3});
+        TensorId moved        = addTensor(g, "moved", {1, 2});
+        Node    &node         = addNode(g, OpType::Gather, "op", {ids, index}, {moved});
+        node.attr.map["axis"] = intAttr(1);
+        return moved;
+    }
+
+    TensorId buildPad(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        TensorId pads  = addInt64Initializer(g, "pads", {4}, {0, 1, 0, 1});
+        TensorId moved = addTensor(g, "moved", {1, 10});
+        addNode(g, OpType::Pad, "op", {ids, pads}, {moved});
+        return moved;
+    }
+
+    TensorId buildDepthToSpace(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        TensorId moved             = addTensor(g, "moved", {1, 2, 4, 4});
+        Node    &node              = addNode(g, OpType::DepthToSpace, "op", {ids}, {moved});
+        node.attr.map["blocksize"] = intAttr(2);
+        return moved;
+    }
+
+    TensorId buildScatterND(Graph &g, TensorId ids, std::vector<TensorId> &integerOperands) {
+        TensorId indices = addInt64Initializer(g, "indices", {1, 1, 2}, {0, 3});
+        TensorId updates = addInput(g, "updates", {1}, DType::Int64);
+        TensorId moved   = addTensor(g, "moved", {1, 8});
+        addNode(g, OpType::ScatterND, "op", {ids, indices, updates}, {moved});
+        integerOperands.push_back(updates);
+        return moved;
+    }
+
+    TensorId buildTopKValues(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        TensorId k            = addInt64Initializer(g, "k", {1}, {3});
+        TensorId moved        = addTensor(g, "moved", {1, 3});
+        TensorId indices      = addTensor(g, "indices", {1, 3}, DType::Int64);
+        Node    &node         = addNode(g, OpType::TopK, "op", {ids, k}, {moved, indices});
+        node.attr.map["axis"] = intAttr(1);
+        return moved;
+    }
+
+    TensorId buildConcatWithInput(Graph &g, TensorId ids, std::vector<TensorId> &integerOperands) {
+        Shape joinedShape = g.desc(ids).shape;
+        joinedShape[1] *= 2;
+        TensorId more         = addInput(g, "more", g.desc(ids).shape, DType::Int64);
+        TensorId moved        = addTensor(g, "moved", joinedShape);
+        Node    &node         = addNode(g, OpType::Concat, "op", {ids, more}, {moved});
+        node.attr.map["axis"] = intAttr(1);
+        integerOperands.push_back(more);
+        return moved;
+    }
+
+    TensorId buildWhereValues(Graph &g, TensorId ids, std::vector<TensorId> &integerOperands) {
+        TensorId condition = addInput(g, "condition", {1, 8});
+        TensorId more      = addInput(g, "more", {1, 8}, DType::Int64);
+        TensorId moved     = addTensor(g, "moved", {1, 8});
+        addNode(g, OpType::Where, "op", {condition, ids, more}, {moved});
+        integerOperands.push_back(more);
+        return moved;
+    }
+
+    TensorId buildChannelShuffle(Graph &g, TensorId ids, std::vector<TensorId> &) {
+        TensorId moved          = addTensor(g, "moved", {1, 8, 2, 2});
+        Node    &node           = addNode(g, OpType::ChannelShuffle, "op", {ids}, {moved});
+        node.attr.map["groups"] = intAttr(2);
+        return moved;
+    }
+
+    struct MovementCase {
+        const char     *label;
+        Shape           idsShape;
+        bool            expectNc4;           // the case exercises the op's NC4HW4 kernel
+        bool            sharedByModResolver; // modOperandsAreInteger resolves the result's element type from ids
+        int             floatOperandBridges; // float operands (Where's condition) reach the fp32 op through a bridge
+        MovementBuilder build;
+    };
+
+    const MovementCase kMovementCases[] = {
+        {"Reshape", {1, 8}, false, true, 0, buildReshape},
+        {"Flatten", {1, 2, 4}, false, true, 0, buildFlatten},
+        {"Squeeze", {1, 8}, false, true, 0, buildSqueeze},
+        {"Unsqueeze", {1, 8}, false, true, 0, buildUnsqueeze},
+        {"Slice", {1, 8}, false, true, 0, buildSlice},
+        {"Transpose", {2, 4}, false, true, 0, buildTranspose},
+        {"Expand", {1, 8}, false, true, 0, buildExpand},
+        {"Tile", {1, 8}, false, true, 0, buildTile},
+        {"Split (flat)", {1, 8}, false, true, 0, buildFlatSplit},
+        {"Split (NC4HW4 channel)", {1, 8, 2, 2}, true, true, 0, buildChannelSplit},
+        {"Gather", {1, 8}, false, true, 0, buildGather},
+        {"Pad", {1, 8}, false, true, 0, buildPad},
+        {"DepthToSpace", {1, 8, 2, 2}, false, true, 0, buildDepthToSpace},
+        {"ScatterND", {1, 8}, false, true, 0, buildScatterND},
+        {"TopK values", {1, 8}, false, true, 0, buildTopKValues},
+        {"Concat (flat)", {1, 8}, false, true, 0, buildConcatWithInput},
+        {"Concat (NC4HW4 channel)", {1, 4, 2, 2}, true, true, 0, buildConcatWithInput},
+        {"Where values", {1, 8}, false, true, 1, buildWhereValues},
+        {"ChannelShuffle", {1, 8, 2, 2}, false, false, 0, buildChannelShuffle},
+    };
+
+} // namespace
+
+TEST(IntegerArithmeticPins, MovementOpsCarryTheRegionToTheirIntegerSources) {
+    // ids (int64) -> movement op -> Add(1): the op copies element values at its storage precision, so the
+    // int64 sources it reads (the data, ScatterND's updates, the other Concat part, Where's other value)
+    // are pinned with the Add, and no ConvertDtype widens an already-saturated fp16 value (a float
+    // operand, Where's condition, is the only bridge). A Mod reading the same untyped result resolves it as
+    // integer (modOperandsAreInteger), so the two resolvers agree on every op that shares its data's
+    // element type.
+    for (const MovementCase &c: kMovementCases)
+    {
+        {
+            Graph                 g;
+            std::vector<TensorId> integerOperands;
+            TensorId              ids   = addInput(g, "ids", c.idsShape, DType::Int64);
+            TensorId              moved = c.build(g, ids, integerOperands);
+            TensorId              one   = addInt64Initializer(g, "one", {1}, {1});
+            TensorId              sum   = addTensor(g, "sum", g.desc(moved).shape, DType::Int64);
+            addNode(g, OpType::Add, "add", {moved, one}, {sum});
+            addOutput(g, sum);
+
+            planFlatLayoutAndStorage(g, "", nullptr);
+            if (c.expectNc4)
+            {
+                EXPECT_FALSE(g.desc(moved).gpuFlat) << c.label << ": the case exercises the NC4HW4 kernel";
+            }
+            EXPECT_TRUE(g.desc(ids).storeFp32) << c.label;
+            for (TensorId operand: integerOperands)
+            {
+                EXPECT_TRUE(g.desc(operand).storeFp32) << c.label << " " << g.desc(operand).name;
+            }
+            EXPECT_TRUE(g.desc(moved).storeFp32) << c.label;
+            EXPECT_TRUE(g.desc(sum).storeFp32) << c.label;
+            EXPECT_EQ(countNodes(g, OpType::ConvertDtype), c.floatOperandBridges) << c.label;
+        }
+        if (c.sharedByModResolver)
+        {
+            Graph                 g;
+            std::vector<TensorId> integerOperands;
+            TensorId              ids       = addInput(g, "ids", c.idsShape, DType::Int64);
+            TensorId              moved     = c.build(g, ids, integerOperands);
+            TensorId              divisor   = addInput(g, "divisor", {1});
+            TensorId              remainder = addTensor(g, "remainder", g.desc(moved).shape);
+            Node                 &mod       = addNode(g, OpType::Mod, "mod", {moved, divisor}, {remainder});
+            mod.attr.map["fmod"]            = intAttr(1);
+            addOutput(g, remainder);
+            EXPECT_TRUE(modOperandsAreInteger(g, g.nodes.back())) << c.label;
+        }
+    }
+}
+
+TEST(IntegerArithmeticPins, Nc4ConcatReadingAConstantPartKeepsTheSegmentPrecision) {
+    // An NC4HW4 Concat reads each part through the segment's activation buffer, which the segment fills
+    // from a constant at its own storage precision; an fp32 Concat would read that fp16 buffer as fp32.
+    // So the Concat keeps its precision, and the integer Add reading it gets one fp16 -> fp32 bridge. A
+    // flat Concat uploads its constant parts at its own precision and joins the region.
+    for (size_t constantSlot = 0; constantSlot < kConcatPartCount; ++constantSlot)
+    {
+        Graph                 g;
+        TensorId              ids = addInput(g, "ids", {1, 4, 2, 2}, DType::Int64);
+        const Shape           partShape {1, 4, 2, 2};
+        TensorId              base   = addInt64Initializer(g, "base", partShape, filledElements(partShape, kBeyondHalfRange));
+        TensorId              other  = addInput(g, "other", {1, 8, 2, 2}, DType::Int64);
+        TensorId              joined = addTensor(g, "joined", {1, 8, 2, 2});
+        TensorId              sum    = addTensor(g, "sum", {1, 8, 2, 2}, DType::Int64);
+        std::vector<TensorId> parts  = constantSlot == 0 ? std::vector<TensorId> {base, ids} : std::vector<TensorId> {ids, base};
+        setAttr(addNode(g, OpType::Concat, "concat", parts, {joined}), "axis", intAttr(1));
+        addNode(g, OpType::Add, "add", {joined, other}, {sum});
+        addOutput(g, sum);
+
+        planFlatLayoutAndStorage(g, "", nullptr);
+        EXPECT_FALSE(g.desc(joined).gpuFlat) << "the case exercises the NC4HW4 Concat";
+        EXPECT_FALSE(g.desc(joined).storeFp32) << "constant part in slot " << constantSlot;
+        EXPECT_FALSE(g.desc(ids).storeFp32) << "constant part in slot " << constantSlot;
+        EXPECT_TRUE(g.desc(other).storeFp32) << "constant part in slot " << constantSlot;
+        EXPECT_TRUE(g.desc(sum).storeFp32) << "constant part in slot " << constantSlot;
+        ASSERT_EQ(countNodes(g, OpType::ConvertDtype), 1) << "constant part in slot " << constantSlot;
+        const Node *add = findNode(g, "add");
+        ASSERT_NE(add, nullptr);
+        const Node *bridge = producerOf(g, add->inputs[0]);
+        ASSERT_NE(bridge, nullptr);
+        EXPECT_EQ(bridge->type, OpType::ConvertDtype);
+        EXPECT_EQ(bridge->inputs[0], joined);
+    }
+    {
+        Graph    g;
+        TensorId ids    = addInput(g, "ids", {1, 8}, DType::Int64);
+        TensorId base   = addInt64Initializer(g, "base", {1, 8}, filledElements(Shape {1, 8}, kBeyondHalfRange));
+        TensorId joined = addTensor(g, "joined", {1, 16});
+        TensorId one    = addInt64Initializer(g, "one", {1}, {1});
+        TensorId sum    = addTensor(g, "sum", {1, 16}, DType::Int64);
+        setAttr(addNode(g, OpType::Concat, "concat", {base, ids}, {joined}), "axis", intAttr(1));
+        addNode(g, OpType::Add, "add", {joined, one}, {sum});
+        addOutput(g, sum);
+
+        planFlatLayoutAndStorage(g, "", nullptr);
+        EXPECT_TRUE(g.desc(joined).gpuFlat);
+        EXPECT_TRUE(g.desc(joined).storeFp32);
+        EXPECT_TRUE(g.desc(ids).storeFp32);
+        EXPECT_TRUE(g.desc(sum).storeFp32);
+        EXPECT_EQ(countNodes(g, OpType::ConvertDtype), 0);
+    }
+}
+
+TEST(IntegerArithmeticPins, KernelsReadingAConstantThroughTheSegmentBufferKeepTheSegmentPrecision) {
+    // An NC4HW4 Split and a ReduceSum read a constant operand 0 through the segment's fp16-filled
+    // activation buffer, so neither is pinned even when an integer Add reads its result: the Add reads it
+    // through one fp16 -> fp32 bridge. (Const folding removes such all-constant nodes on the load path;
+    // the rule keeps a node that survives it from reading fp16 bytes as fp32.)
+    {
+        Graph    g;
+        TensorId source = addInt64Initializer(g, "source", {1, 8, 2, 2}, filledElements(Shape {1, 8, 2, 2}, kBeyondHalfRange));
+        TensorId sizes  = addInt64Initializer(g, "sizes", {2}, {4, 4});
+        TensorId head   = addTensor(g, "head", {1, 4, 2, 2});
+        TensorId tail   = addTensor(g, "tail", {1, 4, 2, 2});
+        TensorId other  = addInput(g, "other", {1, 4, 2, 2}, DType::Int64);
+        TensorId sum    = addTensor(g, "sum", {1, 4, 2, 2}, DType::Int64);
+        setAttr(addNode(g, OpType::Split, "split", {source, sizes}, {head, tail}), "axis", intAttr(1));
+        addNode(g, OpType::Add, "add", {head, other}, {sum});
+        addOutput(g, sum);
+        addOutput(g, tail);
+
+        planFlatLayoutAndStorage(g, "", nullptr);
+        EXPECT_FALSE(g.desc(head).gpuFlat) << "the case exercises the NC4HW4 Split";
+        EXPECT_FALSE(g.desc(head).storeFp32);
+        EXPECT_FALSE(g.desc(tail).storeFp32);
+        EXPECT_TRUE(g.desc(sum).storeFp32);
+        EXPECT_EQ(countNodes(g, OpType::ConvertDtype), 1);
+    }
+    {
+        Graph    g;
+        TensorId source             = addInt64Initializer(g, "source", {1, 8}, filledElements(Shape {1, 8}, kBeyondHalfRange));
+        TensorId total              = addTensor(g, "total", {1, 1});
+        TensorId other              = addInput(g, "other", {1, 1}, DType::Int64);
+        TensorId sum                = addTensor(g, "sum", {1, 1}, DType::Int64);
+        Node    &reduce             = addNode(g, OpType::Reduce, "reduce", {source}, {total});
+        reduce.subOp                = (int) ReduceType::Sum;
+        reduce.attr.map["axes"]     = intsAttr({1});
+        reduce.attr.map["keepdims"] = intAttr(1);
+        addNode(g, OpType::Add, "add", {total, other}, {sum});
+        addOutput(g, sum);
+
+        planFlatLayoutAndStorage(g, "", nullptr);
+        EXPECT_FALSE(g.desc(total).storeFp32);
+        EXPECT_TRUE(g.desc(other).storeFp32);
+        EXPECT_TRUE(g.desc(sum).storeFp32);
+        EXPECT_EQ(countNodes(g, OpType::ConvertDtype), 1);
+    }
+}
+
+TEST(IntegerArithmeticPins, TopKOfIntegerDataRanksAtFp32) {
+    // TopK over int64 data with only its indices consumed: fp16 would store 70000 and 70001 as one value
+    // and rank them as a tie, so the data is read exactly and both outputs run fp32.
+    Graph    g;
+    TensorId ids     = addInput(g, "ids", {1, 8}, DType::Int64);
+    TensorId k       = addInt64Initializer(g, "k", {1}, {3});
+    TensorId values  = addTensor(g, "values", {1, 3});
+    TensorId indices = addTensor(g, "indices", {1, 3}, DType::Int64);
+    setAttr(addNode(g, OpType::TopK, "topk", {ids, k}, {values, indices}), "axis", intAttr(1));
+    addOutput(g, indices);
+
+    planFlatLayoutAndStorage(g, "", nullptr);
+    EXPECT_TRUE(g.desc(ids).storeFp32);
+    EXPECT_TRUE(g.desc(values).storeFp32);
+    EXPECT_TRUE(g.desc(indices).storeFp32);
+    EXPECT_EQ(countNodes(g, OpType::ConvertDtype), 0);
+}
+
+TEST(IntegerArithmeticPins, TopKIndicesInArithmeticLeaveTheFloatScoresAlone) {
+    // Float scores -> TopK -> indices + 1: the indices are integers whatever the scores hold, so the Add
+    // pins them (and the values, which share the node's precision) without pulling the float scores into
+    // the region; the scores reach the fp32 TopK through one bridge.
+    Graph    g;
+    TensorId scores  = addInput(g, "scores", {1, 64});
+    TensorId k       = addInt64Initializer(g, "k", {1}, {3});
+    TensorId values  = addTensor(g, "values", {1, 3});
+    TensorId indices = addTensor(g, "indices", {1, 3}, DType::Int64);
+    TensorId one     = addInt64Initializer(g, "one", {1}, {1});
+    TensorId next    = addTensor(g, "next", {1, 3}, DType::Int64);
+    TensorId scaled  = addTensor(g, "scaled", {1, 64});
+    TensorId half    = addFloatInitializer(g, "half", {1}, {0.5f});
+    setAttr(addNode(g, OpType::TopK, "topk", {scores, k}, {values, indices}), "axis", intAttr(1));
+    addNode(g, OpType::Add, "add", {indices, one}, {next});
+    addBinary(g, BinaryType::Mul, "float_reader", {scores, half}, scaled);
+    addOutput(g, next);
+    addOutput(g, scaled);
+
+    planFlatLayoutAndStorage(g, "", nullptr);
+    EXPECT_TRUE(g.desc(indices).storeFp32);
+    EXPECT_TRUE(g.desc(values).storeFp32);
+    EXPECT_TRUE(g.desc(next).storeFp32);
+    EXPECT_FALSE(g.desc(scores).storeFp32);
+    EXPECT_FALSE(g.desc(scaled).storeFp32);
+    EXPECT_EQ(countNodes(g, OpType::ConvertDtype), 1);
+}
+
+TEST(IntegerArithmeticPins, TopKIndicesIndexingAGatherStayFp32) {
+    // Float scores -> TopK -> indices -> Gather index. The Gather reads its index as fp32 whatever the
+    // index's storage (gather.comp binding 1 is float), and markFp32 gives every TopK output the values'
+    // precision, so the pinned indices keep fp32 only because the values are pinned with them; the float
+    // scores reach the fp32 TopK through one fp16 -> fp32 bridge.
+    Graph    g;
+    TensorId scores  = addInput(g, "scores", {1, 64});
+    TensorId k       = addInt64Initializer(g, "k", {1}, {3});
+    TensorId values  = addTensor(g, "values", {1, 3});
+    TensorId indices = addTensor(g, "indices", {1, 3}, DType::Int64);
+    TensorId table   = addFloatInitializer(g, "table", {64, 1}, filledElements(Shape {64, 1}, 0.5f));
+    TensorId rows    = addTensor(g, "rows", {1, 3, 1});
+    setAttr(addNode(g, OpType::TopK, "topk", {scores, k}, {values, indices}), "axis", intAttr(1));
+    setAttr(addNode(g, OpType::Gather, "gather", {table, indices}, {rows}), "axis", intAttr(0));
+    addOutput(g, rows);
+
+    planFlatLayoutAndStorage(g, "", nullptr);
+    EXPECT_TRUE(g.desc(indices).storeFp32);
+    EXPECT_TRUE(g.desc(values).storeFp32);
+    EXPECT_FALSE(g.desc(scores).storeFp32);
+    EXPECT_FALSE(g.desc(rows).storeFp32);
+    ASSERT_EQ(countNodes(g, OpType::ConvertDtype), 1) << "the scores reach the fp32 TopK through a bridge";
+    const Node *topk = findNode(g, "topk");
+    ASSERT_NE(topk, nullptr);
+    const Node *bridge = producerOf(g, topk->inputs[0]);
+    ASSERT_NE(bridge, nullptr);
+    EXPECT_EQ(bridge->type, OpType::ConvertDtype);
+}
+
+TEST(IntegerArithmeticPins, FloatMovementGraphsPinNothing) {
+    // Float data through TopK, ScatterND, Pad, an NC4HW4 channel Split and DepthToSpace, with int64 index,
+    // pad and count parameters: parameters never seed the region, so nothing is pinned or bridged.
+    Graph    g;
+    TensorId scores  = addInput(g, "scores", {1, 8});
+    TensorId k       = addInt64Initializer(g, "k", {1}, {3});
+    TensorId best    = addTensor(g, "best", {});
+    TensorId indices = addTensor(g, "indices", {}, DType::Int64);
+    TensorId bias    = addFloatInitializer(g, "bias", {1}, {0.25f});
+    TensorId shifted = addTensor(g, "shifted", {});
+    setAttr(addNode(g, OpType::TopK, "topk", {scores, k}, {best, indices}), "axis", intAttr(1));
+    addNode(g, OpType::Add, "add", {best, bias}, {shifted});
+    addOutput(g, shifted);
+
+    TensorId data      = addInput(g, "data", {1, 8});
+    TensorId where     = addInt64Initializer(g, "where", {1, 1, 2}, {0, 3});
+    TensorId updates   = addInput(g, "updates", {1});
+    TensorId scattered = addTensor(g, "scattered", {});
+    TensorId pads      = addInt64Initializer(g, "pads", {4}, {0, 1, 0, 1});
+    TensorId padded    = addTensor(g, "padded", {});
+    addNode(g, OpType::ScatterND, "scatter", {data, where, updates}, {scattered});
+    addNode(g, OpType::Pad, "pad", {scattered, pads}, {padded});
+    addOutput(g, padded);
+
+    TensorId features = addInput(g, "features", {1, 8, 2, 2});
+    TensorId sizes    = addInt64Initializer(g, "sizes", {2}, {4, 4});
+    TensorId head     = addTensor(g, "head", {});
+    TensorId tail     = addTensor(g, "tail", {});
+    TensorId merged   = addTensor(g, "merged", {});
+    TensorId upscaled = addTensor(g, "upscaled", {});
+    setAttr(addNode(g, OpType::Split, "split", {features, sizes}, {head, tail}), "axis", intAttr(1));
+    addNode(g, OpType::Add, "merge", {head, tail}, {merged});
+    setAttr(addNode(g, OpType::DepthToSpace, "d2s", {merged}, {upscaled}), "blocksize", intAttr(2));
+    addOutput(g, upscaled);
+
+    runStandardPasses(g);
+    g.topoSort();
+    planFlatLayoutAndStorage(g, "", nullptr);
+    EXPECT_EQ(countPinnedRuntimeTensors(g), 0);
     EXPECT_EQ(countNodes(g, OpType::ConvertDtype), 0);
 }
