@@ -682,20 +682,20 @@ namespace vknn {
         // followed toward sources and toward consumers.
         std::vector<int>                                 producer(g.tensors.size(), -1);
         std::vector<std::vector<std::pair<int, size_t>>> readers(g.tensors.size());
-        for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
+        for (int nodeIndex = 0; nodeIndex < (int) g.nodes.size(); ++nodeIndex)
         {
-            for (TensorId o: g.nodes[ni].outputs)
+            for (TensorId output: g.nodes[nodeIndex].outputs)
             {
-                if (o != kNoTensor)
+                if (output != kNoTensor)
                 {
-                    producer[(size_t) o] = ni;
+                    producer[(size_t) output] = nodeIndex;
                 }
             }
-            for (size_t slot = 0; slot < g.nodes[ni].inputs.size(); ++slot)
+            for (size_t slot = 0; slot < g.nodes[nodeIndex].inputs.size(); ++slot)
             {
-                if (g.nodes[ni].inputs[slot] != kNoTensor)
+                if (g.nodes[nodeIndex].inputs[slot] != kNoTensor)
                 {
-                    readers[(size_t) g.nodes[ni].inputs[slot]].push_back({ni, slot});
+                    readers[(size_t) g.nodes[nodeIndex].inputs[slot]].push_back({nodeIndex, slot});
                 }
             }
         }
@@ -705,34 +705,36 @@ namespace vknn {
         // copy) or a Cast (cast.comp has an fp32 variant), or of Add, Binary, Unary, Concat or ChannelShuffle,
         // whose NC4HW4 kernels have fp32 variants too, or of a Split, whose NC4HW4 kernel copies channel
         // blocks at the node's element width (the segment planner keeps an fp32 Concat or Split out of its
-        // zero-copy views). The layout pass keeps an agnostic chain rooted at a
-        // graph input NC4HW4 until a reader changes the channel count, a same-shape rank-4 Add/Binary of
-        // runtime operands runs NC4HW4, and a channel-axis Concat or Split of 4-aligned parts does too, so
-        // an integer region often crosses such tensors. The NC4HW4 conv family is hand-written fp16-only,
+        // zero-copy views). The layout pass keeps an NC4HW4 input's layout through an agnostic reshape, Cast
+        // or ChannelShuffle only while nc4PackingIdentical holds (the output stores every element at the
+        // input's NC4HW4 position, with the same footprint), and packs a graph input flat when every read of
+        // it, through such hops, is flat; a same-shape rank-4 Add/Binary of runtime operands runs NC4HW4, and
+        // a channel-axis Concat or Split of 4-aligned parts does too, so an integer region often crosses such
+        // tensors. The NC4HW4 conv family is hand-written fp16-only,
         // so its outputs are never pinned; markFp32 bridges them instead. In either layout, a node reading a
         // constant through the segment's shared activation buffer (readsConstantAtSegmentPrecision: an
         // NC4HW4 Concat with a constant part, among others) keeps the segment's precision, since an fp32
         // kernel would read that fp16-filled buffer as fp32.
-        auto storageCanPin = [&](TensorId t) {
-            if (t == kNoTensor || g.isInitializer(t))
+        auto storageCanPin = [&](TensorId tensor) {
+            if (tensor == kNoTensor || g.isInitializer(tensor))
             {
                 return false;
             }
-            const int p = producer[(size_t) t];
-            if (p >= 0 && readsConstantAtSegmentPrecision(g, g.nodes[(size_t) p]))
+            const int producerIndex = producer[(size_t) tensor];
+            if (producerIndex >= 0 && readsConstantAtSegmentPrecision(g, g.nodes[(size_t) producerIndex]))
             {
                 return false;
             }
-            if (g.desc(t).gpuFlat || p < 0)
+            if (g.desc(tensor).gpuFlat || producerIndex < 0)
             {
                 return true;
             }
-            const Node &pn = g.nodes[(size_t) p];
-            if (pn.attr.has("pw_steps"))
+            const Node &producerNode = g.nodes[(size_t) producerIndex];
+            if (producerNode.attr.has("pw_steps"))
             {
                 return false;
             }
-            switch (pn.type)
+            switch (producerNode.type)
             {
                 case OpType::ConvertLayout:
                 case OpType::Reshape:
@@ -752,12 +754,12 @@ namespace vknn {
             }
         };
         int  pinned = 0;
-        auto pin    = [&](TensorId t) {
-            if (!storageCanPin(t) || g.desc(t).storeFp32)
+        auto pin    = [&](TensorId tensor) {
+            if (!storageCanPin(tensor) || g.desc(tensor).storeFp32)
             {
                 return;
             }
-            g.desc(t).storeFp32 = true;
+            g.desc(tensor).storeFp32 = true;
             ++pinned;
         };
 
@@ -767,45 +769,45 @@ namespace vknn {
         // an integer graph input read only by a Cast to a float type keeps its storage precision.
         std::vector<char>     integerValued(g.tensors.size(), 0);
         std::vector<TensorId> unfollowed;
-        auto                  markIntegerValued = [&](TensorId t) {
-            if (t != kNoTensor && !integerValued[(size_t) t])
+        auto                  markIntegerValued = [&](TensorId tensor) {
+            if (tensor != kNoTensor && !integerValued[(size_t) tensor])
             {
-                integerValued[(size_t) t] = 1;
-                unfollowed.push_back(t);
+                integerValued[(size_t) tensor] = 1;
+                unfollowed.push_back(tensor);
             }
         };
-        for (TensorId t = 0; t < (TensorId) g.tensors.size(); ++t)
+        for (TensorId tensor = 0; tensor < (TensorId) g.tensors.size(); ++tensor)
         {
-            if (typedWideInteger(g, t))
+            if (typedWideInteger(g, tensor))
             {
-                markIntegerValued(t);
+                markIntegerValued(tensor);
             }
         }
         for (const Node &nd: g.nodes)
         {
-            for (TensorId o: nd.outputs)
+            for (TensorId output: nd.outputs)
             {
-                if (o != kNoTensor && producesIntegers(g, nd, o, producer))
+                if (output != kNoTensor && producesIntegers(g, nd, output, producer))
                 {
-                    markIntegerValued(o);
+                    markIntegerValued(output);
                 }
             }
         }
         while (!unfollowed.empty())
         {
-            const TensorId t = unfollowed.back();
+            const TensorId tensor = unfollowed.back();
             unfollowed.pop_back();
-            for (const auto &[readerIndex, slot]: readers[(size_t) t])
+            for (const auto &[readerIndex, slot]: readers[(size_t) tensor])
             {
-                const Node            &rn        = g.nodes[(size_t) readerIndex];
-                const IntegerDataSlots dataSlots = integerDataSlots(rn);
+                const Node            &readerNode = g.nodes[(size_t) readerIndex];
+                const IntegerDataSlots dataSlots  = integerDataSlots(readerNode);
                 if ((dataSlots.flow == IntegerFlow::Moves || dataSlots.flow == IntegerFlow::Computes) && dataSlots.readsData(slot))
                 {
-                    for (size_t outputIndex = 0; outputIndex < rn.outputs.size(); ++outputIndex)
+                    for (size_t outputIndex = 0; outputIndex < readerNode.outputs.size(); ++outputIndex)
                     {
                         if (dataSlots.writesData(outputIndex))
                         {
-                            markIntegerValued(rn.outputs[outputIndex]);
+                            markIntegerValued(readerNode.outputs[outputIndex]);
                         }
                     }
                 }
@@ -829,10 +831,10 @@ namespace vknn {
         enum class Reach : uint8_t { None, Upstream, Integer };
         std::vector<Reach>                      reach(g.tensors.size(), Reach::None);
         std::vector<std::pair<TensorId, Reach>> pending;
-        auto                                    enqueue = [&](TensorId t, Reach r) {
-            if (t != kNoTensor)
+        auto                                    enqueue = [&](TensorId tensor, Reach tensorReach) {
+            if (tensor != kNoTensor)
             {
-                pending.push_back({t, r});
+                pending.push_back({tensor, tensorReach});
             }
         };
         // The operands of a node computing integers: its data operands are integers, and an operand it only
@@ -853,21 +855,31 @@ namespace vknn {
             }
         };
         // The outputs of a node holding its data's element values, at one reach.
-        auto enqueueDataOutputs = [&](const Node &nd, const IntegerDataSlots &dataSlots, Reach r) {
+        auto enqueueDataOutputs = [&](const Node &nd, const IntegerDataSlots &dataSlots, Reach tensorReach) {
             for (size_t outputIndex = 0; outputIndex < nd.outputs.size(); ++outputIndex)
             {
                 if (dataSlots.writesData(outputIndex))
                 {
-                    enqueue(nd.outputs[outputIndex], r);
+                    enqueue(nd.outputs[outputIndex], tensorReach);
                 }
             }
         };
 
         // Seeds: the integer results of the integer ops and the operands of the ops whose operands are
         // integers too; the integer data a ranking reads (ArgMax/ArgMin, TopK); every Computes node reading
-        // an integer value (its result and its operands); and the operands of a comparison reading an
-        // integer value, with its 0/1 result pinned so the kernel compares at fp32. A constant operand is
-        // uploaded by the op itself at the node's (pinned) precision, so only runtime tensors are pinned.
+        // an integer value (its result and its operands); the operands of a comparison reading an integer
+        // value, with its 0/1 result pinned so the kernel compares at fp32; and every graph output holding
+        // integer values, which reaches the caller exactly even when only movement ops (a Gather from an
+        // int64 table, a Where or Concat of int64 inputs) lie between it and its integer sources. A constant
+        // operand is uploaded by the op itself at the node's (pinned) precision, so only runtime tensors are
+        // pinned.
+        for (TensorId graphOutput: g.outputs)
+        {
+            if (graphOutput != kNoTensor && integerValued[(size_t) graphOutput])
+            {
+                enqueue(graphOutput, Reach::Integer);
+            }
+        }
         for (const Node &nd: g.nodes)
         {
             bool integerResult   = false;
@@ -910,16 +922,16 @@ namespace vknn {
             }
             if (integerResult)
             {
-                for (TensorId o: nd.outputs)
+                for (TensorId output: nd.outputs)
                 {
-                    enqueue(o, Reach::Integer);
+                    enqueue(output, Reach::Integer);
                 }
             }
             if (integerOperands)
             {
-                for (TensorId in: nd.inputs)
+                for (TensorId operand: nd.inputs)
                 {
-                    enqueue(in, Reach::Integer);
+                    enqueue(operand, Reach::Integer);
                 }
             }
             const IntegerDataSlots dataSlots = integerDataSlots(nd);
@@ -938,53 +950,53 @@ namespace vknn {
         // fp32->fp16 bridge.
         while (!pending.empty())
         {
-            const auto [t, r] = pending.back();
+            const auto [tensor, tensorReach] = pending.back();
             pending.pop_back();
-            if (!storageCanPin(t) || reach[(size_t) t] >= r)
+            if (!storageCanPin(tensor) || reach[(size_t) tensor] >= tensorReach)
             {
                 continue;
             }
-            reach[(size_t) t] = r;
-            pin(t);
+            reach[(size_t) tensor] = tensorReach;
+            pin(tensor);
 
-            const int p = producer[(size_t) t];
-            if (p >= 0)
+            const int producerIndex = producer[(size_t) tensor];
+            if (producerIndex >= 0)
             {
-                const Node            &pn          = g.nodes[(size_t) p];
-                const IntegerDataSlots dataSlots   = integerDataSlots(pn);
-                const size_t           outputIndex = (size_t) (std::find(pn.outputs.begin(), pn.outputs.end(), t) - pn.outputs.begin());
+                const Node            &producerNode = g.nodes[(size_t) producerIndex];
+                const IntegerDataSlots dataSlots    = integerDataSlots(producerNode);
+                const size_t outputIndex = (size_t) (std::find(producerNode.outputs.begin(), producerNode.outputs.end(), tensor) - producerNode.outputs.begin());
                 // A secondary output that holds no data values (TopK's indices) says nothing about the
                 // operands: the pinned output runs its node fp32 via nodeFp32.
                 const IntegerFlow producerFlow = dataSlots.writesData(outputIndex) ? dataSlots.flow : IntegerFlow::None;
                 switch (producerFlow)
                 {
                     case IntegerFlow::Moves:
-                        for (size_t slot = 0; slot < pn.inputs.size(); ++slot)
+                        for (size_t slot = 0; slot < producerNode.inputs.size(); ++slot)
                         {
                             if (dataSlots.readsData(slot))
                             {
-                                enqueue(pn.inputs[slot], r);
+                                enqueue(producerNode.inputs[slot], tensorReach);
                             }
                         }
-                        if (r == Reach::Integer)
+                        if (tensorReach == Reach::Integer)
                         {
-                            enqueueDataOutputs(pn, dataSlots, Reach::Integer); // the other parts of a Split
+                            enqueueDataOutputs(producerNode, dataSlots, Reach::Integer); // the other parts of a Split
                         }
                         break;
                     case IntegerFlow::Computes:
                         // An integer result has integer operands. An Upstream result (a Cast operand) may be
                         // float arithmetic, which keeps its operands at their storage precision.
-                        if (r == Reach::Integer)
+                        if (tensorReach == Reach::Integer)
                         {
-                            enqueueIntegerOperands(pn, dataSlots);
+                            enqueueIntegerOperands(producerNode, dataSlots);
                         }
                         break;
                     case IntegerFlow::Casts:
-                        for (size_t slot = 0; slot < pn.inputs.size(); ++slot)
+                        for (size_t slot = 0; slot < producerNode.inputs.size(); ++slot)
                         {
                             if (dataSlots.readsData(slot))
                             {
-                                enqueue(pn.inputs[slot], Reach::Upstream);
+                                enqueue(producerNode.inputs[slot], Reach::Upstream);
                             }
                         }
                         break;
@@ -992,14 +1004,14 @@ namespace vknn {
                         break; // a comparison or a float op: the pinned output runs fp32 via nodeFp32
                 }
             }
-            if (r != Reach::Integer)
+            if (tensorReach != Reach::Integer)
             {
                 continue;
             }
-            for (const auto &[readerIndex, slot]: readers[(size_t) t])
+            for (const auto &[readerIndex, slot]: readers[(size_t) tensor])
             {
-                const Node            &rn        = g.nodes[(size_t) readerIndex];
-                const IntegerDataSlots dataSlots = integerDataSlots(rn);
+                const Node            &readerNode = g.nodes[(size_t) readerIndex];
+                const IntegerDataSlots dataSlots  = integerDataSlots(readerNode);
                 if (!dataSlots.readsData(slot))
                 {
                     continue; // a parameter slot, or a float reader
@@ -1008,7 +1020,7 @@ namespace vknn {
                 switch (dataSlots.flow)
                 {
                     case IntegerFlow::Casts:
-                        if (!onnx::castTargetsIntegerElementType(rn))
+                        if (!onnx::castTargetsIntegerElementType(readerNode))
                         {
                             continue; // a float result leaves the integer region
                         }
@@ -1019,10 +1031,10 @@ namespace vknn {
                     default:
                         break;
                 }
-                enqueueDataOutputs(rn, dataSlots, resultReach);
+                enqueueDataOutputs(readerNode, dataSlots, resultReach);
                 if (dataSlots.flow != IntegerFlow::Casts)
                 {
-                    enqueueIntegerOperands(rn, dataSlots); // the other parts of a Concat, the other operands
+                    enqueueIntegerOperands(readerNode, dataSlots); // the other parts of a Concat, the other operands
                 }
             }
         }

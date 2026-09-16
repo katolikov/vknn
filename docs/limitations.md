@@ -111,16 +111,20 @@ connect them to graph inputs and outputs (layout converts, reshapes, integer Cas
 the movement ops: Slice, Transpose, Expand, Tile, Split, Gather, Pad, DepthToSpace, ChannelShuffle,
 ScatterND, TopK's values, Concat). A node whose kernel reads a constant operand through the activation
 buffer the segment fills at its own precision — an NC4HW4 channel Concat with a constant part is the
-reachable case — keeps that precision, so a constant integer part past 65504 still saturates at `Low`
-there. Past ±2^24 a GPU integer result rounds, and the GPU BitwiseAnd/Or/Xor kernel also clamps its
+reachable case — keeps that precision together with every runtime part it reads, so an integer value past
+65504 in any part of such a Concat (the constant, or a runtime part such as an int64 graph input)
+saturates at `Low` and `Normal` there. Past ±2^24 a GPU integer result rounds, and the GPU BitwiseAnd/Or/Xor kernel also clamps its
 operands to the int32 range; the CPU op computes int64 values exactly. Two int64 forms are not computed
 in float at all: a Binary `Div` with an Int64-typed operand (the CPU truncates toward zero, 7 / 2 = 3)
 and a `Pow` with an Int64-typed base (an integer power, 2^−1 = 0) keep the CPU op on a GPU plan, listed
 in the support report as `Binary: integer Div on an int64 operand` / `Binary: integer Pow on an int64
-base` — a CPU segment and its boundary round trip. These decisions read the recorded element type: an int64
-intermediate the importer did not type stays on the float kernel, and a Mod whose only integer evidence
-is an INT32 / INT16 / UINT16 initializer (imported as Float32) computes the float remainder (a zero
-divisor under `fmod` 1 is NaN rather than 0). Outside the integer regions, a data tensor that stays
+base` — a CPU segment and its boundary round trip. Whether an operand is int64 is resolved from its
+producers, so a computed int64 operand (an Add of int64 inputs, a bitwise result, a Cast to INT64) keeps
+the CPU op too. Such an operand computed on the GPU crosses into that CPU segment as float lanes, which the
+CPU op divides and raises in float; the integer answer holds when the whole int64 chain runs on the CPU (a
+tiny GPU island folds to the CPU). A Mod whose only integer evidence is an INT32 / INT16 / UINT16
+initializer (imported as Float32) computes the float remainder (a zero divisor under `fmod` 1 is NaN rather
+than 0). Outside the integer regions, a data tensor that stays
 fp16 under `Low` / `Normal` changes ArgMax/ArgMin on near-ties and past 65504, as it changes any other
 consumer.
 

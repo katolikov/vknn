@@ -927,8 +927,9 @@ TEST(IntegerArithmeticPins, Nc4ConcatReadingAConstantPartKeepsTheSegmentPrecisio
 TEST(IntegerArithmeticPins, KernelsReadingAConstantThroughTheSegmentBufferKeepTheSegmentPrecision) {
     // An NC4HW4 Split and a ReduceSum read a constant operand 0 through the segment's fp16-filled
     // activation buffer, so neither is pinned even when an integer Add reads its result: the Add reads it
-    // through one fp16 -> fp32 bridge. (Const folding removes such all-constant nodes on the load path;
-    // the rule keeps a node that survives it from reading fp16 bytes as fp32.)
+    // through one fp16 -> fp32 bridge, and the Split's other part, an integer graph output, reaches the
+    // output's layout convert through another. (Const folding removes such all-constant nodes on the load
+    // path; the rule keeps a node that survives it from reading fp16 bytes as fp32.)
     {
         Graph    g;
         TensorId source = addInt64Initializer(g, "source", {1, 8, 2, 2}, filledElements(Shape {1, 8, 2, 2}, kBeyondHalfRange));
@@ -947,7 +948,7 @@ TEST(IntegerArithmeticPins, KernelsReadingAConstantThroughTheSegmentBufferKeepTh
         EXPECT_FALSE(g.desc(head).storeFp32);
         EXPECT_FALSE(g.desc(tail).storeFp32);
         EXPECT_TRUE(g.desc(sum).storeFp32);
-        EXPECT_EQ(countNodes(g, OpType::ConvertDtype), 1);
+        EXPECT_EQ(countNodes(g, OpType::ConvertDtype), 2);
     }
     {
         Graph    g;

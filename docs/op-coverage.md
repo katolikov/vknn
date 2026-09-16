@@ -74,13 +74,18 @@ GreaterEqual / Less / LessEqual comparing integers, and the value-preserving reg
 converts, Identity, metadata reshapes, Cast to an integer type, Where's values, and the movement and
 selection ops Slice, Transpose, Expand, Tile, Split, Gather, Pad, DepthToSpace, ChannelShuffle,
 ScatterND, TopK's values and Concat), so an integer graph input packs at fp32 and an integer result
-reaches a graph output or the next integer op without an fp16 narrowing. A node reading a constant
+reaches a graph output or the next integer op without an fp16 narrowing; a graph output holding integers
+seeds the region too, so a value only movement ops carry to it stays exact. A node reading a constant
 operand through the segment's fp16-filled activation buffer (an NC4HW4 channel Concat with a constant
-part) stays at the segment's precision. Past ±2^24 a GPU result rounds while the CPU op stays
-exact. Two int64 forms keep the CPU op on a GPU plan instead of computing in float: a Binary `Div` with an
-Int64-typed operand and a `Pow` with an Int64-typed base (support-report reasons `Binary: integer Div on
-an int64 operand` / `Binary: integer Pow on an int64 base`). Both refusals read the tensor's recorded
-dtype, so an int64 intermediate the importer did not type stays on the float kernel.
+part) stays at the segment's precision, and so does every runtime part it reads. Past ±2^24 a GPU result
+rounds while the CPU op stays exact. Two int64 forms keep the CPU op on a GPU plan instead of computing in
+float: a Binary `Div` with an int64 operand and a `Pow` with an int64 base (support-report reasons
+`Binary: integer Div on an int64 operand` / `Binary: integer Pow on an int64 base`). An IR dtype label
+types only graph inputs, graph outputs, initializers and a few stamped intermediates, so whether a tensor
+holds integers, and whether the CPU stores it as int64, is resolved from its producers
+(`import/integer_elements.h`: a Cast to an integer type, Shape, an int64 Add or bitwise result, carried
+through the movement ops); both refusals, the Mod integer mode and pointwise fusion (which never fuses an
+op reading or writing integer values) read that resolution.
 
 BitShift and BitwiseNot results depend on the ONNX element width, which the IR dtype does not record, so
 the ONNX importer stamps two VKNN attributes on those nodes: `int_bits` (8 / 16 / 32 / 64) and

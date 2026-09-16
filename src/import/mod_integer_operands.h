@@ -5,9 +5,9 @@
 // division by zero undefined; the engine defines it as 0) where a float T gives NaN for fmod 1. The
 // engine carries INT32, INT8 and UINT8 values in fp32 lanes on the CPU and in float lanes on the GPU,
 // so a runtime dtype does not say which T the model declared. This resolver reads it from the graph
-// instead, and the CPU kernel (backend/cpu/ops/mod.cpp), the Vulkan kernel
-// (backend/vulkan/ops/mod.cpp) and the fp32 pin of integer results (pinIntegerResultsFp32) share it,
-// so all three agree on every node.
+// instead (import/integer_elements.h, ElementFact::IntegerValues), and the CPU kernel
+// (backend/cpu/ops/mod.cpp), the Vulkan kernel (backend/vulkan/ops/mod.cpp) and the fp32 pin of integer
+// results (pinIntegerResultsFp32) share it, so all three agree on every node.
 #pragma once
 #include "vknn/graph.h"
 #include <vector>
@@ -16,24 +16,14 @@ namespace vknn {
 
     /// Index of the node writing each tensor (the last writer), -1 for a tensor no node writes (graph
     /// inputs, initializers), the convention of pinIntegerResultsFp32's producer index. Sized to
-    /// `g.tensors`.
+    /// `g.tensors` (tensorProducers).
     std::vector<int> modTensorProducers(const Graph &g);
 
-    /// Whether Mod node `mod` computes on an integer element type. True when the result's declared
-    /// dtype is an integer, or when either operand resolves to one:
-    ///  - a tensor whose dtype is Int64, Int32, Int8 or UInt8 (graph inputs, Int64 and 8-bit
-    ///    initializers, a declared graph output, an import-stamped intermediate);
-    ///  - the output of a Cast to an integer type, Shape, ArgMax, ArgMin, TopK's indices, a
-    ///    ConstantOfShape with an integer fill, or a BitShift/BitwiseAnd/BitwiseOr/BitwiseXor/BitwiseNot
-    ///    (integer-only ops);
-    ///  - the output of an op whose result shares its data operands' element type, when one of those
-    ///    operands resolves to an integer: layout and dtype converts, Identity, Reshape, Flatten,
-    ///    Squeeze, Unsqueeze, Slice, Transpose, Expand, Tile, Split, Gather, Pad, DepthToSpace,
-    ///    ScatterND, Range and TopK's values (operand 0); Where (operands 1 and 2); Concat, Add, Mod
-    ///    and Binary (every operand, Pow its base alone).
-    /// Everything else resolves to not integer: a float-declared graph input or initializer (an INT32,
-    /// INT16 or UINT16 initializer imports as Float32 and is not recovered), a Cast to a float type, a
-    /// producer hosting a fused pointwise chain, and every other op. The walk visits each tensor once.
+    /// Whether Mod node `mod` computes on an integer element type: its result's declared dtype is Int64,
+    /// Int32, Int8 or UInt8, or its dividend or divisor holds integer element values
+    /// (ElementFact::IntegerValues, whose rules integer_elements.h lists). A float-declared graph input or
+    /// initializer (an INT32, INT16 or UINT16 initializer imports as Float32 and is not recovered), a Cast
+    /// to a float type and a producer hosting a fused pointwise chain do not.
     /// @param producers modTensorProducers(g), or an equivalent last-writer index.
     bool modOperandsAreInteger(const Graph &g, const Node &mod, const std::vector<int> &producers);
 

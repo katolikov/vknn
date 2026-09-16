@@ -1,4 +1,5 @@
 #include "core/matmul_tile.h"
+#include "import/integer_elements.h"
 #include "passes_internal.h"
 #include <map>
 
@@ -60,11 +61,30 @@ namespace vknn {
         return true;
     }
 
+    // Per-tensor element facts the eligibility test reads: a tensor holding integer element values or
+    // stored as int64 on the CPU (import/integer_elements.h), resolved once over the graph the pass
+    // starts from. A tensor the pass creates later is the float output of a unit.
+    struct PwIntegerTensors {
+        std::vector<char> integerValues;
+        std::vector<char> int64Storage;
+
+        explicit PwIntegerTensors(const Graph &g):
+            integerValues(resolveElementFact(g, ElementFact::IntegerValues)), int64Storage(resolveElementFact(g, ElementFact::Int64Storage)) {
+        }
+        bool integer(TensorId t) const {
+            return t >= 0 && (size_t) t < integerValues.size() && (integerValues[(size_t) t] != 0 || int64Storage[(size_t) t] != 0);
+        }
+    };
+
     // Per-element ops eligible to join a fused-pointwise unit. Every input and the output must be
     // float-typed (comparisons on int/shape tensors and int Casts stay out), the output shape must
-    // be resolved, and the output must not be fp32-pinned. The eligible OpType set is the descriptor's
-    // pwMember flag; the shape/dtype/bound checks below are the per-node part.
-    static bool pwEligibleNode(const Graph &g, const Node &n) {
+    // be resolved, and the output must not be fp32-pinned. A dtype label types only graph inputs,
+    // initializers and stamped intermediates, so an operand or output holding integer element values or
+    // int64 storage (PwIntegerTensors) keeps its node out as well: the CPU fused kernel reads every
+    // operand as fp32 lanes, and a unit's float steps would cut the integer region the fp32 pin keeps
+    // exact (pinIntegerResultsFp32). The eligible OpType set is the descriptor's pwMember flag; the
+    // shape/dtype/bound checks below are the per-node part.
+    static bool pwEligibleNode(const Graph &g, const Node &n, const PwIntegerTensors &integerTensors) {
         if (!opDescriptor(n.type).pwMember)
         {
             return false;
@@ -74,13 +94,13 @@ namespace vknn {
             return false;
         }
         const TensorDesc &od = g.desc(n.outputs[0]);
-        if (od.shape.empty() || !pwFloatDtype(od.dtype) || pwTensorIsFp32(g, n.outputs[0]))
+        if (od.shape.empty() || !pwFloatDtype(od.dtype) || pwTensorIsFp32(g, n.outputs[0]) || integerTensors.integer(n.outputs[0]))
         {
             return false;
         }
         for (TensorId t: n.inputs)
         {
-            if (t != kNoTensor && !pwFloatDtype(g.desc(t).dtype))
+            if (t != kNoTensor && (!pwFloatDtype(g.desc(t).dtype) || integerTensors.integer(t)))
             {
                 return false;
             }
@@ -705,9 +725,10 @@ namespace vknn {
     /// Legality: regions are convex — an external node that transitively depends on a region value
     /// and feeds a later region member (only possible inside the region's node-index interval, as
     /// node order approximates topological order) excludes the fed member. Chains never grow across
-    /// fp32-pinned tensors, int-typed tensors, unresolved shapes, or runtime Clip bounds. A
-    /// standalone unit is emitted at the LAST member's slot, so every operand is produced before it;
-    /// external consumers of exported values are re-ordered by the load-time topoSort when needed.
+    /// fp32-pinned tensors, tensors holding integer values or int64 storage, unresolved shapes, or
+    /// runtime Clip bounds. A standalone unit is emitted at the LAST member's slot, so every operand is
+    /// produced before it; external consumers of exported values are re-ordered by the load-time
+    /// topoSort when needed.
     ///
     /// Rounding discipline (strictFuse): in strict mode the unit's entry value is rounded to the
     /// byte the producer would store and every step result passes TO_STORE
@@ -760,8 +781,9 @@ namespace vknn {
         };
         rebuild();
 
-        std::set<int> removed;
-        int           fused = 0, attached = 0;
+        std::set<int>          removed;
+        int                    fused = 0, attached = 0;
+        const PwIntegerTensors integerTensors(g);
 
         // readers built once against the ORIGINAL nodes; emission only removes members and rewires
         // through preserved tensor ids, so reader NODE INDICES stay valid (removed ones are skipped).
@@ -780,7 +802,7 @@ namespace vknn {
         std::vector<char> visited(g.nodes.size(), 0);
         for (size_t seed = 0; seed < g.nodes.size(); ++seed)
         {
-            if (visited[seed] || removed.count((int) seed) || !pwEligibleNode(g, g.nodes[seed]))
+            if (visited[seed] || removed.count((int) seed) || !pwEligibleNode(g, g.nodes[seed], integerTensors))
             {
                 continue;
             }
@@ -802,7 +824,8 @@ namespace vknn {
                         continue;
                     }
                     int p = (t >= 0 && t < (TensorId) producer.size()) ? producer[t] : -1;
-                    if (p >= 0 && !visited[p] && !removed.count(p) && !inComp.count(p) && pwEligibleNode(g, g.nodes[p]) && g.desc(g.nodes[p].outputs[0]).shape == run)
+                    if (p >= 0 && !visited[p] && !removed.count(p) && !inComp.count(p) && pwEligibleNode(g, g.nodes[p], integerTensors) &&
+                        g.desc(g.nodes[p].outputs[0]).shape == run)
                     {
                         inComp.insert(p);
                         work.push_back(p);
@@ -813,7 +836,8 @@ namespace vknn {
                 {
                     for (int j: readers[ot])
                     {
-                        if (!visited[j] && !removed.count(j) && !inComp.count(j) && pwEligibleNode(g, g.nodes[j]) && g.desc(g.nodes[j].outputs[0]).shape == run)
+                        if (!visited[j] && !removed.count(j) && !inComp.count(j) && pwEligibleNode(g, g.nodes[j], integerTensors) &&
+                            g.desc(g.nodes[j].outputs[0]).shape == run)
                         {
                             inComp.insert(j);
                             work.push_back(j);

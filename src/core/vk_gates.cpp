@@ -9,6 +9,7 @@
 #include "core/bitwise_attrs.h"
 #include "core/fused_attention.h"
 #include "core/fused_dwpw.h"
+#include "import/integer_elements.h"
 #include "vknn/binary_type.h"
 #include "vknn/dtype.h"
 #include "vknn/node.h"
@@ -617,15 +618,18 @@ namespace vknn {
             // An int64 operand makes the CPU op compute exact integer Div and Pow (int64_arithmetic.h): a
             // quotient truncated toward zero, and a power typed by its int64 base (2^-1 == 0). The GPU
             // kernels divide and raise in float (7 / 2 == 3.5, 2^-1 == 0.5), so those nodes keep the CPU
-            // op. A float base raised to an int64 exponent is a float power on both backends and stays
-            // on the GPU; Add/Sub/Mul/Max/Min yield the integer result whenever the operands and the
-            // result fit the float lane exactly.
-            if (nd.type == OpType::Binary)
+            // op. Whether an operand is int64 is the CPU's runtime storage choice, which a dtype label
+            // records only on graph inputs, initializers and stamped intermediates, so it is resolved
+            // from the producers (ElementFact::Int64Storage: a Shape, a Cast to an integer type, an int64
+            // Add or bitwise result, carried through the movement ops). A float base raised to an int64
+            // exponent is a float power on both backends and stays on the GPU; Add/Sub/Mul/Max/Min yield
+            // the integer result whenever the operands and the result fit the float lane exactly.
+            if (nd.type == OpType::Binary && ((BinaryType) nd.subOp == BinaryType::Div || (BinaryType) nd.subOp == BinaryType::Pow))
             {
-                const BinaryType op       = (BinaryType) nd.subOp;
-                const bool       lhsInt64 = g.desc(nd.inputs[0]).dtype == DType::Int64;
-                const bool       rhsInt64 = g.desc(nd.inputs[1]).dtype == DType::Int64;
-                if (op == BinaryType::Div && (lhsInt64 || rhsInt64))
+                ElementFactResolver int64Storage(g, ElementFact::Int64Storage);
+                const BinaryType    op       = (BinaryType) nd.subOp;
+                const bool          lhsInt64 = int64Storage.holds(nd.inputs[0]);
+                if (op == BinaryType::Div && (lhsInt64 || int64Storage.holds(nd.inputs[1])))
                 {
                     return refuse(whyNot, "Binary: integer Div on an int64 operand");
                 }

@@ -327,13 +327,15 @@ namespace vknn {
     // operands of those Mod and bitwise ops; integer ArgMax/ArgMin/TopK data; every arithmetic node above
     // reading an integer value (its result, its operands, and Pow's exponent); and the operands of an
     // Equal/Greater/GreaterEqual/Less/LessEqual reading an integer value, with its 0/1 result pinned without
-    // spreading so the comparison runs fp32. From every seed the pin floods the region: toward sources
+    // spreading so the comparison runs fp32; and every graph output holding an integer value, so a value
+    // that only movement ops carry to the output (a Gather from an int64 table, a Where or Concat of int64
+    // inputs) stays exact. From every seed the pin floods the region: toward sources
     // through the movement ops, the arithmetic ops and Cast (so an integer graph input packs at fp32), and
     // toward consumers through the movement and arithmetic ops and a Cast to an integer type, so an integer
     // result reaches a graph output or the next integer op without an fp16 narrowing. A Cast's operand is
     // followed toward its source only, and a TopK's indices never pull its data in. An integer value no
-    // node computes on (an int64 mask read only through reshapes into a Cast to float) keeps its storage
-    // precision, and a graph with no integer value pins nothing. A tensor is pinned while it can take fp32
+    // node computes on and no graph output holds (an int64 mask read only through reshapes into a Cast to
+    // float) keeps its storage precision, and a graph with no integer value pins nothing. A tensor is pinned while it can take fp32
     // storage: flat, or NC4HW4 written by no fp16-only kernel (a graph input, a layout convert, a metadata
     // reshape, a Cast, Add, Binary, Unary, Concat, Split or ChannelShuffle); the region stops at an NC4HW4
     // conv-family output, which markFp32 bridges, and at a node whose kernel reads a constant operand
