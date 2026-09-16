@@ -1,22 +1,11 @@
 // Integer element-type resolution for ONNX Mod; see mod_integer_operands.h for the rules.
 #include "import/mod_integer_operands.h"
+#include "import/onnx/onnx_types.h"
 #include "vknn/binary_type.h"
 #include <algorithm>
 
 namespace vknn {
     namespace {
-
-        // ONNX TensorProto.DataType codes: FLOAT (the Cast `to` default) and the integer element types a
-        // Cast can target. BOOL is not one of them: Mod is not defined on booleans.
-        constexpr int64_t kOnnxFloat  = 1;
-        constexpr int64_t kOnnxUInt8  = 2;
-        constexpr int64_t kOnnxInt8   = 3;
-        constexpr int64_t kOnnxUInt16 = 4;
-        constexpr int64_t kOnnxInt16  = 5;
-        constexpr int64_t kOnnxInt32  = 6;
-        constexpr int64_t kOnnxInt64  = 7;
-        constexpr int64_t kOnnxUInt32 = 12;
-        constexpr int64_t kOnnxUInt64 = 13;
 
         // Operand count of ONNX Mod: dividend (input 0) and divisor (input 1).
         constexpr size_t kModOperandCount = 2;
@@ -33,11 +22,6 @@ namespace vknn {
 
         bool integerDType(DType dtype) {
             return dtype == DType::Int64 || dtype == DType::Int32 || dtype == DType::Int8 || dtype == DType::UInt8;
-        }
-
-        bool castTargetsIntegerElements(const Node &cast) {
-            const int64_t to = cast.attr.geti("to", kOnnxFloat);
-            return to == kOnnxUInt8 || to == kOnnxInt8 || to == kOnnxUInt16 || to == kOnnxInt16 || to == kOnnxInt32 || to == kOnnxInt64 || to == kOnnxUInt32 || to == kOnnxUInt64;
         }
 
         // What a producer's output says about its element type.
@@ -66,7 +50,7 @@ namespace vknn {
             switch (producer.type)
             {
                 case OpType::Cast:
-                    return castTargetsIntegerElements(producer) ? integer : ProducerElementType {};
+                    return onnx::castTargetsIntegerElementType(producer) ? integer : ProducerElementType {};
                 case OpType::Shape:
                 case OpType::ArgMax:
                 case OpType::ArgMin:

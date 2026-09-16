@@ -103,6 +103,32 @@ namespace vknn { namespace onnx {
         return dt == (int32_t) t;
     }
 
+    /// Whether `elementType`, a TensorProto.DataType value such as a Cast node's `to` attribute, names an
+    /// integer element type: UINT8, INT8, UINT16, INT16, INT32, INT64, UINT32 or UINT64. BOOL is not one (a
+    /// Cast to BOOL is a truth test, not a truncation).
+    inline constexpr bool isIntegerElementType(int64_t elementType) {
+        switch ((OnnxType) elementType)
+        {
+            case OnnxType::Uint8:
+            case OnnxType::Int8:
+            case OnnxType::Uint16:
+            case OnnxType::Int16:
+            case OnnxType::Int32:
+            case OnnxType::Int64:
+            case OnnxType::Uint32:
+            case OnnxType::Uint64:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// Whether Cast node `cast` targets an integer element type (isIntegerElementType of its `to`, whose
+    /// ONNX default is FLOAT).
+    inline bool castTargetsIntegerElementType(const Node &cast) {
+        return isIntegerElementType(cast.attr.geti("to", (int64_t) OnnxType::Float));
+    }
+
     // ONNX -> vknn compute dtype. FLOAT / DOUBLE narrow to fp32; integers keep their width; anything
     // else is treated as fp32.
     inline DType dtypeFromElem(int32_t el) {

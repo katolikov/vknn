@@ -956,6 +956,40 @@ TEST(CastToBool, IntegerTargetsStillTruncate) {
     EXPECT_EQ(narrow, (std::vector<int32_t> {2, -2, 0, 0, 16777216}));
 }
 
+TEST(CastToBool, IntegerTargetsSaturateNonFiniteAndOutOfRangeFloats) {
+    // A float -> integer conversion outside the int64 range is undefined in C++, so the CPU op defines it:
+    // NaN reads 0 and every value at or beyond +-2^63 (infinities included) saturates to INT64_MAX /
+    // INT64_MIN, the same on every platform. The largest fp32 below 2^63 still converts exactly.
+    const float                nan            = std::numeric_limits<float>::quiet_NaN();
+    const float                inf            = std::numeric_limits<float>::infinity();
+    const float                twoToThe63     = 9223372036854775808.0f;
+    const float                largestBelow63 = std::nextafter(twoToThe63, 0.0f);
+    const std::vector<float>   values {nan, -nan, inf, -inf, 1.0e20f, -1.0e20f, twoToThe63, -twoToThe63, largestBelow63, -largestBelow63, -2.75f};
+    const std::vector<int64_t> expected {
+        0, 0, kInt64Max, kInt64Min, kInt64Max, kInt64Min, kInt64Max, kInt64Min, (int64_t) 9223371487098961920LL, -(int64_t) 9223371487098961920LL, -2};
+    const Shape shape {(int64_t) values.size()};
+    {
+        Graph    g;
+        TensorId x = addGraphInput(g, "x", shape, DType::Float32);
+        TensorId y = addGraphOutput(g, "y", DType::Int64);
+        addCast(g, "to_int64", x, y, kOnnxInt64);
+        std::vector<IOTensor> outs = runOnCpu(std::move(g), {floatTensor("x", shape, values)});
+        ASSERT_EQ(outs.size(), 1u);
+        EXPECT_EQ(int64Values(outs[0]), expected) << "CPU Session";
+    }
+    {
+        Graph    g;
+        TensorId x = addFloatConstant(g, "x", shape, values);
+        TensorId y = addGraphOutput(g, "y", DType::Int64);
+        addCast(g, "to_int64", x, y, kOnnxInt64);
+        inferShapes(g, 1);
+        constFold(g);
+        ASSERT_TRUE(g.isInitializer(y)) << "the Cast of a constant folds";
+        const int64_t *folded = g.initializers[y].i64();
+        EXPECT_EQ(std::vector<int64_t>(folded, folded + values.size()), expected) << "constFold";
+    }
+}
+
 TEST(CastToBool, ShaderBoolModeTranscriptionMatchesCpuOracleOnFp32Patterns) {
     // Stratified fp32 bit patterns: both signs x every biased exponent x mantissas covering zero, the
     // lowest bits, the quiet-NaN bit, all ones and a spread of mixed patterns. Exponent 0 yields +-0 and

@@ -9,6 +9,7 @@
 // scalar/narrow targets on the GPU (the int64 lanes decode to compute-precision float at the pack
 // boundary); INT16/UINT16 are not distinct vknn dtypes (they map to fp32 storage) and saturate here.
 #include "backend/vulkan/ops/cast_modes.h"
+#include "import/onnx/onnx_types.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 #include <limits>
@@ -20,7 +21,7 @@ namespace vknn {
         constexpr uint32_t kCastLocalSize = 256;
 
         // ONNX TensorProto.DataType code of BOOL.
-        constexpr int64_t kOnnxBool = 9;
+        constexpr int64_t kOnnxBool = (int64_t) onnx::OnnxType::Bool;
 
         struct CastOp: VulkanOp {
             struct PC {

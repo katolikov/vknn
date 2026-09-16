@@ -91,19 +91,26 @@ namespace vknn { namespace bitwise {
         return width;
     }
 
-    /// Read a BitShift node's `direction` (a string attribute, so read with gets, never geti).
-    /// @throws Error(InvalidArgument) naming the node when it is not exactly "LEFT" or "RIGHT".
-    inline ShiftDirection readShiftDirection(const Node &node) {
+    /// Requirement text of the BitShift `direction` attribute: vkNodeGate's refusal reason for a node that
+    /// violates it, and the message of the kernels' InvalidArgument.
+    inline constexpr const char *kDirectionRequirement = "direction must be LEFT or RIGHT";
+
+    /// Whether a BitShift node's `direction` (a string attribute, so read with gets, never geti) is exactly
+    /// kDirectionLeft or kDirectionRight.
+    inline bool shiftDirectionValid(const Node &node) {
         const std::string direction = node.attr.gets(kDirectionAttr, "");
-        if (direction == kDirectionLeft)
+        return direction == kDirectionLeft || direction == kDirectionRight;
+    }
+
+    /// Read a BitShift node's `direction`.
+    /// @throws Error(InvalidArgument) naming the node when it is not exactly "LEFT" or "RIGHT"
+    ///         (shiftDirectionValid).
+    inline ShiftDirection readShiftDirection(const Node &node) {
+        if (!shiftDirectionValid(node))
         {
-            return ShiftDirection::Left;
+            throw Error(Status::InvalidArgument, std::string(opTypeName(node.type)) + " '" + node.name + "': " + kDirectionRequirement + " (got '" + node.attr.gets(kDirectionAttr, "") + "')");
         }
-        if (direction == kDirectionRight)
-        {
-            return ShiftDirection::Right;
-        }
-        throw Error(Status::InvalidArgument, std::string(opTypeName(node.type)) + " '" + node.name + "': " + kDirectionAttr + " must be LEFT or RIGHT (got '" + direction + "')");
+        return node.attr.gets(kDirectionAttr, "") == kDirectionLeft ? ShiftDirection::Left : ShiftDirection::Right;
     }
 
 }} // namespace vknn::bitwise

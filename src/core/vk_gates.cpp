@@ -316,10 +316,9 @@ namespace vknn {
             // which reports it as InvalidArgument at run.
             if (nd.type == OpType::BitShift)
             {
-                const std::string direction = nd.attr.gets("direction", "");
-                if (direction != "LEFT" && direction != "RIGHT")
+                if (!bitwise::shiftDirectionValid(nd))
                 {
-                    return refuse(whyNot, "BitShift: direction must be LEFT or RIGHT");
+                    return refuse(whyNot, std::string("BitShift: ") + bitwise::kDirectionRequirement);
                 }
             }
             const char *requirement = nullptr;

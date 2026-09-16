@@ -1,4 +1,5 @@
 #include "import/mod_integer_operands.h"
+#include "import/onnx/onnx_types.h"
 #include "passes_internal.h"
 #include "vknn/binary_type.h"
 #include "vknn/reduce_type.h"
@@ -373,22 +374,6 @@ namespace vknn {
         // follows the divisor; fmod == 1 is the C fmod, integer-valued only on integer operands.
         constexpr int64_t kModIntegerRemainder = 0;
 
-        // ONNX TensorProto.DataType codes: FLOAT (the Cast `to` default) and the integer element types.
-        constexpr int64_t kOnnxFloat  = 1;
-        constexpr int64_t kOnnxUInt8  = 2;
-        constexpr int64_t kOnnxInt8   = 3;
-        constexpr int64_t kOnnxUInt16 = 4;
-        constexpr int64_t kOnnxInt16  = 5;
-        constexpr int64_t kOnnxInt32  = 6;
-        constexpr int64_t kOnnxInt64  = 7;
-        constexpr int64_t kOnnxUInt32 = 12;
-        constexpr int64_t kOnnxUInt64 = 13;
-
-        bool castTargetsInteger(const Node &nd) {
-            const int64_t to = nd.attr.geti("to", kOnnxFloat);
-            return to == kOnnxUInt8 || to == kOnnxInt8 || to == kOnnxUInt16 || to == kOnnxInt16 || to == kOnnxInt32 || to == kOnnxInt64 || to == kOnnxUInt32 || to == kOnnxUInt64;
-        }
-
         // A graph-declared wide integer dtype (graph inputs, graph outputs and initializers carry theirs; a
         // runtime intermediate is typed only where an import rule stamps it). 8-bit values are exact in fp16,
         // and an INT8/UINT8 tensor binds as fp32 and computes as a float on the CPU.
@@ -667,7 +652,7 @@ namespace vknn {
             switch (nd.type)
             {
                 case OpType::Cast:
-                    return castTargetsInteger(nd);
+                    return onnx::castTargetsIntegerElementType(nd);
                 case OpType::Shape:
                 case OpType::ArgMax:
                 case OpType::ArgMin:
@@ -1023,7 +1008,7 @@ namespace vknn {
                 switch (dataSlots.flow)
                 {
                     case IntegerFlow::Casts:
-                        if (!castTargetsInteger(rn))
+                        if (!onnx::castTargetsIntegerElementType(rn))
                         {
                             continue; // a float result leaves the integer region
                         }
