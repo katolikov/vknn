@@ -673,7 +673,7 @@ TEST(BoundaryInt8Staging, HostLaneDecodeGivesEachDtypeItsValue) {
     const std::vector<int32_t> ints32 {0, -1, 16777216, -16777217, std::numeric_limits<int32_t>::max(), std::numeric_limits<int32_t>::min(), 123456};
     const std::vector<int64_t> ints64 {0, -1, int64_t(1) << 40, -(int64_t(1) << 24), std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::min(),
                                        99};
-    const std::vector<uint8_t>    int64Bytes = lanes(ints64);
+    const std::vector<uint8_t> int64Bytes = lanes(ints64);
     const std::vector<DecodeCase> cases {
         {DType::Float32, float32Bytes, float32Values},
         {DType::Float16, lanes(halfPatterns), halfValues},
