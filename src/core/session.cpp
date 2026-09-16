@@ -2,9 +2,9 @@
 #include "../import/passes.h"
 #include "backend/cpu/int64_arithmetic.h"
 #include "core/boundary_convert_rule.h"
+#include "core/flat_layout_rule.h"
 #include "core/quant_weights.h"
 #include "vknn/logging.h"
-#include "vknn/op_descriptor.h"
 #include "vknn/version.h"
 #include <algorithm>
 #include <cctype>
@@ -568,11 +568,8 @@ namespace vknn {
         // assignment and the converts that pass splices. Honouring a request to skip it on a graph
         // that contains one leaves those nodes indexing NC4HW4 buffers densely -- and the only ways
         // out of that are a crash or a CPU fallback, and the engine allows neither. So the request is
-        // honoured exactly where it is safe: on a graph whose every op has an NC4HW4 kernel.
-        const bool graphNeedsFlat = std::any_of(graph_.nodes.begin(), graph_.nodes.end(), [](const Node &nd) {
-            const LayoutClass k = opDescriptor(nd.type).layout;
-            return k == LayoutClass::Flat || k == LayoutClass::ShapeDependent;
-        });
+        // honoured only on a graph of Nc4-class ops alone (core/flat_layout_rule.h).
+        const bool graphNeedsFlat = graphKeepsFlatLayoutPass(graph_);
         if (!cfg_.flatLayout() && graphNeedsFlat)
         {
             VKNN_INFO << "flat layout: keeping the pass on -- this graph has op(s) whose only GPU kernel reads flat row-major";

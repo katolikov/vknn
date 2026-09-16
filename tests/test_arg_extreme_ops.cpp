@@ -19,6 +19,7 @@
 #include "backend/cpu/cpu_backend.h"
 #include "backend/cpu/parallel.h"
 #include "backend/vulkan/ops/arg_extreme_plan.h"
+#include "core/flat_layout_rule.h"
 #include "core/vk_gates.h"
 #include "import/passes.h"
 #include "vknn/dtype.h"
@@ -1118,12 +1119,29 @@ TEST(ArgExtremePlan, GateRefusesExactlyTheGeometriesThePlanCannotRun) {
     }
 }
 
-TEST(ArgExtremePlan, FlatLayoutClassKeepsTheSessionLayoutPassOn) {
-    // The kernel reads and writes flat row-major only. The session keeps the flat-layout pass on for
-    // any graph holding a LayoutClass::Flat op, even when Hint::FlatLayout asks to skip it, so an
-    // ArgMax/ArgMin node never reaches the plan without flat tensors.
+TEST(ArgExtremePlan, GraphWithArgMaxKeepsTheSessionLayoutPass) {
+    // The kernel reads and writes flat row-major only. The session keeps the flat-layout pass on for any
+    // graph holding a Flat or ShapeDependent op (graphKeepsFlatLayoutPass), even when Hint::FlatLayout asks
+    // to skip it, so an ArgMax/ArgMin node never reaches the plan without flat tensors. The rule reads the
+    // descriptor class: an Add keeps the pass on too, though a same-shape rank-4 Add runs NC4HW4, and only a
+    // graph of Nc4-class ops lets the request skip it.
     EXPECT_EQ(opDescriptor(OpType::ArgMax).layout, LayoutClass::Flat);
     EXPECT_EQ(opDescriptor(OpType::ArgMin).layout, LayoutClass::Flat);
+    auto graphOf = [](const std::vector<OpType> &types) {
+        Graph g;
+        for (OpType type: types)
+        {
+            Node node;
+            node.type = type;
+            g.nodes.push_back(node);
+        }
+        return g;
+    };
+    EXPECT_TRUE(graphKeepsFlatLayoutPass(graphOf({OpType::Conv, OpType::Relu, OpType::ArgMax})));
+    EXPECT_TRUE(graphKeepsFlatLayoutPass(graphOf({OpType::Conv, OpType::Relu, OpType::ArgMin})));
+    EXPECT_TRUE(graphKeepsFlatLayoutPass(graphOf({OpType::Conv, OpType::Add, OpType::GlobalAvgPool})));
+    EXPECT_TRUE(graphKeepsFlatLayoutPass(graphOf({OpType::Conv, OpType::Clip, OpType::MaxPool})));
+    EXPECT_FALSE(graphKeepsFlatLayoutPass(graphOf({OpType::Conv, OpType::Relu, OpType::MaxPool, OpType::GlobalAvgPool})));
 }
 
 TEST(ArgExtremeShader, TranscriptionMatchesCpuOracleInBothStorageVariants) {

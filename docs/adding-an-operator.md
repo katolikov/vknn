@@ -398,8 +398,11 @@ The table is sized by `kMaxOp`, the last `OpType` enumerator with a row. A new o
 `opDescriptor` lookup then fails with a message naming the op, and a lookup past `kMaxOp` reads the
 all-default row. `LayoutClassAgreesWithGpuFlatNode` loops through the last enumerator, so extend its
 bound in `tests/test_support_report.cpp` to the new value as well. A graph containing any `Flat` or
-`ShapeDependent` op keeps the flat-layout pass on even when `Hint::FlatLayout` is Off, because that
-op's kernel has no NC4HW4 plan.
+`ShapeDependent` op keeps the flat-layout pass on even when `Hint::FlatLayout` is Off
+(`graphKeepsFlatLayoutPass`, `core/flat_layout_rule.h`): a `Flat` op's kernel has no NC4HW4 plan, and the
+rule reads the class rather than the node, so a `ShapeDependent` op (Add, Binary, Concat, ...) keeps the
+pass on even where its node runs an NC4HW4 kernel. Only a graph of `Nc4` ops lets `Hint::FlatLayout` Off
+skip the pass.
 
 The Vulkan backend's `supports()` then returns `true` for `LeakyRelu`
 (because `VkOpRegistry::instance().has(LeakyRelu)` is true and `vkKernelDeclared`
