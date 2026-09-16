@@ -1,0 +1,89 @@
+#version 450
+#define VKNN_NO_RTE 1 // stores round via vknnRte16, the integer-exact store of the flat elementwise kernels
+#include "precision.glsl"
+// Flat broadcasting ONNX Mod: d = modRemainder(a, b, fmodMode), bit-identical to the CPU oracle
+// (src/backend/cpu/mod_remainder.h modRemainderFloat).
+//  - fmodMode 1 (C remainder): exact std::fmod, the sign of the dividend.
+//  - fmodMode 0 (floor remainder): a zero divisor yields +0; otherwise the exact fmod, and a nonzero
+//    remainder whose sign differs from the divisor's gains one divisor.
+// fmod is computed exactly by binary long division (no a - b * trunc(a / b), which rounds for large
+// quotients), so integer-valued operands stay exact up to the storage precision without any dtype
+// knowledge. Every NaN result is the canonical quiet NaN (kQuietNaNBits).
+// Geometry (outDim/aStride/bStride) rides a content-deduped SSBO at binding 3 (flat::uploadFlatGeom);
+// the three rank-length arrays pack back-to-back: outDim = g[0..rank), aStride = g[rank..2*rank),
+// bStride = g[2*rank..3*rank).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
+layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
+layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
+layout(std430, binding = 3) readonly  buffer G { int g[]; } geom;
+layout(push_constant) uniform PC { int rank, total, fmodMode; } pc;
+
+// ONNX Mod `fmod` value selecting the floor remainder (sign of the divisor); 1 is the C remainder.
+const int kModFloorRemainder = 0;
+// Positive quiet NaN, built from its bit pattern so no compiler folds a 0/0 expression.
+const uint kQuietNaNBits = 0x7FC00000u;
+// fp32 sign bit: the remainder takes the dividend's sign bit by bit, so a zero remainder keeps the
+// dividend's sign without depending on how a driver negates zero.
+const uint kSignBit = 0x80000000u;
+// FLT_MAX / 2: the largest fp32 value whose doubling stays finite.
+const uint kFloatMaxHalfBits = 0x7EFFFFFFu;
+// Upper bound on the doublings of the divisor magnitude. A nonzero finite fp32 magnitude lies in
+// [2^-149, 2^128) (smallest subnormal to largest finite), and a doubled step never exceeds the
+// dividend, so the step grows by at most 127 - (-149) = 276 powers of two. The halving loop then
+// runs at most one more step than the doublings.
+const int kMaxDivisorDoublings = 276;
+
+// Exact ONNX Mod remainder of one element pair. Transcribed for host testing in
+// tests/test_mod_ops.cpp (transcribedModRemainder); keep the two textually parallel.
+float modRemainder(float dividend, float divisor, int fmodMode) {
+  bool floorRemainder = fmodMode == kModFloorRemainder;
+  if (divisor == 0.0) {
+    return floorRemainder ? 0.0 : uintBitsToFloat(kQuietNaNBits);
+  }
+  if (isnan(dividend) || isnan(divisor) || isinf(dividend)) {
+    return uintBitsToFloat(kQuietNaNBits);
+  }
+  if (dividend == 0.0) {
+    return dividend; // +-0 keeps its sign, and a zero remainder takes no fix-up
+  }
+  precise float remainder = dividend; // an infinite divisor leaves a finite dividend unchanged
+  if (!isinf(divisor)) {
+    precise float magnitude = abs(dividend);
+    precise float divisorMagnitude = abs(divisor);
+    precise float step = divisorMagnitude;
+    float floatMaxHalf = uintBitsToFloat(kFloatMaxHalfBits);
+    // step = divisorMagnitude * 2^k with k the largest count keeping step <= magnitude (k = 0 when the
+    // divisor already exceeds the dividend): doubling is exact, and afterwards magnitude < 2 * step.
+    for (int doubling = 0; doubling < kMaxDivisorDoublings && step <= floatMaxHalf && step * 2.0 <= magnitude; ++doubling) {
+      step *= 2.0;
+    }
+    // Binary long division from the top step down. Each subtraction has step <= magnitude < 2 * step,
+    // so it is exact (Sterbenz), and halving a step that is still >= divisorMagnitude is exact. The
+    // loop leaves 0 <= magnitude < divisorMagnitude, the exact fmod magnitude.
+    for (int halving = 0; halving <= kMaxDivisorDoublings && step >= divisorMagnitude; ++halving) {
+      if (magnitude >= step) {
+        magnitude -= step;
+      }
+      step *= 0.5;
+    }
+    remainder = uintBitsToFloat(floatBitsToUint(magnitude) | (floatBitsToUint(dividend) & kSignBit));
+  }
+  if (floorRemainder && remainder != 0.0 && ((remainder < 0.0) != (divisor < 0.0))) {
+    remainder += divisor;
+  }
+  return remainder;
+}
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.total)) return;
+  int rem = int(gid), ai = 0, bi = 0;
+  for (int k = pc.rank - 1; k >= 0; --k) {
+    int c = rem % geom.g[k];
+    rem /= geom.g[k];
+    ai += c * geom.g[pc.rank + k];
+    bi += c * geom.g[2 * pc.rank + k];
+  }
+  d[gid] = TO_STORE(modRemainder(float(a[ai]), float(b[bi]), pc.fmodMode));
+}
