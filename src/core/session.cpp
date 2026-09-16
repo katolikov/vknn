@@ -57,11 +57,12 @@ namespace vknn {
     // Internal storage (rt.dtype fp32 or int64) -> output bytes in the model's declared dtype `dst`.
     static void readbackOutput(DType dst, RtTensor &rt, int64_t elems, IOTensor &io) {
         io.dtype = dst;
-        if (dst == rt.dtype)
+        if (dst == rt.dtype && rt.host.bytes.size() == (size_t) elems * dtypeSize(dst))
         {
-            // fast path: rt.host already holds the declared dtype (fp32/fp16/uint8/...). MOVE it into the
-            // output instead of copying — rt.host is refilled from the device buffer on the next run before
-            // it is read again, so donating its storage here avoids a full-tensor copy of every output.
+            // fast path: rt.host already holds the declared dtype (fp32/fp16/uint8/...), one lane of its
+            // width per element. MOVE it into the output instead of copying — rt.host is refilled from the
+            // device buffer on the next run before it is read again, so donating its storage here avoids a
+            // full-tensor copy of every output.
             io.data      = rt.host.bytes.release();
             rt.hostValid = false;
             return;
@@ -762,12 +763,14 @@ namespace vknn {
                     // Decode the payload to integer-valued fp32 so every CPU op keeps reading host.f32():
                     // an fp16 weight converts per element, and a native int8/uint8 quant initializer (kept
                     // at 1 byte/elem by the importer to bound host memory at import) widens back to fp32
-                    // here. The int8/uint8 dtype LABEL is preserved -- an op that recovers the quant
-                    // saturation range from it still can; only fp16 relabels to fp32.
+                    // here. The pool entry is labeled Float32, the storage it now holds (constFold's pool
+                    // does the same), so a copy of it (Identity) carries fp32 lanes under an fp32 label and
+                    // readbackOutput narrows an 8-bit graph output from them. The graph desc keeps the
+                    // int8/uint8 label, which is where QuantizeLinear reads its saturation range.
                     std::vector<float> f = initFloats(graph_, id);
                     rt.host.bytes.resize(f.size() * 4);
                     std::memcpy(rt.host.bytes.data(), f.data(), f.size() * 4);
-                    rt.dtype = idt == DType::Float16 ? DType::Float32 : idt;
+                    rt.dtype = DType::Float32;
                 } else
                 {
                     rt.host  = graph_.initializers[id];

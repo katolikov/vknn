@@ -5,7 +5,9 @@
 // uint8 when no zero_point is supplied.
 //
 // vknn computes in fp32, so the integer result is written into fp32 host storage as an exact small
-// integer value (the tensor's dtype label still marks it int8/uint8). Per-tensor and per-axis forms
+// integer value, labeled Float32 like every fp32 runtime tensor; the graph desc keeps the int8/uint8/int32
+// label, which sets the saturation range here and the declared width readbackOutput narrows a graph
+// output to. Per-tensor and per-axis forms
 // both apply: a per-axis scale/zero_point (1-D of length dims[axis], `axis` attribute, negatives
 // from the back) selects each element's channel; a scalar scale spans the whole tensor. This is the
 // graph-boundary quantize kernel the import-time decomposition keeps as a node when an int8-declared
@@ -75,7 +77,6 @@ namespace vknn {
                     }
                 }
                 float *y = cpu::allocOut(Y, X.shape);
-                Y.dtype  = ctx.graph->desc(node.outputs[0]).dtype; // keep the int8/uint8 label; storage stays fp32
                 for (int64_t i = 0; i < n; ++i)
                 {
                     int64_t c  = sCount == 1 ? 0 : (i / inner) % sCount;

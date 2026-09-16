@@ -18,6 +18,7 @@
 //   fp32 grid. The host lane decode (bindInput and the Vulkan host upload) is checked against the value
 //   the test states for each dtype's lanes, and int64 lanes also against a CPU Session run.
 #include "core/boundary_convert_rule.h"
+#include "vknn/binary_type.h"
 #include "vknn/graph.h"
 #include "vknn/session.h"
 #include <algorithm>
@@ -723,5 +724,101 @@ TEST(BoundaryInt8Staging, HostLaneDecodeGivesEachDtypeItsValue) {
     for (size_t k = 0; k < decoded.size(); ++k)
     {
         EXPECT_TRUE(sameBits(decoded[k], bound[k])) << "i64 element " << k << ": decode " << decoded[k] << ", bindInput + readback " << bound[k];
+    }
+}
+
+// --- constant 8-bit graph outputs ---------------------------------------------------------------------------
+
+namespace {
+
+    TensorId addByteConstant(Graph &g, const std::string &name, DType dtype, const std::vector<uint8_t> &payload) {
+        TensorDesc d;
+        d.name          = name;
+        d.shape         = {(int64_t) payload.size()};
+        d.dtype         = dtype;
+        d.isInitializer = true;
+        TensorId   id   = g.addTensor(d);
+        HostBuffer hb;
+        hb.resizeElems((int64_t) payload.size(), dtype);
+        std::memcpy(hb.bytes.data(), payload.data(), payload.size());
+        g.initializers[id] = hb;
+        return id;
+    }
+
+    // Run `g` (no graph inputs) on the CPU backend; returns its outputs, empty when the session fails
+    // (reported through a non-fatal expectation).
+    std::vector<IOTensor> runConstantGraphOnCpu(Graph &&g) {
+        Config cfg;
+        cfg.backend    = BackendKind::Cpu;
+        cfg.cpuThreads = 1;
+        auto session   = Session::create(std::move(g), cfg);
+        EXPECT_TRUE(session);
+        if (!session)
+        {
+            return {};
+        }
+        const std::vector<IOTensor> noInputs;
+        std::vector<IOTensor>       outs;
+        EXPECT_EQ(session->run(noInputs, outs), Status::Ok);
+        return outs;
+    }
+
+} // namespace
+
+TEST(BoundaryEightBitOutputs, ConstantByteOutputsReadBackOneByteAnElement) {
+    // The session pool widens a 1-byte initializer to fp32 lanes for the CPU ops; a graph output declared
+    // UINT8 or INT8 that copies such a constant (an Identity kept in front of a constant output, a 1-input
+    // Max lowered to that Identity, a Concat constant-folded into a 1-byte initializer) reads back in its
+    // declared width: one byte per element, holding the constant's values.
+    const std::vector<uint8_t> unsignedPayload {200, 17, 255, 3};
+    const std::vector<uint8_t> signedPayload {(uint8_t) -5, 100, (uint8_t) -128, 7};
+    enum class Producer { Identity, SingleInputMax, FoldedConcat };
+    for (DType dtype: {DType::UInt8, DType::Int8})
+    {
+        const std::vector<uint8_t> &payload = dtype == DType::UInt8 ? unsignedPayload : signedPayload;
+        for (Producer producer: {Producer::Identity, Producer::SingleInputMax, Producer::FoldedConcat})
+        {
+            Graph      g;
+            TensorDesc outputDesc;
+            outputDesc.name     = "y";
+            outputDesc.dtype    = dtype;
+            outputDesc.isOutput = true;
+            TensorId y          = g.addTensor(outputDesc);
+            g.outputs.push_back(y);
+            Node node;
+            node.name    = "producer";
+            node.outputs = {y};
+            std::string what;
+            switch (producer)
+            {
+                case Producer::Identity:
+                    node.type   = OpType::Identity;
+                    node.inputs = {addByteConstant(g, "k", dtype, payload)};
+                    what        = "Identity";
+                    break;
+                case Producer::SingleInputMax:
+                    node.type   = OpType::Binary;
+                    node.subOp  = (int32_t) BinaryType::Max;
+                    node.inputs = {addByteConstant(g, "k", dtype, payload)};
+                    what        = "1-input Max";
+                    break;
+                case Producer::FoldedConcat: {
+                    const std::vector<uint8_t> head(payload.begin(), payload.begin() + 2), tail(payload.begin() + 2, payload.end());
+                    node.type   = OpType::Concat;
+                    node.inputs = {addByteConstant(g, "head", dtype, head), addByteConstant(g, "tail", dtype, tail)};
+                    Attr axis;
+                    axis.kind             = Attr::Int;
+                    axis.i                = 0;
+                    node.attr.map["axis"] = axis;
+                    what                  = "folded Concat";
+                    break;
+                }
+            }
+            g.nodes.push_back(node);
+            const std::vector<IOTensor> outs = runConstantGraphOnCpu(std::move(g));
+            ASSERT_EQ(outs.size(), 1u) << what;
+            EXPECT_EQ(outs[0].dtype, dtype) << what;
+            EXPECT_EQ(outs[0].data, payload) << what << " dtype " << (int) dtype;
+        }
     }
 }

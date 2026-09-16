@@ -5254,8 +5254,36 @@ namespace {
         {
             return {};
         }
-        const float *o = outs[0].f32();
-        return std::vector<float>(o, o + numElements(outs[0].shape));
+        // The output reads back in its declared quant type: one byte per element for INT8 and UINT8, an
+        // int32 lane per element for INT32.
+        EXPECT_EQ(outs[0].dtype, quantDt);
+        const int64_t      count = numElements(outs[0].shape);
+        std::vector<float> values((size_t) count);
+        EXPECT_EQ(outs[0].data.size(), (size_t) count * dtypeSize(quantDt));
+        if (outs[0].data.size() != (size_t) count * dtypeSize(quantDt))
+        {
+            return {};
+        }
+        for (int64_t i = 0; i < count; ++i)
+        {
+            const uint8_t *lane = outs[0].data.data() + (size_t) i * dtypeSize(quantDt);
+            switch (quantDt)
+            {
+                case DType::Int8:
+                    values[(size_t) i] = (float) (int8_t) lane[0];
+                    break;
+                case DType::UInt8:
+                    values[(size_t) i] = (float) lane[0];
+                    break;
+                default: {
+                    int32_t wide;
+                    std::memcpy(&wide, lane, sizeof(wide));
+                    values[(size_t) i] = (float) wide;
+                    break;
+                }
+            }
+        }
+        return values;
     }
 
     // DequantizeLinear(x, scale, zp) reading a float "x" input, run on CPU. The pass keeps a
