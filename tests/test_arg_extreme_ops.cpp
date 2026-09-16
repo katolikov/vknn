@@ -5,28 +5,37 @@
 // consequences, exact int64 comparison, wide axes, the error cases, an index consumer that must keep
 // its Cast to float, a .vxm round-trip and byte invariance across CPU thread counts.
 //
-// GLSL never runs on the host, so the GPU kernel is checked in two halves. The plan
+// GLSL never runs on the host, so the GPU kernel is checked in three halves. The plan
 // (backend/vulkan/ops/arg_extreme_plan.h) is run on graphs after the session's own Vulkan load
 // sequence (planFlatLayoutAndStorage), proving the variant selection and the fp32-indices
-// precondition against what the passes actually produce. The scan itself is a line-for-line C++
-// transcription of shaders/arg_extreme.comp, driven by the plan's push and specialization constants
-// and compared with the CPU oracle over randomized data rich in ties, NaNs, infinities and signed
-// zeros, for the fp32 variant and for the fp16 variant reading half-precision storage.
+// precondition against what the passes actually produce, and its geometry limits are shown to agree
+// with the Vulkan gate. The scan itself is a C++ transcription of shaders/arg_extreme.comp, driven by
+// the plan's push and specialization constants and compared with the CPU oracle over randomized data
+// rich in ties, NaNs, infinities and signed zeros, for the fp32 variant and for the fp16 variant
+// reading half-precision storage. The shader source is then read back and compared with the
+// transcription (through a fixed GLSL-to-C++ substitution table) and with the plan's and the op's
+// interface: push-constant members, specialization constant ids, bindings and their element types,
+// local size and variant naming.
 #include "backend/cpu/cpu_backend.h"
 #include "backend/cpu/parallel.h"
 #include "backend/vulkan/ops/arg_extreme_plan.h"
+#include "core/vk_gates.h"
 #include "import/passes.h"
 #include "vknn/dtype.h"
 #include "vknn/exec_context.h"
 #include "vknn/graph.h"
+#include "vknn/op_descriptor.h"
 #include "vknn/session.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <limits>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -181,11 +190,12 @@ namespace {
         return runGraph(argGraph(type, shape, DType::Float32, a), {floatInput(shape, values)}, threads);
     }
 
-    ArgResult runInt64(OpType type, const Shape &shape, const std::vector<int64_t> &values, const ArgAttrs &a) {
-        return runGraph(argGraph(type, shape, DType::Int64, a), {int64Input(shape, values)});
+    ArgResult runInt64(OpType type, const Shape &shape, const std::vector<int64_t> &values, const ArgAttrs &a, int threads = kSingleThread) {
+        return runGraph(argGraph(type, shape, DType::Int64, a), {int64Input(shape, values)}, threads);
     }
 
-    // Runs `type` in all four (op, select_last_index) readings of one slice and returns the index.
+    // Runs `type` with `selectLast` over one rank-1 slice (axis 0, keepdims 0) and returns the selected
+    // index, or -1 when the run fails.
     int64_t sliceIndex(OpType type, const std::vector<float> &slice, int64_t selectLast) {
         const Shape     shape = {(int64_t) slice.size()};
         const ArgResult r     = runFloat(type, shape, slice, attrs(0, 0, selectLast));
@@ -235,12 +245,17 @@ namespace {
     }
 
     // ---- Transcription of shaders/arg_extreme.comp ----
-    // Kept textually parallel to the shader so a reviewer can diff the two: the specialization
-    // constants SELECT_LARGEST / SELECT_LAST become parameters, `float(data[i])` becomes readData(i)
-    // (an fp32 lane, or halfToFloat of an fp16 lane for the arg_extreme_fp16 variant), and the
+    // Textually parallel to the shader: ArgExtremeShader.SourceMatchesTranscriptionAndInterface
+    // compares the two after the substitutions in kGlslToTranscription, so any other edit to either
+    // side fails it. The specialization constants SELECT_LARGEST / SELECT_LAST become parameters,
+    // `float(data[i])` becomes readData(i) (an fp32 lane, or halfToFloat of an fp16 lane for the
+    // arg_extreme_fp16 variant), `indices` is the fp32 buffer the shader declares, and the
     // push-constant block is the plan's ArgExtremePushConstants.
 
     using ShaderData = std::function<float(int)>;
+
+    /// shaders/arg_extreme.comp local_size_x (the source test reads it back).
+    constexpr uint32_t kShaderLocalSize = 256;
 
     // transcribes: bool takesCandidate(float candidate, float best)
     bool takesCandidate(float candidate, float best, int SELECT_LARGEST, int SELECT_LAST) {
@@ -278,18 +293,101 @@ namespace {
         }
         indices[gid] = float(bestAt);
     }
+    // end of the arg_extreme.comp transcription
 
-    // Every invocation of the op's dispatch: groups(total, kFlatLocalSize) workgroups of
-    // kFlatLocalSize, so the tail invocations past `total` exercise the bounds check.
+    // Every invocation of the op's dispatch: groups(total, kShaderLocalSize) workgroups of
+    // kShaderLocalSize, so the tail invocations past `total` exercise the bounds check.
     std::vector<float> dispatchShader(const ShaderData &readData, const ArgExtremePushConstants &pc, const std::vector<uint32_t> &specConstants) {
-        static constexpr uint32_t kFlatLocalSize = 256; // shaders/arg_extreme.comp local_size_x
-        std::vector<float>        indices((size_t) pc.total, -1.0f);
-        const uint32_t            groupCount = (uint32_t) ((pc.total + kFlatLocalSize - 1) / kFlatLocalSize);
-        for (uint32_t gid = 0; gid < groupCount * kFlatLocalSize; ++gid)
+        std::vector<float> indices((size_t) pc.total, -1.0f);
+        const uint32_t     groupCount = (uint32_t) ((pc.total + kShaderLocalSize - 1) / kShaderLocalSize);
+        for (uint32_t gid = 0; gid < groupCount * kShaderLocalSize; ++gid)
         {
             shaderMain(gid, readData, indices, pc, (int) specConstants[0], (int) specConstants[1]);
         }
         return indices;
+    }
+
+    // ---- Reading the kernel's sources back ----
+
+    /// Raw-text markers around the transcription above (the first occurrence of each is the comment).
+    constexpr const char *kTranscriptionBegin = "// transcribes: bool takesCandidate(float candidate, float best)";
+    constexpr const char *kTranscriptionEnd   = "// end of the arg_extreme.comp transcription";
+
+    /// A GLSL fragment and the C++ fragment the transcription writes in its place, each in the
+    /// normalized (comment- and whitespace-free) form, with the exact number of GLSL occurrences.
+    struct SourceSubstitution {
+        const char *glsl;
+        const char *transcription;
+        size_t      occurrences;
+    };
+
+    /// Every difference between shaders/arg_extreme.comp (from takesCandidate to the end) and the
+    /// transcription. Any other edit to either side makes the translated shader differ from the
+    /// transcription.
+    const SourceSubstitution kGlslToTranscription[] = {
+        {"booltakesCandidate(floatcandidate,floatbest){", "booltakesCandidate(floatcandidate,floatbest,intSELECT_LARGEST,intSELECT_LAST){", 1},
+        {"voidmain(){uintgid=gl_GlobalInvocationID.x+gl_GlobalInvocationID.y*gl_NumWorkGroups.x*gl_WorkGroupSize.x;", "voidshaderMain(uint32_tgid,constShaderData&readData,std::vector<float>&indices,constArgExtremePushConstants&pc,intSELECT_LARGEST,intSELECT_LAST){", 1},
+        {"if(gid>=uint(pc.total))return;", "if(gid>=uint32_t(pc.total)){return;}", 1},
+        {"float(data[base])", "readData(base)", 1},
+        {"float(data[base+j*pc.inner])", "readData(base+j*pc.inner)", 1},
+        {"isnan(", "std::isnan(", 2},
+        {"takesCandidate(candidate,best))", "takesCandidate(candidate,best,SELECT_LARGEST,SELECT_LAST))", 1},
+    };
+
+    /// The file at `path`, or an empty string when it cannot be read.
+    std::string readSource(const std::string &path) {
+        std::ifstream file(path, std::ios::binary);
+        return file ? std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>()) : std::string();
+    }
+
+    /// The repository root, from this file's compile-time path (<root>/tests/<file>).
+    std::string repositoryRoot() {
+        const std::string file  = __FILE__;
+        const size_t      slash = file.find_last_of("/\\");
+        return slash == std::string::npos ? std::string("..") : file.substr(0, slash) + "/..";
+    }
+
+    /// `text` with every `//` comment and every whitespace character removed. The sources compared
+    /// here carry no `/* */` comment and no string literal containing `//`.
+    std::string normalizeSource(const std::string &text) {
+        std::string out;
+        out.reserve(text.size());
+        for (size_t i = 0; i < text.size(); ++i)
+        {
+            if (text[i] == '/' && i + 1 < text.size() && text[i + 1] == '/')
+            {
+                while (i < text.size() && text[i] != '\n')
+                {
+                    ++i;
+                }
+                continue;
+            }
+            if (!std::isspace((unsigned char) text[i]))
+            {
+                out += text[i];
+            }
+        }
+        return out;
+    }
+
+    size_t countOccurrences(const std::string &text, const std::string &fragment) {
+        size_t count = 0;
+        for (size_t at = text.find(fragment); at != std::string::npos; at = text.find(fragment, at + fragment.size()))
+        {
+            ++count;
+        }
+        return count;
+    }
+
+    /// The text strictly between the first `open` and the next `close` after it, or "" when absent.
+    std::string between(const std::string &text, const std::string &open, const std::string &close) {
+        const size_t begin = text.find(open);
+        if (begin == std::string::npos)
+        {
+            return {};
+        }
+        const size_t end = text.find(close, begin + open.size());
+        return end == std::string::npos ? std::string() : text.substr(begin + open.size(), end - begin - open.size());
     }
 
     // Deterministic generator over a value alphabet heavy in ties, NaNs, infinities and signed zeros,
@@ -316,6 +414,27 @@ namespace {
             {
                 v[i] = kAlphabet[(s >> kAlphabetShift) % kAlphabetSize];
             }
+        }
+        return v;
+    }
+
+    // Deterministic int64 values heavy in ties and in magnitudes above 2^53 that differ by one (a
+    // comparison through double would tie them), including both int64 extremes.
+    std::vector<int64_t> trickyInt64Values(size_t n, uint32_t seed) {
+        static constexpr int64_t  kBig          = int64_t(1) << 60;
+        static constexpr int64_t  kAlphabet[]   = {INT64_MIN, -kBig - 1, -kBig, -1, 0, 1, kBig, kBig + 1, 3 * kBig, INT64_MAX};
+        static constexpr uint32_t kAlphabetSize = sizeof(kAlphabet) / sizeof(kAlphabet[0]);
+        static constexpr uint32_t kLcgMul = 1664525u, kLcgAdd = 1013904223u;
+        static constexpr uint32_t kAlphabetShift = 12, kOffsetShift = 20;
+        static constexpr uint32_t kOffsetSpan = 3; // offsets -1, 0, +1 around 2^60 values
+        std::vector<int64_t>      v(n);
+        uint32_t                  s = seed;
+        for (size_t i = 0; i < n; ++i)
+        {
+            s                     = s * kLcgMul + kLcgAdd;
+            const int64_t base    = kAlphabet[(s >> kAlphabetShift) % kAlphabetSize];
+            const bool    wrapped = base == INT64_MIN || base == INT64_MAX;
+            v[i]                  = wrapped ? base : base + (int64_t) ((s >> kOffsetShift) % kOffsetSpan) - 1;
         }
         return v;
     }
@@ -350,20 +469,26 @@ namespace {
     }
 
     /// Layout of the hand-built plan graphs: flat everywhere (what the session's layout pass produces
-    /// for an ArgMax/ArgMin node), or the data left in the NC4HW4 layout.
-    enum class PlanLayout { Flat, DataNc4 };
+    /// for an ArgMax/ArgMin node), the data left in the NC4HW4 layout, or the indices left in it.
+    enum class PlanLayout { Flat, DataNc4, IndicesNc4 };
 
-    // The Status planArgExtreme ends with for an ArgMax over `dataShape` along `axis` (keepdims 0).
-    Status planStatus(const Shape &dataShape, const Shape &indicesShape, int64_t axis, bool indicesFp32, bool baseFp16, PlanLayout layout = PlanLayout::Flat) {
+    // An ArgMax over `dataShape` along `axis` (keepdims 0) with hand-set layout and storage descriptors.
+    Graph planGraph(const Shape &dataShape, const Shape &indicesShape, int64_t axis, bool indicesFp32, PlanLayout layout = PlanLayout::Flat) {
         Graph    g;
         TensorId x                = addInput(g, "x", dataShape, DType::Float32);
         TensorId indices          = addIndicesOutput(g, "indices");
-        g.desc(x).gpuFlat         = layout == PlanLayout::Flat;
+        g.desc(x).gpuFlat         = layout != PlanLayout::DataNc4;
         g.desc(indices).shape     = indicesShape;
-        g.desc(indices).gpuFlat   = true;
+        g.desc(indices).gpuFlat   = layout != PlanLayout::IndicesNc4;
         g.desc(indices).storeFp32 = indicesFp32;
         g.nodes.push_back(argNode(OpType::ArgMax, x, indices, attrs(axis, 0, 0)));
-        Status status = Status::Ok;
+        return g;
+    }
+
+    // The Status planArgExtreme ends with for an ArgMax over `dataShape` along `axis` (keepdims 0).
+    Status planStatus(const Shape &dataShape, const Shape &indicesShape, int64_t axis, bool indicesFp32, bool baseFp16, PlanLayout layout = PlanLayout::Flat) {
+        const Graph g      = planGraph(dataShape, indicesShape, axis, indicesFp32, layout);
+        Status      status = Status::Ok;
         try
         {
             planArgExtreme(g, g.nodes[0], baseFp16); // stays Ok when every precondition holds
@@ -417,20 +542,26 @@ TEST(ArgExtremeOps, AxisAndKeepDimsShapesOnRank3) {
     EXPECT_EQ(axis2.indices[0], 0); // row x[0..3] = {0, 7, 14, 21}
 }
 
-TEST(ArgExtremeOps, DefaultAttributesAreAxisZeroKeepDims) {
-    Graph    g;
-    TensorId x       = addInput(g, "x", {2, 2}, DType::Float32);
-    TensorId indices = addIndicesOutput(g, "indices");
-    Node     n;
-    n.type    = OpType::ArgMax;
-    n.name    = "argmax_defaults";
-    n.inputs  = {x};
-    n.outputs = {indices};
-    g.nodes.push_back(n);
-    const ArgResult r = runGraph(std::move(g), {floatInput({2, 2}, {1, 9, 5, 2})});
-    ASSERT_EQ(r.status, Status::Ok);
-    EXPECT_EQ(r.shape, (Shape {1, 2}));
-    EXPECT_EQ(r.indices, (std::vector<int64_t> {1, 0}));
+TEST(ArgExtremeOps, DefaultAttributesAreAxisZeroKeepDimsFirstIndex) {
+    // Rows {9, 1} and {9, 2}: column 0 ties, so each default is observable. Axis 0, keepdims 1 and
+    // select_last_index 0 give ArgMax {0, 1} and ArgMin {0, 0} of shape {1, 2}; select_last_index 1
+    // would give {1, 1} / {1, 0}, and axis 1 would give {0, 0} / {1, 1}.
+    for (OpType type: {OpType::ArgMax, OpType::ArgMin})
+    {
+        Graph    g;
+        TensorId x       = addInput(g, "x", {2, 2}, DType::Float32);
+        TensorId indices = addIndicesOutput(g, "indices");
+        Node     n;
+        n.type    = type;
+        n.name    = "defaults";
+        n.inputs  = {x};
+        n.outputs = {indices};
+        g.nodes.push_back(n);
+        const ArgResult r = runGraph(std::move(g), {floatInput({2, 2}, {9, 1, 9, 2})});
+        ASSERT_EQ(r.status, Status::Ok) << opTypeName(type);
+        EXPECT_EQ(r.shape, (Shape {1, 2})) << opTypeName(type);
+        EXPECT_EQ(r.indices, type == OpType::ArgMax ? (std::vector<int64_t> {0, 1}) : (std::vector<int64_t> {0, 0})) << opTypeName(type);
+    }
 }
 
 TEST(ArgExtremeOps, RankOneWithoutKeepDimsIsOneElement) {
@@ -529,8 +660,10 @@ TEST(ArgExtremeOps, Int64DataComparesExactlyAboveTwoToThe53) {
     EXPECT_EQ(runInt64(OpType::ArgMin, {2, 3}, matrix, attrs(-1, 0, 1)).indices, (std::vector<int64_t> {0, 2}));
 }
 
-TEST(ArgExtremeOps, WideAxisIndexAbove2048) {
-    // fp16 storage holds consecutive integers only up to 2048; the indices here pass it.
+TEST(ArgExtremeOps, WideAxisIndicesAbove2048OnTheCpu) {
+    // Indices past 2048, the last integer fp16 storage holds consecutively. The CPU kernel stores int64
+    // indices; the GPU kernel's exactness past 2048 rests on its fp32 indices buffer, which
+    // ArgExtremeShader.SourceMatchesTranscriptionAndInterface pins in the shader source.
     static constexpr int64_t kExtent = 3000;
     std::vector<float>       x((size_t) (2 * kExtent));
     for (int64_t j = 0; j < kExtent; ++j)
@@ -749,6 +882,34 @@ TEST(CpuThreading, ArgExtremeBitExact) {
     }
 }
 
+TEST(CpuThreading, ArgExtremeInt64BitExact) {
+    // The int64 arm of the partitioned scan, over the same geometry as the float test: values with
+    // ties and neighbours above 2^53 that only an int64 comparison separates.
+    const Shape                shape = {7, 13, 1447};
+    const std::vector<int64_t> x     = trickyInt64Values((size_t) numElements(shape), 23u);
+    for (OpType type: {OpType::ArgMax, OpType::ArgMin})
+    {
+        for (int64_t axis: {1, 0})
+        {
+            for (int64_t selectLast: {0, 1})
+            {
+                const ArgAttrs a = attrs(axis, 1, selectLast);
+                expectBytesInvariantAcrossThreads(
+                    [&]() {
+                        return argGraph(type, shape, DType::Int64, a);
+                    },
+                    int64Input(shape, x));
+            }
+        }
+        for (int64_t axis: {0, 1, 2})
+        {
+            const ArgResult threaded = runInt64(type, shape, x, attrs(axis, 0, 1), 5);
+            ASSERT_EQ(threaded.status, Status::Ok);
+            EXPECT_EQ(threaded.indices, referenceArgExtreme(x, shape, axis, type == OpType::ArgMax, true)) << opTypeName(type) << " axis " << axis;
+        }
+    }
+}
+
 // --- the GPU kernel's host-checkable half ------------------------------------------------------------
 
 TEST(ArgExtremePlan, LoadSequenceLeavesDataUnbridgedAndIndicesFp32) {
@@ -829,6 +990,64 @@ TEST(ArgExtremePlan, IntegerAndConstantDataReadThroughTheFp32Variant) {
     EXPECT_FALSE(plan.dataFp16);
 }
 
+TEST(ArgExtremePlan, ReleasedConstantPayloadIsANamedError) {
+    // An earlier weight upload of the same tensor releases its host bytes; the plan refuses to decode
+    // the emptied payload (which would scan zeros) instead of planning it.
+    Graph      g;
+    TensorDesc tableDesc;
+    tableDesc.name          = "table";
+    tableDesc.shape         = {2, 3};
+    tableDesc.dtype         = DType::Float16;
+    tableDesc.isInitializer = true;
+    TensorId   table        = g.addTensor(tableDesc);
+    HostBuffer hb;
+    hb.resizeElems(6, DType::Float16);
+    g.initializers[table]     = hb;
+    TensorId indices          = addIndicesOutput(g, "indices");
+    g.desc(indices).shape     = {2};
+    g.desc(indices).gpuFlat   = true;
+    g.desc(indices).storeFp32 = true;
+    g.nodes.push_back(argNode(OpType::ArgMax, table, indices, attrs(1, 0, 0)));
+    EXPECT_TRUE(planArgExtreme(g, g.nodes[0], true).constantData);
+
+    g.initializers[table].bytes.clear();
+    try
+    {
+        planArgExtreme(g, g.nodes[0], true);
+        ADD_FAILURE() << "a released constant payload was planned";
+    } catch (const Error &e)
+    {
+        EXPECT_EQ(e.status(), Status::RuntimeError) << e.what();
+        EXPECT_NE(std::string(e.what()).find("ArgMax 'argmax': the constant data payload holds 0 bytes"), std::string::npos) << e.what();
+    }
+}
+
+TEST(ArgExtremePlan, AbsentAttributesPlanTheOnnxDefaults) {
+    // No axis and no select_last_index: the plan reads axis 0 and first-index ties.
+    for (OpType type: {OpType::ArgMax, OpType::ArgMin})
+    {
+        Graph    g;
+        TensorId x                = addInput(g, "x", {2, 3}, DType::Float32);
+        TensorId indices          = addIndicesOutput(g, "indices");
+        g.desc(x).gpuFlat         = true;
+        g.desc(indices).shape     = {1, 3};
+        g.desc(indices).gpuFlat   = true;
+        g.desc(indices).storeFp32 = true;
+        Node n;
+        n.type    = type;
+        n.name    = "defaults";
+        n.inputs  = {x};
+        n.outputs = {indices};
+        g.nodes.push_back(n);
+        const ArgExtremePlan plan = planArgExtreme(g, g.nodes[0], true);
+        EXPECT_FALSE(plan.selectLast) << opTypeName(type);
+        EXPECT_EQ(plan.push.outer, 1);
+        EXPECT_EQ(plan.push.extent, 2);
+        EXPECT_EQ(plan.push.inner, 3);
+        EXPECT_EQ(plan.push.total, 3);
+    }
+}
+
 TEST(ArgExtremePlan, PushAndSpecializationConstantsMatchTheShader) {
     EXPECT_EQ(sizeof(ArgExtremePushConstants), 4 * sizeof(int32_t)); // {outer, extent, inner, total}
     EXPECT_EQ(argExtremeSpecConstants(true, false), (std::vector<uint32_t> {1, 0}));
@@ -849,7 +1068,61 @@ TEST(ArgExtremePlan, RefusesWhatTheKernelCannotComputeExactly) {
     EXPECT_EQ(planStatus({1, kArgExtremeMaxExactFp32Index + 1}, {1}, 1, true, true), Status::Ok);
     EXPECT_EQ(planStatus({1, kArgExtremeMaxExactFp32Index + 2}, {1}, 1, true, true), Status::Unsupported);
     EXPECT_EQ(planStatus({65536, 65536}, {65536}, 1, true, true), Status::Unsupported) << "beyond int32 addressing";
+    // The int32 addressing bound at its edge, with extent 1 so no other limit applies.
+    EXPECT_EQ(planStatus({kArgExtremeMaxShaderElements, 1}, {kArgExtremeMaxShaderElements}, 1, true, true), Status::Ok);
+    EXPECT_EQ(planStatus({kArgExtremeMaxShaderElements + 1, 1}, {kArgExtremeMaxShaderElements + 1}, 1, true, true), Status::Unsupported);
     EXPECT_EQ(planStatus({2, 3}, {2}, 1, true, true, PlanLayout::DataNc4), Status::RuntimeError) << "data outside the flat layout";
+    EXPECT_EQ(planStatus({2, 3}, {2}, 1, true, true, PlanLayout::IndicesNc4), Status::RuntimeError) << "indices outside the flat layout";
+}
+
+TEST(ArgExtremePlan, GateRefusesExactlyTheGeometriesThePlanCannotRun) {
+    // A node the Vulkan gate admits must never make the plan throw at prepare (nothing on the load
+    // path catches it, so the whole session would fail); a geometry past a kernel limit is refused by
+    // the gate with a named reason and runs on the CPU op instead.
+    struct Case {
+        Shape       dataShape;
+        int64_t     axis;
+        const char *refusal; // nullptr: admitted
+    };
+    static constexpr const char *kAddressing = "ArgMax: data elements exceed the kernel's int32 addressing";
+    static constexpr const char *kExactIndex = "ArgMax: axis extent has indices beyond the exact fp32 integer range";
+    const Case                   cases[]     = {
+        {{2, 3}, 1, nullptr},
+        {{kArgExtremeMaxShaderElements, 1}, 1, nullptr},
+        {{kArgExtremeMaxShaderElements + 1, 1}, 1, kAddressing},
+        {{1, 65536, 32769}, 1, kAddressing},
+        {{65536, 65536}, 1, kAddressing},
+        {{1, kArgExtremeMaxExactFp32Index + 1}, 1, nullptr},
+        {{1, kArgExtremeMaxExactFp32Index + 2}, 1, kExactIndex},
+        {{kArgExtremeMaxExactFp32Index + 2, 1}, 0, kExactIndex},
+        {{kArgExtremeMaxExactFp32Index + 2, 1}, 1, nullptr},
+        {{0, 3, 4}, 1, nullptr},
+        {{0, 4, 65536, 65536}, 1, kAddressing}, // empty, but inner does not fit the int32 push constant
+    };
+    for (const Case &c: cases)
+    {
+        const ArgExtremeGeometry geometry = argExtremeGeometry(c.dataShape, c.axis);
+        const Shape              indicesShape {geometry.outer * geometry.inner};
+        const Graph              g = planGraph(c.dataShape, indicesShape, c.axis, true);
+        std::string              why;
+        const bool               admitted = vkNodeGate(g, g.nodes[0], &why);
+        const std::string        label    = shapeStr(c.dataShape) + " axis " + std::to_string(c.axis);
+        EXPECT_EQ(admitted, c.refusal == nullptr) << label << ": " << why;
+        if (c.refusal)
+        {
+            EXPECT_EQ(why, c.refusal) << label;
+        }
+        const Status planned = planStatus(c.dataShape, indicesShape, c.axis, true, true);
+        EXPECT_EQ(planned == Status::Ok, admitted) << label;
+    }
+}
+
+TEST(ArgExtremePlan, FlatLayoutClassKeepsTheSessionLayoutPassOn) {
+    // The kernel reads and writes flat row-major only. The session keeps the flat-layout pass on for
+    // any graph holding a LayoutClass::Flat op, even when Hint::FlatLayout asks to skip it, so an
+    // ArgMax/ArgMin node never reaches the plan without flat tensors.
+    EXPECT_EQ(opDescriptor(OpType::ArgMax).layout, LayoutClass::Flat);
+    EXPECT_EQ(opDescriptor(OpType::ArgMin).layout, LayoutClass::Flat);
 }
 
 TEST(ArgExtremeShader, TranscriptionMatchesCpuOracleInBothStorageVariants) {
@@ -861,7 +1134,8 @@ TEST(ArgExtremeShader, TranscriptionMatchesCpuOracleInBothStorageVariants) {
         Shape                shape;
         std::vector<int64_t> axes;
     };
-    const ShapeCase shapes[] = {{{5, 7, 3}, {0, 1, 2, -1}}, {{1, 300}, {1, 0}}, {{4, 1, 6, 2}, {1, 2, -1, 0}}, {{9}, {0}}, {{2, 3, 513}, {2}}};
+    const ShapeCase shapes[] = {{{5, 7, 3}, {0, 1, 2, -1}}, {{1, 300}, {1, 0}}, {{4, 1, 6, 2}, {1, 2, -1, 0}}, {{9}, {0}},
+                                {{2, 3, 513}, {2}},         {{2, 2600}, {1}}};
     uint32_t        seed     = 1u;
     for (const ShapeCase &sc: shapes)
     {
@@ -919,4 +1193,79 @@ TEST(ArgExtremeShader, TranscriptionMatchesCpuOracleInBothStorageVariants) {
             }
         }
     }
+}
+
+TEST(ArgExtremeShader, SourceMatchesTranscriptionAndInterface) {
+    const std::string root       = repositoryRoot();
+    const std::string testSource = readSource(__FILE__);
+    if (testSource.empty())
+    {
+        GTEST_SKIP() << "the source tree is not present at " << __FILE__;
+    }
+    const std::string shaderPath = root + "/shaders/arg_extreme.comp";
+    const std::string planPath   = root + "/src/backend/vulkan/ops/arg_extreme_plan.h";
+    const std::string opPath     = root + "/src/backend/vulkan/ops/arg_extreme_vk.h";
+    const std::string flatPath   = root + "/src/backend/vulkan/ops/flat_ops.h";
+    const std::string shader     = normalizeSource(readSource(shaderPath));
+    const std::string plan       = normalizeSource(readSource(planPath));
+    const std::string op         = normalizeSource(readSource(opPath));
+    const std::string flat       = normalizeSource(readSource(flatPath));
+    ASSERT_FALSE(shader.empty()) << shaderPath;
+    ASSERT_FALSE(plan.empty()) << planPath;
+    ASSERT_FALSE(op.empty()) << opPath;
+    ASSERT_FALSE(flat.empty()) << flatPath;
+
+    // The kernel body: the shader from takesCandidate to its end, translated fragment by fragment,
+    // is exactly the transcription.
+    const size_t bodyStart = shader.find("booltakesCandidate(");
+    ASSERT_NE(bodyStart, std::string::npos);
+    std::string translated = shader.substr(bodyStart);
+    for (const SourceSubstitution &sub: kGlslToTranscription)
+    {
+        ASSERT_EQ(countOccurrences(translated, sub.glsl), sub.occurrences) << sub.glsl;
+        for (size_t at = translated.find(sub.glsl); at != std::string::npos; at = translated.find(sub.glsl, at + std::strlen(sub.transcription)))
+        {
+            translated.replace(at, std::strlen(sub.glsl), sub.transcription);
+        }
+    }
+    const size_t transcriptionBegin = testSource.find(kTranscriptionBegin);
+    ASSERT_NE(transcriptionBegin, std::string::npos);
+    const size_t transcriptionEnd = testSource.find(kTranscriptionEnd, transcriptionBegin);
+    ASSERT_NE(transcriptionEnd, std::string::npos);
+    const std::string transcription = normalizeSource(testSource.substr(transcriptionBegin, transcriptionEnd - transcriptionBegin));
+    EXPECT_EQ(translated, transcription) << "shaders/arg_extreme.comp and its transcription diverge";
+
+    // Precision: the variant reads its data at storage precision without the RTE store helpers, and
+    // the indices buffer is fp32 in both variants (exact past fp16's 2048).
+    const size_t noRte = shader.find("#defineVKNN_NO_RTE1");
+    ASSERT_NE(noRte, std::string::npos);
+    EXPECT_LT(noRte, shader.find("#include\"precision.glsl\""));
+    EXPECT_EQ(countOccurrences(shader, "binding="), (size_t) kArgExtremeBufferCount);
+    EXPECT_EQ(countOccurrences(shader, "layout(std430,binding=0)readonlybufferData{STOREdata[];};"), 1u);
+    EXPECT_EQ(countOccurrences(shader, "layout(std430,binding=1)writeonlybufferIndices{floatindices[];};"), 1u);
+    EXPECT_EQ(countOccurrences(op, "pipe_->dispatch(cmd,{data->handle(),env.devBuf(node.outputs[0])->handle()},"), 1u)
+        << "binding 0 is the data, binding 1 the indices";
+    EXPECT_EQ(countOccurrences(op, "groups(plan_.push.total,flat::kFlatLocalSize)"), 1u);
+    EXPECT_EQ(countOccurrences(op, "shader(kArgExtremeShaderStem,plan_.dataFp16)"), 1u);
+
+    // Push constants: the shader block's members, in order, are the plan struct's.
+    const std::string shaderPush = between(shader, "layout(push_constant)uniformPC{", "}pc;");
+    std::string       planPush   = between(plan, "structArgExtremePushConstants{", "};");
+    for (size_t at = planPush.find("int32_t"); at != std::string::npos; at = planPush.find("int32_t", at))
+    {
+        planPush.replace(at, std::strlen("int32_t"), "int");
+    }
+    EXPECT_EQ(shaderPush, "intouter;intextent;intinner;inttotal;");
+    EXPECT_EQ(planPush, shaderPush);
+
+    // Specialization constants: ids 0 and 1 are the order argExtremeSpecConstants returns.
+    EXPECT_EQ(countOccurrences(shader, "layout(constant_id=0)constintSELECT_LARGEST="), 1u);
+    EXPECT_EQ(countOccurrences(shader, "layout(constant_id=1)constintSELECT_LAST="), 1u);
+    EXPECT_EQ(countOccurrences(shader, "constant_id="), 2u);
+    EXPECT_EQ(countOccurrences(op, "argExtremeSpecConstants(selectLargest_,plan_.selectLast)"), 1u);
+
+    // Local size: the shader's, the transcription's dispatch and the op's flat::kFlatLocalSize agree.
+    const std::string localSize = std::to_string(kShaderLocalSize);
+    EXPECT_EQ(countOccurrences(shader, "layout(local_size_x=" + localSize + ")in;"), 1u);
+    EXPECT_EQ(countOccurrences(flat, "kFlatLocalSize=" + localSize + ";"), 1u);
 }

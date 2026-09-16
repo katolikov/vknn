@@ -2,6 +2,7 @@
 #include "../import/passes.h"
 #include "core/quant_weights.h"
 #include "vknn/logging.h"
+#include "vknn/op_descriptor.h"
 #include "vknn/version.h"
 #include <algorithm>
 #include <cctype>
@@ -600,7 +601,21 @@ namespace vknn {
         // Selective fp32 storage set. Precision::Normal ("normal") uses the built-in geometry-tail
         // preset when fp32Tensors is empty; an explicit fp32Tensors always wins. Resolved before the
         // view fold: a chain tensor markFp32 would pin must keep its materialized form.
-        const bool  vulkanFlat = byKind_.count(BackendKind::Vulkan) && cfg_.flatLayout();
+        // The flat-layout pass is what makes a graph RUNNABLE on the GPU, not an optimization on top
+        // of it: an op whose only kernel reads flat row-major has no plan at all without the layout
+        // assignment and the converts that pass splices. Honouring a request to skip it on a graph
+        // that contains one leaves those nodes indexing NC4HW4 buffers densely -- and the only ways
+        // out of that are a crash or a CPU fallback, and the engine allows neither. So the request is
+        // honoured exactly where it is safe: on a graph whose every op has an NC4HW4 kernel.
+        const bool graphNeedsFlat = std::any_of(graph_.nodes.begin(), graph_.nodes.end(), [](const Node &nd) {
+            const LayoutClass k = opDescriptor(nd.type).layout;
+            return k == LayoutClass::Flat || k == LayoutClass::ShapeDependent;
+        });
+        if (!cfg_.flatLayout() && graphNeedsFlat)
+        {
+            VKNN_INFO << "flat layout: keeping the pass on -- this graph has op(s) whose only GPU kernel reads flat row-major";
+        }
+        const bool  vulkanFlat = byKind_.count(BackendKind::Vulkan) && (cfg_.flatLayout() || graphNeedsFlat);
         std::string fp32Marks  = cfg_.fp32Tensors;
         if (fp32Marks.empty() && cfg_.precision == Precision::Normal)
         {

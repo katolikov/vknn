@@ -11,11 +11,11 @@
 // fp16 base precision for a runtime tensor that is not itself pinned fp32. A constant (initializer)
 // data operand is uploaded fp32 by the op and therefore reads through the fp32 variant.
 #pragma once
+#include "core/arg_extreme_limits.h"
 #include "vknn/error.h"
 #include "vknn/graph.h"
 #include "vknn/op.h"
 #include <cstdint>
-#include <limits>
 #include <string>
 #include <vector>
 
@@ -25,11 +25,6 @@ namespace vknn {
     inline constexpr const char *kArgExtremeShaderStem = "arg_extreme";
     /// Storage buffers the kernel binds: data (binding 0) and indices (binding 1).
     inline constexpr uint32_t kArgExtremeBufferCount = 2;
-    /// Largest index the fp32 indices buffer stores exactly: every integer up to 2^24 is exact in fp32,
-    /// so an axis of up to 2^24 + 1 elements (indices 0..2^24) is accepted.
-    inline constexpr int64_t kArgExtremeMaxExactFp32Index = int64_t(1) << 24;
-    /// The shader addresses data and indices with int32 arithmetic.
-    inline constexpr int64_t kArgExtremeMaxShaderElements = std::numeric_limits<int32_t>::max();
     /// ONNX attribute defaults for ArgMax / ArgMin.
     inline constexpr int64_t kArgExtremeOnnxDefaultAxis            = 0;
     inline constexpr int64_t kArgExtremeOnnxDefaultSelectLastIndex = 0;
@@ -58,9 +53,12 @@ namespace vknn {
     /// Build the plan for an ArgMax / ArgMin node at segment base precision `baseFp16`. Throws Error
     /// naming the node when the node is malformed (the vkNodeGate refusals: missing operand,
     /// unresolved or rank-0 input, axis out of range, empty axis), when the geometry exceeds what the
-    /// kernel addresses or stores exactly, when the output descriptor disagrees with the reduced
-    /// shape, when a runtime data tensor or the indices output is not flat, or when an fp16 base
-    /// precision reaches a node whose indices are not fp32-stored.
+    /// kernel addresses or stores exactly (argExtremeGpuGeometryRefusal, which the gate applies too),
+    /// when the output descriptor disagrees with the reduced shape, when a runtime data tensor or the
+    /// indices output is not flat, when an fp16 base precision reaches a node whose indices are not
+    /// fp32-stored, or when a constant data operand no longer holds the payload its shape needs. The
+    /// gate refuses the malformed and oversized forms, so those throws fire only for a graph assigned
+    /// to the GPU without it.
     inline ArgExtremePlan planArgExtreme(const Graph &g, const Node &node, bool baseFp16) {
         const std::string where = std::string(opTypeName(node.type)) + " '" + node.name + "': ";
         if (node.inputs.empty() || node.inputs[0] == kNoTensor || node.outputs.empty() || node.outputs[0] == kNoTensor)
@@ -86,30 +84,12 @@ namespace vknn {
         {
             throw Error(Status::InvalidArgument, where + "axis " + std::to_string(attributeAxis) + " has no element to select");
         }
-        int64_t outer = 1, inner = 1;
-        for (int64_t d = 0; d < rank; ++d)
+        const ArgExtremeGeometry geometry = argExtremeGeometry(shape, axis);
+        if (const char *refusal = argExtremeGpuGeometryRefusal(geometry))
         {
-            if (d == axis)
-            {
-                continue;
-            }
-            if (d < axis)
-            {
-                outer *= shape[(size_t) d];
-            } else
-            {
-                inner *= shape[(size_t) d];
-            }
+            throw Error(Status::Unsupported, where + refusal + " (data shape " + shapeStr(shape) + ", axis " + std::to_string(attributeAxis) + ")");
         }
-        const int64_t dataElements = outer * extent * inner;
-        if (dataElements > kArgExtremeMaxShaderElements)
-        {
-            throw Error(Status::Unsupported, where + std::to_string(dataElements) + " data elements exceed the kernel's int32 addressing");
-        }
-        if (extent - 1 > kArgExtremeMaxExactFp32Index)
-        {
-            throw Error(Status::Unsupported, where + "axis extent " + std::to_string(extent) + " has indices beyond the exact fp32 integer range");
-        }
+        const int64_t outer = geometry.outer, inner = geometry.inner;
         const int64_t total = outer * inner;
         if (numElements(g.desc(output).shape) != total)
         {
@@ -129,6 +109,19 @@ namespace vknn {
         if (baseFp16 && !g.desc(output).storeFp32)
         {
             throw Error(Status::RuntimeError, where + "the indices output is not fp32-stored under fp16 base precision; the kernel writes fp32 indices");
+        }
+        // A constant data operand is decoded from its host payload at prepare. An earlier weight upload
+        // of the same tensor may have released those bytes (VkOpEnv::releaseInitializer), and a decode
+        // of the emptied payload would scan zeros, so a short payload is a named error instead.
+        if (g.isInitializer(data))
+        {
+            const size_t payloadBytes  = g.initializers.at(data).bytes.size();
+            const size_t requiredBytes = (size_t) numElements(shape) * dtypeSize(g.desc(data).dtype);
+            if (payloadBytes < requiredBytes)
+            {
+                throw Error(Status::RuntimeError,
+                            where + "the constant data payload holds " + std::to_string(payloadBytes) + " bytes, its " + dtypeStr(g.desc(data).dtype) + " " + shapeStr(shape) + " shape needs " + std::to_string(requiredBytes) + " (released before this op read it)");
+            }
         }
 
         ArgExtremePlan plan;

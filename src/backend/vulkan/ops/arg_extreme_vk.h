@@ -21,12 +21,13 @@ namespace vknn {
             plan_          = planArgExtreme(g, node, env.baseFp16);
             if (plan_.constantData)
             {
-                // A constant data operand uploads fp32 (the plan then selects the fp32 variant), decoded
-                // from any initializer dtype the way the CPU oracle reads it.
+                // A constant data operand uploads fp32 to device-only memory (the plan then selects the
+                // fp32 variant), decoded from any initializer dtype the way the CPU oracle reads it. The
+                // plan has verified the payload still holds every element.
                 static constexpr bool kUploadFp16 = false;
                 std::vector<float>    values      = initFloats(g, node.inputs[0]);
                 values.resize((size_t) std::max<int64_t>(1, numElements(g.desc(node.inputs[0]).shape)));
-                constantData_ = upload(*env.ctx, values, kUploadFp16);
+                constantData_ = uploadWeight(env, values, kUploadFp16);
             }
             pipe_ = env.pipeline(shader(kArgExtremeShaderStem, plan_.dataFp16), kArgExtremeBufferCount, sizeof(ArgExtremePushConstants),
                                  argExtremeSpecConstants(selectLargest_, plan_.selectLast));

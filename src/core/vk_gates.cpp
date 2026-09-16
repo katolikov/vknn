@@ -5,6 +5,7 @@
 // fallback diagnostics and the support report state WHY a node left the GPU.
 #include "core/vk_gates.h"
 #include "backend/cpu/cpu_backend.h"
+#include "core/arg_extreme_limits.h"
 #include "core/fused_attention.h"
 #include "core/fused_dwpw.h"
 #include "vknn/dtype.h"
@@ -322,7 +323,10 @@ namespace vknn {
             // Per-slice index selection along `axis` (flat row-major). The static plan sizes the output
             // from the resolved input shape and the kernel scans a non-empty axis, so an unresolved
             // shape, a rank-0 input, an out-of-range axis or a zero-extent axis stays on the CPU op
-            // (which reports the three invalid forms as InvalidArgument).
+            // (which reports the three invalid forms as InvalidArgument). The kernel addresses its
+            // buffers in int32 and stores fp32 indices, so a geometry past either limit
+            // (core/arg_extreme_limits.h, the same rule the kernel's plan enforces) stays on the CPU op,
+            // which addresses and indexes in int64.
             const std::string op = opTypeName(nd.type);
             if (nd.inputs.empty() || nd.inputs[0] == kNoTensor)
             {
@@ -347,6 +351,10 @@ namespace vknn {
             if (in[(size_t) axis] == 0)
             {
                 return refuse(whyNot, op + ": zero-extent axis");
+            }
+            if (const char *limit = argExtremeGpuGeometryRefusal(argExtremeGeometry(in, axis)))
+            {
+                return refuse(whyNot, op + ": " + limit);
             }
             return true;
         }
