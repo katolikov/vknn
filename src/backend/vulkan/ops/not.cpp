@@ -3,13 +3,15 @@
 // no geometry SSBO: the push constant carries only the element count.
 //
 // Layout byte-matches shaders/not.comp:
-//   binding 0  STORE s[]   operand (activation buffer, or the canonical constant upload)
-//   binding 1  STORE d[]   output, 1.0 / 0.0
+//   binding 0  STORE operand[]  operand (activation buffer, or the constant operand buffer)
+//   binding 1  STORE result[]   output, 1.0 / 0.0
 //   push constant { int total; }
-// A constant operand (one too large for constFold's bounded logical group) uploads in prepare() at the
-// node's storage precision after logical::canonicalConstantOperand, which is rank-0 safe and keeps the
-// truth of values an fp16 upload would round to zero.
+// A constant operand (one too large for constFold's bounded logical group) resolves in prepare() through
+// logical::constantOperandBuffer at the node's storage precision (logical_constant_vk.h): the canonical
+// upload keeps the truth of values an fp16 upload would round to zero, and a payload an earlier
+// consumer's upload released reads that consumer's device copy or fails the prepare, never as all false.
 #include "flat_ops.h"
+#include "logical_constant_vk.h"
 #include "logical_geometry.h"
 #include "vk_op_common.h"
 #include <string>
@@ -28,23 +30,17 @@ namespace vknn {
             std::shared_ptr<vk::Buffer>          constBuf; // set when the operand is a constant initializer
 
             void prepare(const Node &node, VkOpEnv &env) override {
-                const Graph &g = *env.graph;
+                const Graph      &g         = *env.graph;
+                const std::string nodeLabel = "Not '" + node.name + "'";
                 if (node.inputs.empty() || node.inputs[0] == kNoTensor || node.outputs.empty() || node.outputs[0] == kNoTensor)
                 {
-                    throw Error(Status::InvalidArgument, "Not '" + node.name + "': expects one operand and one output");
+                    throw Error(Status::InvalidArgument, nodeLabel + ": expects one operand and one output");
                 }
-                const Shape   out   = g.desc(node.outputs[0]).shape;
-                const int64_t total = logical::flatElementCount(out);
-                if (total > logical::kMaxShaderElements)
-                {
-                    throw Error(Status::InvalidArgument, "Not '" + node.name + "': " + std::to_string(total) + " elements exceed the shader index range");
-                }
-                pc.total    = (int) total;
+                pc.total    = logical::shaderElementCount(g.desc(node.outputs[0]).shape, nodeLabel);
                 TensorId id = node.inputs[0];
                 if (g.isInitializer(id))
                 {
-                    const std::vector<float> canonical = logical::canonicalConstantOperand(initFloats(g, id), logical::flatElementCount(g.desc(id).shape));
-                    constBuf                           = upload(*env.ctx, canonical, env.useFp16);
+                    constBuf = logical::constantOperandBuffer(env, id, nodeLabel);
                 }
                 pipe = env.pipeline(shader("not", env.useFp16), kBindingCount, sizeof(PC), std::vector<uint32_t> {});
             }

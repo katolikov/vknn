@@ -6,9 +6,10 @@
 // LogicalOpsFold: all-constant logical nodes (int64 and 1-byte initializers) fold away with exact values.
 // CpuThreading: the partitioned sweeps are byte-identical for every thread count.
 // LogicalGpuRules: the flat GPU kernels cannot run on the host, so their host-side rules
-// (backend/vulkan/ops/logical_geometry.h) run for real, and the shader functions run as C++
-// transcriptions kept textually parallel to shaders/logical_truth.glsl, or.comp, xor.comp and not.comp;
-// both are checked against the CPU oracle.
+// (backend/vulkan/ops/logical_geometry.h: broadcast geometry, shader index bound, constant operand
+// source and encoding) run for real, and the shader functions run as C++ transcriptions kept textually
+// parallel to shaders/logical_truth.glsl, or.comp, xor.comp and not.comp; both are checked against the
+// CPU oracle.
 #include "backend/cpu/logical_ops.h"
 #include "backend/cpu/parallel.h"
 #include "backend/vulkan/ops/logical_geometry.h"
@@ -16,11 +17,13 @@
 #include "vknn/dtype.h"
 #include "vknn/graph.h"
 #include "vknn/session.h"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <functional>
 #include <gtest/gtest.h>
 #include <limits>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -85,23 +88,23 @@ namespace {
     };
 
     HostBuffer hostBufferOf(const OperandSpec &spec) {
-        HostBuffer hb;
+        HostBuffer payload;
         if (spec.isInt64)
         {
-            hb.resizeElems((int64_t) spec.ints.size(), DType::Int64);
+            payload.resizeElems((int64_t) spec.ints.size(), DType::Int64);
             if (!spec.ints.empty())
             {
-                std::memcpy(hb.i64(), spec.ints.data(), spec.ints.size() * sizeof(int64_t));
+                std::memcpy(payload.i64(), spec.ints.data(), spec.ints.size() * sizeof(int64_t));
             }
         } else
         {
-            hb.resizeElems((int64_t) spec.floats.size(), DType::Float32);
+            payload.resizeElems((int64_t) spec.floats.size(), DType::Float32);
             if (!spec.floats.empty())
             {
-                std::memcpy(hb.f32(), spec.floats.data(), spec.floats.size() * sizeof(float));
+                std::memcpy(payload.f32(), spec.floats.data(), spec.floats.size() * sizeof(float));
             }
         }
-        return hb;
+        return payload;
     }
 
     // Build `type` over `operands` (named in0, in1, ...), writing output "y", and run it on the CPU
@@ -128,24 +131,24 @@ namespace {
             }
             g.inputs.push_back(id);
             IOTensor feed;
-            feed.name     = desc.name;
-            feed.shape    = spec.shape;
-            feed.dtype    = desc.dtype;
-            HostBuffer hb = hostBufferOf(spec);
-            feed.data.assign(hb.bytes.data(), hb.bytes.data() + hb.bytes.size());
+            feed.name          = desc.name;
+            feed.shape         = spec.shape;
+            feed.dtype         = desc.dtype;
+            HostBuffer payload = hostBufferOf(spec);
+            feed.data.assign(payload.bytes.data(), payload.bytes.data() + payload.bytes.size());
             feeds.push_back(std::move(feed));
         }
-        TensorDesc out;
-        out.name     = "y";
-        out.isOutput = true;
-        TensorId y   = g.addTensor(out);
+        TensorDesc outputDesc;
+        outputDesc.name     = "y";
+        outputDesc.isOutput = true;
+        TensorId outputId   = g.addTensor(outputDesc);
         Node     node;
         node.type    = type;
         node.name    = "logical";
         node.inputs  = inputs;
-        node.outputs = {y};
+        node.outputs = {outputId};
         g.nodes.push_back(node);
-        g.outputs = {y};
+        g.outputs = {outputId};
 
         NodeResult result;
         Config     cfg;
@@ -270,43 +273,54 @@ namespace {
 
     enum class LogicalCombine { Or, Xor };
 
-    // Transcription of or.comp / xor.comp main() for the invocation whose recovered id is `gid`. `a`, `b`
-    // are the bound operand buffers widened to fp32 (float(a[ai])), `g` the geometry SSBO, `d` the output.
-    // .at() turns an out-of-range shader read or write into a test failure.
-    void logicalBinaryMain(uint32_t gid, const BinaryPushConstant &pc, const std::vector<int32_t> &g, const std::vector<float> &a, const std::vector<float> &b, LogicalCombine combine, std::vector<float> &d) {
-        if (gid >= (uint32_t) pc.total)
+    // Transcription of or.comp / xor.comp main() for the invocation whose recovered id is `elementIndex`.
+    // `operandA`, `operandB` are the bound operand buffers widened to fp32 (float(operandA[...])),
+    // `geometry` the geometry SSBO, `result` the output. .at() turns an out-of-range shader read or write
+    // into a test failure.
+    void logicalBinaryMain(uint32_t elementIndex, const BinaryPushConstant &pc, const std::vector<int32_t> &geometry, const std::vector<float> &operandA, const std::vector<float> &operandB, LogicalCombine combine, std::vector<float> &result) {
+        if (elementIndex >= (uint32_t) pc.total)
         {
             return;
         }
-        int rem = (int) gid, ai = 0, bi = 0;
-        for (int k = pc.rank - 1; k >= 0; --k)
+        int remainingIndex = (int) elementIndex, operandAIndex = 0, operandBIndex = 0;
+        for (int axis = pc.rank - 1; axis >= 0; --axis)
         {
-            int c = rem % g.at(k);
-            rem /= g.at(k);
-            ai += c * g.at(kGeomAStrideArray * pc.rank + k);
-            bi += c * g.at(kGeomBStrideArray * pc.rank + k);
+            int axisCoordinate = remainingIndex % geometry.at(axis);
+            remainingIndex /= geometry.at(axis);
+            operandAIndex += axisCoordinate * geometry.at(kGeomAStrideArray * pc.rank + axis);
+            operandBIndex += axisCoordinate * geometry.at(kGeomBStrideArray * pc.rank + axis);
         }
-        bool result = combine == LogicalCombine::Or ? (logicalIsTrue(a.at(ai)) || logicalIsTrue(b.at(bi))) : (logicalIsTrue(a.at(ai)) != logicalIsTrue(b.at(bi)));
-        d.at(gid) = result ? kLogicalTrue : kLogicalFalse;
+        bool combined           = combine == LogicalCombine::Or ? (logicalIsTrue(operandA.at(operandAIndex)) || logicalIsTrue(operandB.at(operandBIndex))) :
+                                                                  (logicalIsTrue(operandA.at(operandAIndex)) != logicalIsTrue(operandB.at(operandBIndex)));
+        result.at(elementIndex) = combined ? kLogicalTrue : kLogicalFalse;
     }
 
     // Transcription of not.comp main().
-    void logicalNotMain(uint32_t i, const NotPushConstant &pc, const std::vector<float> &s, std::vector<float> &d) {
-        if (i >= (uint32_t) pc.total)
+    void logicalNotMain(uint32_t elementIndex, const NotPushConstant &pc, const std::vector<float> &operand, std::vector<float> &result) {
+        if (elementIndex >= (uint32_t) pc.total)
         {
             return;
         }
-        d.at(i) = logicalIsTrue(s.at(i)) ? kLogicalFalse : kLogicalTrue;
+        result.at(elementIndex) = logicalIsTrue(operand.at(elementIndex)) ? kLogicalFalse : kLogicalTrue;
     }
 
     // The flat kernels' local_size_x (flat::kFlatLocalSize).
     constexpr uint32_t kFlatLocalSize = 256;
 
-    // Every recovered invocation id of a 1-D dispatch of `total` elements, reproducing
-    // ComputePipeline::dispatch's spill of an x group count above `maxGroupsX` into y and the shaders'
-    // two-term recovery `gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x *
-    // gl_WorkGroupSize.x`.
-    std::vector<uint32_t> dispatchInvocationIds(int64_t total, uint32_t maxGroupsX) {
+    // x group count above which the transcribed dispatches spill into y: every dispatch past
+    // kForcedMaxGroupsX * kFlatLocalSize elements runs rows with gl_GlobalInvocationID.y > 0.
+    constexpr uint32_t kForcedMaxGroupsX = 2;
+
+    // One shader invocation: its recovered element index and its gl_GlobalInvocationID.y row.
+    struct Invocation {
+        uint32_t elementIndex;
+        uint32_t row;
+    };
+
+    // Every invocation of a 1-D dispatch of `total` elements, reproducing ComputePipeline::dispatch's
+    // spill of an x group count above `maxGroupsX` into y and the shaders' two-term recovery
+    // `gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x`.
+    std::vector<Invocation> dispatchInvocations(int64_t total, uint32_t maxGroupsX) {
         uint32_t groupsX = (uint32_t) ((total + kFlatLocalSize - 1) / kFlatLocalSize);
         uint32_t groupsY = 1;
         if (groupsX > maxGroupsX)
@@ -314,16 +328,23 @@ namespace {
             groupsY = (groupsX + maxGroupsX - 1) / maxGroupsX;
             groupsX = (groupsX + groupsY - 1) / groupsY;
         }
-        std::vector<uint32_t> ids;
-        for (uint32_t y = 0; y < groupsY; ++y)
+        std::vector<Invocation> invocations;
+        for (uint32_t row = 0; row < groupsY; ++row)
         {
-            for (uint32_t x = 0; x < groupsX * kFlatLocalSize; ++x)
+            for (uint32_t column = 0; column < groupsX * kFlatLocalSize; ++column)
             {
-                ids.push_back(x + y * groupsX * kFlatLocalSize);
+                invocations.push_back({column + row * groupsX * kFlatLocalSize, row});
             }
         }
-        return ids;
+        return invocations;
     }
+
+    // Output of one transcribed dispatch: the result buffer, and whether an invocation in a spilled row
+    // (gl_GlobalInvocationID.y > 0) wrote an element.
+    struct TranscribedDispatch {
+        std::vector<float> result;
+        bool               spilledRowWrote = false;
+    };
 
     // flat::uploadFlatGeom's packing: arrays back to back, one placeholder int when all are empty.
     std::vector<int32_t> packGeometry(const logical::FlatBroadcastGeometry &geometry) {
@@ -357,7 +378,7 @@ namespace {
 
     const std::vector<int> kThreadCounts {2, 3, 5, 8};
 
-    std::vector<uint8_t> runGraphBytes(Graph g, const Shape &xshape, const std::vector<float> &xdata, int threads) {
+    std::vector<uint8_t> runGraphBytes(Graph g, const Shape &inputShape, const std::vector<float> &inputValues, int threads) {
         Config cfg;
         cfg.backend    = BackendKind::Cpu;
         cfg.cpuThreads = threads;
@@ -369,10 +390,10 @@ namespace {
         }
         IOTensor in;
         in.name  = "x";
-        in.shape = xshape;
+        in.shape = inputShape;
         in.dtype = DType::Float32;
-        in.data.resize(xdata.size() * sizeof(float));
-        std::memcpy(in.data.data(), xdata.data(), in.data.size());
+        in.data.resize(inputValues.size() * sizeof(float));
+        std::memcpy(in.data.data(), inputValues.data(), in.data.size());
         std::vector<IOTensor> outs;
         EXPECT_EQ(sess->run({in}, outs), Status::Ok);
         EXPECT_FALSE(outs.empty());
@@ -381,18 +402,27 @@ namespace {
 
     // Byte-identical output for every thread count, plus proof the partition engaged (a loop too small
     // for kMinChunkOps runs inline and would pass vacuously).
-    void expectByteIdenticalAcrossThreads(const std::function<Graph()> &build, const Shape &xshape, const std::vector<float> &xdata) {
+    void expectByteIdenticalAcrossThreads(const std::function<Graph()> &build, const Shape &inputShape, const std::vector<float> &inputValues) {
         const int64_t              dispatchesBefore = cpu::detail::poolDispatches();
-        const std::vector<uint8_t> reference        = runGraphBytes(build(), xshape, xdata, 1);
+        const std::vector<uint8_t> reference        = runGraphBytes(build(), inputShape, inputValues, 1);
         ASSERT_FALSE(reference.empty());
         for (int threads: kThreadCounts)
         {
-            const std::vector<uint8_t> got = runGraphBytes(build(), xshape, xdata, threads);
+            const std::vector<uint8_t> got = runGraphBytes(build(), inputShape, inputValues, threads);
             ASSERT_EQ(got.size(), reference.size()) << "threads=" << threads;
             EXPECT_EQ(0, std::memcmp(got.data(), reference.data(), reference.size())) << "threads=" << threads;
         }
         EXPECT_GT(cpu::detail::poolDispatches(), dispatchesBefore) << "shape too small to partition: the byte comparison is vacuous";
     }
+
+    // Linear congruential step of sparseValues: state = state * kLcgMultiplier + kLcgIncrement (mod 2^32),
+    // the full-period Numerical Recipes constants.
+    constexpr uint32_t kLcgMultiplier = 1664525u;
+    constexpr uint32_t kLcgIncrement  = 1013904223u;
+    // The state's top bit chooses between zero and a nonzero value, so about half the values are zero.
+    constexpr uint32_t kHalfZeroSelectorShift = 31;
+    // The state's upper 24 bits form the nonzero value: at least 2^23 once the top bit is set, and exact in fp32.
+    constexpr uint32_t kValueShift = 8;
 
     // A float input "x" with roughly half its elements exactly zero, so chunk boundaries land on both
     // truth values.
@@ -401,43 +431,42 @@ namespace {
         uint32_t           state = seed;
         for (float &value: values)
         {
-            state = state * 1664525u + 1013904223u;
-            value = (state >> 31) ? (float) (int32_t) (state >> 8) : 0.0f;
+            state = state * kLcgMultiplier + kLcgIncrement;
+            value = (state >> kHalfZeroSelectorShift) ? (float) (int32_t) (state >> kValueShift) : 0.0f;
         }
         return values;
     }
 
-    Graph logicalGraphOverX(OpType type, const Shape &xshape, const Shape &maskShape, const std::vector<float> &mask) {
+    Graph logicalGraphOverX(OpType type, const Shape &inputShape, const Shape &maskShape, const std::vector<float> &mask) {
         Graph      g;
-        TensorDesc xi;
-        xi.name    = "x";
-        xi.shape   = xshape;
-        xi.isInput = true;
-        TensorId x = g.addTensor(xi);
-        g.inputs.push_back(x);
-        std::vector<TensorId> inputs {x};
+        TensorDesc inputDesc;
+        inputDesc.name    = "x";
+        inputDesc.shape   = inputShape;
+        inputDesc.isInput = true;
+        TensorId inputId  = g.addTensor(inputDesc);
+        g.inputs.push_back(inputId);
+        std::vector<TensorId> inputs {inputId};
         if (type != OpType::Not)
         {
-            TensorDesc md;
-            md.name           = "mask";
-            md.shape          = maskShape;
-            md.isInitializer  = true;
-            TensorId    m     = g.addTensor(md);
-            OperandSpec spec  = floatConstant(maskShape, mask);
-            g.initializers[m] = hostBufferOf(spec);
-            inputs.push_back(m);
+            TensorDesc maskDesc;
+            maskDesc.name          = "mask";
+            maskDesc.shape         = maskShape;
+            maskDesc.isInitializer = true;
+            TensorId maskId        = g.addTensor(maskDesc);
+            g.initializers[maskId] = hostBufferOf(floatConstant(maskShape, mask));
+            inputs.push_back(maskId);
         }
-        TensorDesc yo;
-        yo.name     = "y";
-        yo.isOutput = true;
-        TensorId y  = g.addTensor(yo);
+        TensorDesc outputDesc;
+        outputDesc.name     = "y";
+        outputDesc.isOutput = true;
+        TensorId outputId   = g.addTensor(outputDesc);
         Node     node;
         node.type    = type;
         node.name    = "logical";
         node.inputs  = inputs;
-        node.outputs = {y};
+        node.outputs = {outputId};
         g.nodes.push_back(node);
-        g.outputs = {y};
+        g.outputs = {outputId};
         return g;
     }
 
@@ -574,36 +603,36 @@ TEST(LogicalOps, IncompatibleBroadcastFailsRun) {
 TEST(LogicalOps, LessNotOrWhereChain) {
     constexpr float          threshold = 0.5f;
     constexpr float          fill      = -7.0f;
-    const Shape              xshape {2, 3};
-    const std::vector<float> xd {0.25f, 0.75f, -1.0f, 3.0f, 0.5f, kNaN};
+    const Shape              inputShape {2, 3};
+    const std::vector<float> inputValues {0.25f, 0.75f, -1.0f, 3.0f, 0.5f, kNaN};
     const std::vector<float> rowMask {0, 1, 0};
     Graph                    g;
     auto                     addConstant = [&](const std::string &name, const Shape &shape, const std::vector<float> &values) {
-        TensorDesc d;
-        d.name             = name;
-        d.shape            = shape;
-        d.isInitializer    = true;
-        TensorId id        = g.addTensor(d);
+        TensorDesc desc;
+        desc.name          = name;
+        desc.shape         = shape;
+        desc.isInitializer = true;
+        TensorId id        = g.addTensor(desc);
         g.initializers[id] = hostBufferOf(floatConstant(shape, values));
         return id;
     };
-    TensorDesc xi;
-    xi.name    = "x";
-    xi.shape   = xshape;
-    xi.isInput = true;
-    TensorId x = g.addTensor(xi);
-    g.inputs.push_back(x);
+    TensorDesc inputDesc;
+    inputDesc.name    = "x";
+    inputDesc.shape   = inputShape;
+    inputDesc.isInput = true;
+    TensorId inputId  = g.addTensor(inputDesc);
+    g.inputs.push_back(inputId);
     TensorId   limit    = addConstant("limit", {}, {threshold});
-    TensorId   mask     = addConstant("row_mask", {3}, rowMask);
+    TensorId   mask     = addConstant("row_mask", {(int64_t) rowMask.size()}, rowMask);
     TensorId   filler   = addConstant("fill", {1}, {fill});
     TensorId   below    = g.addTensor({"below"});
     TensorId   notBelow = g.addTensor({"not_below"});
     TensorId   keep     = g.addTensor({"keep"});
-    TensorDesc yo;
-    yo.name          = "y";
-    yo.isOutput      = true;
-    TensorId y       = g.addTensor(yo);
-    auto     addNode = [&](OpType type, const std::string &name, std::vector<TensorId> inputs, TensorId output) {
+    TensorDesc outputDesc;
+    outputDesc.name     = "y";
+    outputDesc.isOutput = true;
+    TensorId outputId   = g.addTensor(outputDesc);
+    auto     addNode    = [&](OpType type, const std::string &name, std::vector<TensorId> inputs, TensorId output) {
         Node node;
         node.type    = type;
         node.name    = name;
@@ -611,11 +640,11 @@ TEST(LogicalOps, LessNotOrWhereChain) {
         node.outputs = {output};
         g.nodes.push_back(node);
     };
-    addNode(OpType::Less, "less", {x, limit}, below);
+    addNode(OpType::Less, "less", {inputId, limit}, below);
     addNode(OpType::Not, "not", {below}, notBelow);
     addNode(OpType::Or, "or", {notBelow, mask}, keep);
-    addNode(OpType::Where, "where", {keep, x, filler}, y);
-    g.outputs = {y};
+    addNode(OpType::Where, "where", {keep, inputId, filler}, outputId);
+    g.outputs = {outputId};
 
     Config cfg;
     cfg.backend = BackendKind::Cpu;
@@ -623,18 +652,18 @@ TEST(LogicalOps, LessNotOrWhereChain) {
     ASSERT_TRUE(sess);
     IOTensor in;
     in.name  = "x";
-    in.shape = xshape;
-    in.data.resize(xd.size() * sizeof(float));
-    std::memcpy(in.data.data(), xd.data(), in.data.size());
+    in.shape = inputShape;
+    in.data.resize(inputValues.size() * sizeof(float));
+    std::memcpy(in.data.data(), inputValues.data(), in.data.size());
     std::vector<IOTensor> outs;
     ASSERT_EQ(sess->run({in}, outs), Status::Ok);
     ASSERT_EQ(outs.size(), 1u);
-    ASSERT_EQ(outs[0].shape, xshape);
-    for (size_t k = 0; k < xd.size(); ++k)
+    ASSERT_EQ(outs[0].shape, inputShape);
+    for (size_t k = 0; k < inputValues.size(); ++k)
     {
-        const bool  isBelow = xd[k] < threshold; // NaN is not below
+        const bool  isBelow = inputValues[k] < threshold; // NaN is not below
         const bool  keepIt  = !isBelow || rowMask[k % rowMask.size()] != 0.0f;
-        const float expect  = keepIt ? xd[k] : fill;
+        const float expect  = keepIt ? inputValues[k] : fill;
         const float got     = outs[0].f32()[k];
         if (std::isnan(expect))
         {
@@ -651,12 +680,12 @@ TEST(LogicalOps, LessNotOrWhereChain) {
 
 namespace {
     TensorId addFoldInt64(Graph &g, const std::string &name, const Shape &shape, const std::vector<int64_t> &values) {
-        TensorDesc d;
-        d.name             = name;
-        d.shape            = shape;
-        d.dtype            = DType::Int64;
-        d.isInitializer    = true;
-        TensorId id        = g.addTensor(d);
+        TensorDesc desc;
+        desc.name          = name;
+        desc.shape         = shape;
+        desc.dtype         = DType::Int64;
+        desc.isInitializer = true;
+        TensorId id        = g.addTensor(desc);
         g.initializers[id] = hostBufferOf(int64Constant(shape, values));
         return id;
     }
@@ -675,11 +704,11 @@ namespace {
         ASSERT_TRUE(g.isInitializer(id)) << g.tensors[id].name;
         EXPECT_EQ(g.desc(id).dtype, DType::Float32) << g.tensors[id].name;
         EXPECT_EQ(g.desc(id).shape, shape) << g.tensors[id].name;
-        const HostBuffer &hb = g.initializers.at(id);
-        ASSERT_EQ(hb.bytes.size(), values.size() * sizeof(float)) << g.tensors[id].name;
+        const HostBuffer &payload = g.initializers.at(id);
+        ASSERT_EQ(payload.bytes.size(), values.size() * sizeof(float)) << g.tensors[id].name;
         for (size_t k = 0; k < values.size(); ++k)
         {
-            EXPECT_EQ(hb.f32()[k], values[k]) << g.tensors[id].name << " k=" << k;
+            EXPECT_EQ(payload.f32()[k], values[k]) << g.tensors[id].name << " k=" << k;
         }
     }
 } // namespace
@@ -721,19 +750,19 @@ TEST(LogicalOpsFold, RankZeroInt64NotStaysRankZero) {
 // 1-byte UINT8/INT8 initializers reach the fold kernels widened to their integer values.
 TEST(LogicalOpsFold, ByteInitializersFoldByIntegerValue) {
     Graph      g;
-    TensorDesc u8;
-    u8.name                          = "u8";
-    u8.shape                         = {3};
-    u8.dtype                         = DType::UInt8;
-    u8.isInitializer                 = true;
-    TensorId unsignedId              = g.addTensor(u8);
+    TensorDesc unsignedDesc;
+    unsignedDesc.name                = "u8";
+    unsignedDesc.shape               = {3};
+    unsignedDesc.dtype               = DType::UInt8;
+    unsignedDesc.isInitializer       = true;
+    TensorId unsignedId              = g.addTensor(unsignedDesc);
     g.initializers[unsignedId].bytes = std::vector<uint8_t> {0, 1, 255};
-    TensorDesc i8;
-    i8.name                        = "i8";
-    i8.shape                       = {3};
-    i8.dtype                       = DType::Int8;
-    i8.isInitializer               = true;
-    TensorId signedId              = g.addTensor(i8);
+    TensorDesc signedDesc;
+    signedDesc.name                = "i8";
+    signedDesc.shape               = {3};
+    signedDesc.dtype               = DType::Int8;
+    signedDesc.isInitializer       = true;
+    TensorId signedId              = g.addTensor(signedDesc);
     g.initializers[signedId].bytes = std::vector<uint8_t> {0xFF, 0, 0x80};
     TensorId notOut                = addFoldNode(g, OpType::Not, "not", {unsignedId});
     TensorId xorOut                = addFoldNode(g, OpType::Xor, "xor", {unsignedId, signedId});
@@ -747,31 +776,59 @@ TEST(LogicalOpsFold, ByteInitializersFoldByIntegerValue) {
 // =================================================================================================
 // Thread-count byte invariance (shapes past cpu::kMinChunkOps; the extent divides by none of 2/3/5/8)
 
+namespace {
+    // Input extents of the threading tests: kThreadingOuter * kThreadingRows * kThreadingColumns elements
+    // is past cpu::kMinChunkOps, and kThreadingColumns (prime) divides by none of kThreadCounts.
+    constexpr int64_t kThreadingOuter   = 7;
+    constexpr int64_t kThreadingRows    = 13;
+    constexpr int64_t kThreadingColumns = 1447;
+    const Shape       kThreadingInputShape {kThreadingOuter, kThreadingRows, kThreadingColumns};
+
+    // Distinct sparseValues seeds, one per operand of the threading tests.
+    constexpr uint32_t kOrInputSeed  = 21;
+    constexpr uint32_t kOrMaskSeed   = 25;
+    constexpr uint32_t kXorInputSeed = 22;
+    constexpr uint32_t kXorMaskSeed  = 23;
+    constexpr uint32_t kNotInputSeed = 24;
+
+    // A sparseValues mask of `shape`, required to hold both truth values so the broadcast carries both.
+    std::vector<float> sparseMaskOf(const Shape &shape, uint32_t seed) {
+        std::vector<float> mask         = sparseValues((size_t) referenceCount(shape), seed);
+        const size_t       nonzeroCount = (size_t) std::count_if(mask.begin(), mask.end(), [](float value) {
+            return value != 0.0f;
+        });
+        EXPECT_GT(nonzeroCount, 0u) << "mask seed " << seed << " holds no true element";
+        EXPECT_LT(nonzeroCount, mask.size()) << "mask seed " << seed << " holds no false element";
+        return mask;
+    }
+} // namespace
+
 TEST(CpuThreading, LogicalOrBitExact) {
-    const Shape xs {7, 13, 1447};
-    const auto  xd    = sparseValues(7 * 13 * 1447, 21);
-    const auto  build = [&] {
-        return logicalGraphOverX(OpType::Or, xs, {13, 1}, {0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0});
+    const std::vector<float> inputValues = sparseValues((size_t) referenceCount(kThreadingInputShape), kOrInputSeed);
+    const Shape              maskShape {kThreadingInputShape[1], 1};
+    const std::vector<float> mask  = sparseMaskOf(maskShape, kOrMaskSeed);
+    const auto               build = [&] {
+        return logicalGraphOverX(OpType::Or, kThreadingInputShape, maskShape, mask);
     };
-    expectByteIdenticalAcrossThreads(build, xs, xd);
+    expectByteIdenticalAcrossThreads(build, kThreadingInputShape, inputValues);
 }
 
 TEST(CpuThreading, LogicalXorBitExact) {
-    const Shape xs {7, 13, 1447};
-    const auto  xd    = sparseValues(7 * 13 * 1447, 22);
-    const auto  build = [&] {
-        return logicalGraphOverX(OpType::Xor, xs, {1447}, sparseValues(1447, 23));
+    const std::vector<float> inputValues = sparseValues((size_t) referenceCount(kThreadingInputShape), kXorInputSeed);
+    const Shape              maskShape {kThreadingInputShape.back()};
+    const std::vector<float> mask  = sparseMaskOf(maskShape, kXorMaskSeed);
+    const auto               build = [&] {
+        return logicalGraphOverX(OpType::Xor, kThreadingInputShape, maskShape, mask);
     };
-    expectByteIdenticalAcrossThreads(build, xs, xd);
+    expectByteIdenticalAcrossThreads(build, kThreadingInputShape, inputValues);
 }
 
 TEST(CpuThreading, LogicalNotBitExact) {
-    const Shape xs {7, 13, 1447};
-    const auto  xd    = sparseValues(7 * 13 * 1447, 24);
-    const auto  build = [&] {
-        return logicalGraphOverX(OpType::Not, xs, {}, {});
+    const std::vector<float> inputValues = sparseValues((size_t) referenceCount(kThreadingInputShape), kNotInputSeed);
+    const auto               build       = [&] {
+        return logicalGraphOverX(OpType::Not, kThreadingInputShape, {}, {});
     };
-    expectByteIdenticalAcrossThreads(build, xs, xd);
+    expectByteIdenticalAcrossThreads(build, kThreadingInputShape, inputValues);
 }
 
 // =================================================================================================
@@ -837,38 +894,41 @@ namespace {
         Shape a, b;
     };
 
-    // Shape pairs covering same shape, rows, columns, two-sided broadcast, rank 0, 1-element operands,
-    // rank raise, 0 extents and rank 5.
+    // Shape pairs covering same shape, rows, columns, two-sided broadcast, rank 0 (one operand and both,
+    // the latter a rank-0 output over the placeholder geometry word), 1-element operands, rank raise,
+    // 0 extents, rank 5, and an output past kForcedMaxGroupsX * kFlatLocalSize elements whose dispatch
+    // spills into y.
     const std::vector<BroadcastCase> kBroadcastCases {
-        {{2, 3}, {2, 3}},       {{2, 3}, {3}},    {{2, 3}, {2, 1}},       {{2, 1, 4}, {3, 1}}, {{4}, {}},
-        {{}, {2, 2}},           {{1}, {3, 1, 2}}, {{1, 3}, {0, 1}},       {{2, 0}, {2, 1}},    {{2, 1, 3, 1, 2}, {4, 1, 5, 1}},
-        {{3, 1, 1}, {1, 1, 7}}, {{1, 1}, {1}},    {{5, 4, 3}, {5, 4, 3}},
+        {{2, 3}, {2, 3}},       {{2, 3}, {3}},    {{2, 3}, {2, 1}},       {{2, 1, 4}, {3, 1}},   {{4}, {}},
+        {{}, {2, 2}},           {{1}, {3, 1, 2}}, {{1, 3}, {0, 1}},       {{2, 0}, {2, 1}},      {{2, 1, 3, 1, 2}, {4, 1, 5, 1}},
+        {{3, 1, 1}, {1, 1, 7}}, {{1, 1}, {1}},    {{5, 4, 3}, {5, 4, 3}}, {{3, 1, 257}, {4, 1}}, {{}, {}},
     };
 
-    // Run the transcribed binary kernel over its whole dispatch (with a forced 2-D spill) and return the
-    // output buffer, requiring every element to be written exactly once.
-    std::vector<float> runBinaryTranscription(const Shape &out, const Shape &aShape, const Shape &bShape, const std::vector<float> &aBuffer, const std::vector<float> &bBuffer, LogicalCombine combine) {
-        static constexpr uint32_t            kForcedMaxGroupsX = 2; // spills every dispatch past 512 elements into y
-        const logical::FlatBroadcastGeometry geometry          = logical::flatBroadcastGeometry(out, aShape, bShape, kGeometryTestLabel);
+    // Run the transcribed binary kernel over its whole dispatch (spilling into y past
+    // kForcedMaxGroupsX * kFlatLocalSize elements), requiring every element to be written exactly once.
+    TranscribedDispatch runBinaryTranscription(const Shape &out, const Shape &aShape, const Shape &bShape, const std::vector<float> &operandA, const std::vector<float> &operandB, LogicalCombine combine) {
+        const logical::FlatBroadcastGeometry geometry = logical::flatBroadcastGeometry(out, aShape, bShape, kGeometryTestLabel);
         BinaryPushConstant                   pc {};
-        pc.rank                      = geometry.rank;
-        pc.total                     = (int) logical::flatElementCount(out);
-        const std::vector<int32_t> g = packGeometry(geometry);
-        std::vector<float>         d((size_t) pc.total, -1.0f);
-        std::vector<int>           writes((size_t) pc.total, 0);
-        for (uint32_t gid: dispatchInvocationIds(pc.total, kForcedMaxGroupsX))
+        pc.rank                                   = geometry.rank;
+        pc.total                                  = logical::shaderElementCount(out, kGeometryTestLabel);
+        const std::vector<int32_t> geometryBuffer = packGeometry(geometry);
+        TranscribedDispatch        dispatch;
+        dispatch.result.assign((size_t) pc.total, -1.0f);
+        std::vector<int> writes((size_t) pc.total, 0);
+        for (const Invocation &invocation: dispatchInvocations(pc.total, kForcedMaxGroupsX))
         {
-            logicalBinaryMain(gid, pc, g, aBuffer, bBuffer, combine, d);
-            if (gid < (uint32_t) pc.total)
+            logicalBinaryMain(invocation.elementIndex, pc, geometryBuffer, operandA, operandB, combine, dispatch.result);
+            if (invocation.elementIndex < (uint32_t) pc.total)
             {
-                ++writes[gid];
+                ++writes[invocation.elementIndex];
+                dispatch.spilledRowWrote = dispatch.spilledRowWrote || invocation.row > 0;
             }
         }
         for (size_t k = 0; k < writes.size(); ++k)
         {
             EXPECT_EQ(writes[k], 1) << "element " << k << " must be visited exactly once";
         }
-        return d;
+        return dispatch;
     }
 
     void expectMatchesOracle(const std::vector<float> &got, const NodeResult &oracle, const std::string &label) {
@@ -878,13 +938,34 @@ namespace {
             ASSERT_EQ(got[k], oracle.values[k]) << label << " k=" << k;
         }
     }
+
+    // Run the transcribed not.comp over its whole dispatch (spilling into y past
+    // kForcedMaxGroupsX * kFlatLocalSize elements) for an operand of `shape`.
+    TranscribedDispatch runNotTranscription(const Shape &shape, const std::vector<float> &operand) {
+        NotPushConstant pc {};
+        pc.total = logical::shaderElementCount(shape, kGeometryTestLabel);
+        TranscribedDispatch dispatch;
+        dispatch.result.assign((size_t) pc.total, -1.0f);
+        for (const Invocation &invocation: dispatchInvocations(pc.total, kForcedMaxGroupsX))
+        {
+            logicalNotMain(invocation.elementIndex, pc, operand, dispatch.result);
+            if (invocation.elementIndex < (uint32_t) pc.total)
+            {
+                dispatch.spilledRowWrote = dispatch.spilledRowWrote || invocation.row > 0;
+            }
+        }
+        return dispatch;
+    }
 } // namespace
 
 // or.comp / xor.comp against the oracle for every shape pair: the real geometry builder, the transcribed
 // decode, runtime operands at fp32 storage and (for values whose truth fp16 storage keeps) at fp16, and a
-// constant operand through the canonical upload at both precisions.
+// constant operand through the canonical upload at both precisions. The cases must include a dispatch
+// that writes from a spilled y row and a rank-0 output.
 TEST(LogicalGpuRules, BinaryDecodeMatchesOracle) {
-    uint32_t seed = 1;
+    uint32_t seed               = 1;
+    int      spilledDispatches  = 0;
+    int      rankZeroDispatches = 0;
     for (const BroadcastCase &shapes: kBroadcastCases)
     {
         const Shape  out   = referenceBroadcastShape(shapes.a, shapes.b);
@@ -900,41 +981,41 @@ TEST(LogicalGpuRules, BinaryDecodeMatchesOracle) {
             const std::vector<float> bValues = mixedValues(bSize, seed++);
             NodeResult               oracle  = runOk(type, {floatInput(shapes.a, aValues), floatInput(shapes.b, bValues)});
             ASSERT_EQ(oracle.shape, out) << label;
-            expectMatchesOracle(runBinaryTranscription(out, shapes.a, shapes.b, aValues, bValues, combine), oracle, label + " fp32");
+            const TranscribedDispatch fp32Dispatch = runBinaryTranscription(out, shapes.a, shapes.b, aValues, bValues, combine);
+            expectMatchesOracle(fp32Dispatch.result, oracle, label + " fp32");
+            spilledDispatches += fp32Dispatch.spilledRowWrote ? 1 : 0;
+            rankZeroDispatches += out.empty() ? 1 : 0;
 
             // Runtime operands, fp16 storage.
             const std::vector<float> aSafe      = fp16SafeValues(aSize, seed++);
             const std::vector<float> bSafe      = fp16SafeValues(bSize, seed++);
             NodeResult               safeOracle = runOk(type, {floatInput(shapes.a, aSafe), floatInput(shapes.b, bSafe)});
-            expectMatchesOracle(runBinaryTranscription(out, shapes.a, shapes.b, throughFp16Storage(aSafe), throughFp16Storage(bSafe), combine), safeOracle, label + " fp16");
+            expectMatchesOracle(runBinaryTranscription(out, shapes.a, shapes.b, throughFp16Storage(aSafe), throughFp16Storage(bSafe), combine).result, safeOracle, label + " fp16");
 
             // Constant operand B through canonicalConstantOperand, at both precisions.
             NodeResult               constOracle = runOk(type, {floatInput(shapes.a, aSafe), floatConstant(shapes.b, bValues)});
             const std::vector<float> canonical   = logical::canonicalConstantOperand(bValues, logical::flatElementCount(shapes.b));
-            expectMatchesOracle(runBinaryTranscription(out, shapes.a, shapes.b, aSafe, canonical, combine), constOracle, label + " const fp32");
-            expectMatchesOracle(runBinaryTranscription(out, shapes.a, shapes.b, throughFp16Storage(aSafe), throughFp16Storage(canonical), combine), constOracle, label + " const fp16");
+            expectMatchesOracle(runBinaryTranscription(out, shapes.a, shapes.b, aSafe, canonical, combine).result, constOracle, label + " const fp32");
+            expectMatchesOracle(runBinaryTranscription(out, shapes.a, shapes.b, throughFp16Storage(aSafe), throughFp16Storage(canonical), combine).result, constOracle, label + " const fp16");
         }
     }
+    EXPECT_GT(spilledDispatches, 0) << "no case writes from a spilled y row: widen an output past " << kForcedMaxGroupsX * kFlatLocalSize << " elements";
+    EXPECT_GT(rankZeroDispatches, 0) << "no case produces a rank-0 output";
 }
 
 // not.comp against the oracle over the dispatch of several sizes (including a 2-D spill, rank 0 and an
 // empty tensor), at fp32 storage, fp16 storage and through the canonical constant upload.
 TEST(LogicalGpuRules, NotDecodeMatchesOracle) {
-    static constexpr uint32_t kForcedMaxGroupsX = 2; // spills every dispatch past 512 elements into y
-    const std::vector<Shape>  shapes {{}, {1}, {0, 4}, {2, 3}, {3, 257}, {1, 1031}};
-    uint32_t                  seed = 100;
+    const std::vector<Shape> shapes {{}, {1}, {0, 4}, {2, 3}, {3, 257}, {1, 1031}};
+    uint32_t                 seed              = 100;
+    int                      spilledDispatches = 0;
     for (const Shape &shape: shapes)
     {
         const size_t size  = (size_t) referenceCount(shape);
-        const auto   check = [&](const std::vector<float> &buffer, const NodeResult &oracle, const std::string &label) {
-            NotPushConstant pc {};
-            pc.total = (int) logical::flatElementCount(shape);
-            std::vector<float> d((size_t) pc.total, -1.0f);
-            for (uint32_t gid: dispatchInvocationIds(pc.total, kForcedMaxGroupsX))
-            {
-                logicalNotMain(gid, pc, buffer, d);
-            }
-            expectMatchesOracle(d, oracle, label);
+        const auto   check = [&](const std::vector<float> &operand, const NodeResult &oracle, const std::string &label) {
+            const TranscribedDispatch dispatch = runNotTranscription(shape, operand);
+            expectMatchesOracle(dispatch.result, oracle, label);
+            spilledDispatches += dispatch.spilledRowWrote ? 1 : 0;
         };
         const std::vector<float> values = mixedValues(size, seed++);
         const std::vector<float> safe   = fp16SafeValues(size, seed++);
@@ -949,6 +1030,7 @@ TEST(LogicalGpuRules, NotDecodeMatchesOracle) {
         check(canonical, oracle, "const fp32");
         check(throughFp16Storage(canonical), oracle, "const fp16");
     }
+    EXPECT_GT(spilledDispatches, 0) << "no shape writes from a spilled y row";
 }
 
 // A constant operand keeps every element's truth at both storage precisions when decoded by initFloats
@@ -957,17 +1039,17 @@ TEST(LogicalGpuRules, NotDecodeMatchesOracle) {
 TEST(LogicalGpuRules, ConstantOperandKeepsTruthAtBothPrecisions) {
     Graph g;
     auto  addInitializer = [&](const std::string &name, const Shape &shape, DType dtype, std::vector<uint8_t> bytes) {
-        TensorDesc d;
-        d.name                   = name;
-        d.shape                  = shape;
-        d.dtype                  = dtype;
-        d.isInitializer          = true;
-        TensorId id              = g.addTensor(d);
+        TensorDesc desc;
+        desc.name                = name;
+        desc.shape               = shape;
+        desc.dtype               = dtype;
+        desc.isInitializer       = true;
+        TensorId id              = g.addTensor(desc);
         g.initializers[id].bytes = std::move(bytes);
         return id;
     };
-    auto bytesOf = [](const HostBuffer &hb) {
-        return std::vector<uint8_t>(hb.bytes.data(), hb.bytes.data() + hb.bytes.size());
+    auto bytesOf = [](const HostBuffer &payload) {
+        return std::vector<uint8_t>(payload.bytes.data(), payload.bytes.data() + payload.bytes.size());
     };
     const std::vector<float>   floats {0.0f, -0.0f, 1e-10f, -1e-30f, kSubnormal, kNaN, kInfinity, 1e6f, 2.0f, -3.0f};
     const std::vector<int64_t> ints {0, 1, -1, kLowWordZero, kAbove2Pow40, kInt64Min};
@@ -998,16 +1080,30 @@ TEST(LogicalGpuRules, ConstantOperandKeepsTruthAtBothPrecisions) {
 
 // The dispatched element count treats rank 0 as one element and a 0 extent as none; an operand with more
 // axes than the output, an operand extent that neither is 1 nor matches the output, and an output past the
-// shader index range are rejected.
+// shader index range (for the binary geometry and for Not's element count alike) are rejected.
 TEST(LogicalGpuRules, GeometryBoundsAndElementCount) {
     EXPECT_EQ(logical::flatElementCount({}), 1);
     EXPECT_EQ(logical::flatElementCount({0, 3}), 0);
     EXPECT_EQ(logical::flatElementCount({2, 3}), 6);
+    const std::string kNotLabel = "Not 'index_range_probe'";
+    EXPECT_EQ(logical::shaderElementCount({}, kNotLabel), 1);
+    EXPECT_EQ(logical::shaderElementCount({0, 3}, kNotLabel), 0);
+    EXPECT_EQ(logical::shaderElementCount({2, 3}, kNotLabel), 6);
+    EXPECT_EQ(logical::shaderElementCount({logical::kMaxShaderElements}, kNotLabel), logical::kMaxShaderElements);
     EXPECT_THROW(logical::flatBroadcastGeometry({3}, {1, 3}, {3}, kGeometryTestLabel), Error);
     EXPECT_THROW(logical::flatBroadcastGeometry({2, 3}, {2, 3}, {2}, kGeometryTestLabel), Error);
     EXPECT_THROW(logical::flatBroadcastGeometry({0, 3}, {3, 3}, {1}, kGeometryTestLabel), Error);
     constexpr int64_t kPastIndexRange = logical::kMaxShaderElements + 1;
     EXPECT_THROW(logical::flatBroadcastGeometry({kPastIndexRange}, {1}, {1}, kGeometryTestLabel), Error);
+    try
+    {
+        logical::shaderElementCount({kPastIndexRange}, kNotLabel);
+        ADD_FAILURE() << "an output past the shader index range must throw";
+    } catch (const Error &error)
+    {
+        EXPECT_EQ(error.status(), Status::InvalidArgument);
+        EXPECT_NE(std::string(error.what()).find(kNotLabel), std::string::npos) << error.what();
+    }
     try
     {
         logical::flatBroadcastGeometry({2, 3}, {2, 3}, {2}, kGeometryTestLabel);
@@ -1022,4 +1118,76 @@ TEST(LogicalGpuRules, GeometryBoundsAndElementCount) {
     EXPECT_EQ(geometry.outDim, (std::vector<int32_t> {2, 3, 4}));
     EXPECT_EQ(geometry.aStride, (std::vector<int32_t> {0, 1, 0}));
     EXPECT_EQ(geometry.bStride, (std::vector<int32_t> {4, 0, 1}));
+}
+
+// A constant operand whose host payload an earlier consumer's upload released (the segment's
+// releaseInitializer clears the bytes of a large weight once uploadInit made its device copy) decodes
+// through initFloats to zeros, which a canonical upload would read as all false. constantOperandSource
+// routes it to that consumer's device copy only when the copy's size proves a flat store of the operand
+// at the kernel's precision and fp16 kept its truth, and otherwise throws naming the operand; the copy's
+// raw values then read through the transcribed kernel exactly as the oracle reads the original operand.
+TEST(LogicalGpuRules, ReleasedConstantPayloadNeverReadsAsFalse) {
+    const Shape                maskShape {2, 4};
+    const std::vector<int64_t> maskValues {0, 1, 0, kLowWordZero, 0, -1, kAbove2Pow40, kInt64Min};
+    const int64_t              count        = logical::flatElementCount(maskShape);
+    const std::string          operandLabel = "Not 'released_probe': constant operand 'mask'";
+    const auto expectRefused = [&](size_t hostPayloadBytes, const Shape &shape, DType dtype, std::optional<size_t> sharedDeviceBytes, bool fp16Storage, const std::string &why) {
+        try
+        {
+            logical::constantOperandSource(hostPayloadBytes, shape, dtype, sharedDeviceBytes, fp16Storage, operandLabel);
+            ADD_FAILURE() << why << ": must throw";
+        } catch (const Error &error)
+        {
+            EXPECT_EQ(error.status(), Status::InvalidArgument) << why;
+            EXPECT_NE(std::string(error.what()).find(operandLabel), std::string::npos) << why << ": " << error.what();
+        }
+    };
+
+    Graph      g;
+    TensorDesc maskDesc;
+    maskDesc.name          = "mask";
+    maskDesc.shape         = maskShape;
+    maskDesc.dtype         = DType::Int64;
+    maskDesc.isInitializer = true;
+    TensorId maskId        = g.addTensor(maskDesc);
+    g.initializers[maskId] = hostBufferOf(int64Constant(maskShape, maskValues));
+    const size_t heldBytes = g.initializers.at(maskId).bytes.size();
+    EXPECT_EQ(logical::constantOperandSource(heldBytes, maskShape, DType::Int64, std::nullopt, false, operandLabel), logical::ConstantOperandSource::CanonicalUpload);
+    EXPECT_EQ(logical::constantOperandSource(heldBytes, maskShape, DType::Int64, logical::flatUploadBytes(count, false), false, operandLabel), logical::ConstantOperandSource::CanonicalUpload) << "a held payload uploads canonically even when a device copy exists";
+
+    // The device copies uploadInit makes of this operand: initFloats values, stored at each precision.
+    const std::vector<float> fp32DeviceCopy = initFloats(g, maskId);
+    const std::vector<float> fp16DeviceCopy = throughFp16Storage(fp32DeviceCopy);
+
+    // Release the host bytes the way the segment's releaseInitializer does.
+    g.initializers[maskId].bytes.clear();
+    ASSERT_EQ(initFloats(g, maskId), std::vector<float>((size_t) count, 0.0f)) << "a released payload decodes to zeros";
+    const size_t releasedBytes = g.initializers.at(maskId).bytes.size();
+
+    expectRefused(releasedBytes, maskShape, DType::Int64, std::nullopt, false, "released, no device copy");
+    EXPECT_EQ(logical::constantOperandSource(releasedBytes, maskShape, DType::Int64, logical::flatUploadBytes(count, false), false, operandLabel), logical::ConstantOperandSource::SharedDeviceCopy);
+    EXPECT_EQ(logical::constantOperandSource(releasedBytes, maskShape, DType::Int64, logical::flatUploadBytes(count, true), true, operandLabel), logical::ConstantOperandSource::SharedDeviceCopy);
+    expectRefused(releasedBytes, maskShape, DType::Int64, logical::flatUploadBytes(count, true), false, "fp16 copy read by an fp32 kernel");
+    expectRefused(releasedBytes, maskShape, DType::Int64, logical::flatUploadBytes(count, false), true, "fp32 copy read by an fp16 kernel");
+    expectRefused(releasedBytes, maskShape, DType::Int64, (size_t) count * sizeof(int64_t), false, "raw int64 lanes");
+    // An fp32 payload's fp16 copy may have rounded a magnitude below the smallest fp16 subnormal to zero.
+    expectRefused(releasedBytes, maskShape, DType::Float32, logical::flatUploadBytes(count, true), true, "fp32 payload stored at fp16");
+    EXPECT_EQ(logical::constantOperandSource(releasedBytes, maskShape, DType::Float32, logical::flatUploadBytes(count, false), false, operandLabel), logical::ConstantOperandSource::SharedDeviceCopy);
+    // A rank-0 operand carries one element, so its empty payload was released; a 0-extent operand needs no bytes.
+    const Shape rankZero {};
+    expectRefused(releasedBytes, rankZero, DType::Int64, std::nullopt, true, "released rank-0 operand");
+    EXPECT_EQ(logical::constantOperandSource(releasedBytes, rankZero, DType::Int64, logical::flatUploadBytes(logical::flatElementCount(rankZero), true), true, operandLabel), logical::ConstantOperandSource::SharedDeviceCopy);
+    EXPECT_EQ(logical::constantOperandSource(releasedBytes, {0, 4}, DType::Int64, std::nullopt, true, operandLabel), logical::ConstantOperandSource::CanonicalUpload);
+    // A short payload that was not released is malformed: never padded with false, never swapped for a copy.
+    expectRefused(sizeof(int64_t), maskShape, DType::Int64, logical::flatUploadBytes(count, false), false, "short payload");
+    EXPECT_THROW(logical::canonicalConstantOperand(std::vector<float>((size_t) count - 1, 1.0f), count), Error);
+
+    // The copy's buffer floor matches the flat uploads' max(count, 4) elements.
+    EXPECT_EQ(logical::flatUploadBytes(1, true), (size_t) logical::kFlatUploadElementFloor * logical::kFp16StoreBytes);
+    EXPECT_EQ(logical::flatUploadBytes(count, false), (size_t) count * logical::kFp32StoreBytes);
+
+    // The shared copy's raw values read through the transcribed kernel exactly as the oracle reads the operand.
+    NodeResult oracle = runOk(OpType::Not, {int64Input(maskShape, maskValues)});
+    expectMatchesOracle(runNotTranscription(maskShape, fp32DeviceCopy).result, oracle, "shared fp32 copy");
+    expectMatchesOracle(runNotTranscription(maskShape, fp16DeviceCopy).result, oracle, "shared fp16 copy");
 }

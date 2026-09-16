@@ -3,15 +3,16 @@
 // boolean combine.
 //
 // Layout byte-matches shaders/or.comp and shaders/xor.comp:
-//   binding 0  STORE a[]   operand A (activation buffer, or the canonical constant upload)
-//   binding 1  STORE b[]   operand B (same)
-//   binding 2  STORE d[]   output, 1.0 / 0.0
-//   binding 3  int g[]     geometry: outDim, aStride, bStride packed back to back (logical_geometry.h)
+//   binding 0  STORE operandA[]  operand A (activation buffer, or the constant operand buffer)
+//   binding 1  STORE operandB[]  operand B (same)
+//   binding 2  STORE result[]    output, 1.0 / 0.0
+//   binding 3  int geometry[]    outDim, aStride, bStride packed back to back (logical_geometry.h)
 //   push constant { int rank; int total; }
-// The node always runs on the flat path (descriptor LayoutClass::Flat). Constant operands upload in
-// prepare() at the node's storage precision after logical::canonicalConstantOperand (rank-0 safe).
+// The node always runs on the flat path (descriptor LayoutClass::Flat). A constant operand resolves in
+// prepare() through logical::constantOperandBuffer at the node's storage precision (logical_constant_vk.h).
 #pragma once
 #include "flat_ops.h"
+#include "logical_constant_vk.h"
 #include "logical_geometry.h"
 #include "vk_op_common.h"
 #include <string>
@@ -47,14 +48,13 @@ namespace vknn {
             const logical::FlatBroadcastGeometry geometry =
                 logical::flatBroadcastGeometry(out, g.desc(node.inputs[kOperandA]).shape, g.desc(node.inputs[kOperandB]).shape, nodeLabel);
             pc.rank  = geometry.rank;
-            pc.total = (int) logical::flatElementCount(out);
+            pc.total = logical::shaderElementCount(out, nodeLabel);
             for (int operand = kOperandA; operand <= kOperandB; ++operand)
             {
                 TensorId id = node.inputs[(size_t) operand];
                 if (g.isInitializer(id))
                 {
-                    const std::vector<float> canonical = logical::canonicalConstantOperand(initFloats(g, id), logical::flatElementCount(g.desc(id).shape));
-                    constBuf[operand]                  = upload(*env.ctx, canonical, env.useFp16);
+                    constBuf[operand] = logical::constantOperandBuffer(env, id, nodeLabel);
                 }
             }
             geom = flat::uploadFlatGeom(env, {geometry.outDim, geometry.aStride, geometry.bStride});
