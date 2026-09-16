@@ -4,9 +4,12 @@
 // onward forms one contiguous block per "outer" position (the product of the dims left of `axis`).
 // Each input therefore contributes a run of `blockElems` contiguous elements per outer position, and
 // successive inputs are laid down side by side along the axis by advancing a per-outer write offset —
-// which is the memcpy interleave below. Int64 and float share this structure and differ only in
-// element size.
+// which is the memcpy interleave below. The output is int64 when any part's runtime dtype is Int64 (an
+// fp32-carried integer part, such as an INT32 value, converts to int64 truncated toward zero with a NaN
+// reading 0 and out-of-range values saturating), and fp32 otherwise.
 #include "backend/cpu/cpu_backend.h"
+#include "backend/cpu/int64_arithmetic.h"
+#include <algorithm>
 #include <cstring>
 
 namespace vknn {
@@ -50,8 +53,10 @@ namespace vknn {
                 {
                     outer *= first.shape[i];
                 }
-                bool isI64 = first.dtype == DType::Int64;
-                if (isI64)
+                const bool int64Result = std::any_of(parts.begin(), parts.end(), [&](TensorId part) {
+                    return ctx.t(part).dtype == DType::Int64;
+                });
+                if (int64Result)
                 {
                     int64_t *y = cpu::allocOutI64(Y, out);
                     // `off` is the running write position along the axis within each output block; it
@@ -61,9 +66,22 @@ namespace vknn {
                     {
                         const RtTensor &T  = ctx.t(in);
                         int64_t         bk = blockElems(T.shape);
-                        for (int64_t o = 0; o < outer; ++o)
+                        if (T.dtype == DType::Int64)
                         {
-                            std::memcpy(y + o * outBlock + off, T.host.i64() + o * bk, bk * sizeof(int64_t));
+                            for (int64_t o = 0; o < outer; ++o)
+                            {
+                                std::memcpy(y + o * outBlock + off, T.host.i64() + o * bk, bk * sizeof(int64_t));
+                            }
+                        } else
+                        {
+                            const float *values = T.host.f32();
+                            for (int64_t o = 0; o < outer; ++o)
+                            {
+                                for (int64_t element = 0; element < bk; ++element)
+                                {
+                                    y[o * outBlock + off + element] = cpu::int64FromFp32Operand(values[o * bk + element]);
+                                }
+                            }
                         }
                         off += bk;
                     }

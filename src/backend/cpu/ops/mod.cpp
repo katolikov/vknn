@@ -1,12 +1,14 @@
 // ONNX Mod (elementwise remainder, attribute `fmod`: 0 = sign of the divisor, 1 = C fmod) with
 // NumPy-style broadcasting. The remainder rules live in backend/cpu/mod_remainder.h.
-//  - Int64 path, taken when either operand's runtime dtype is Int64 (the Binary rule) or the node's
-//    operands are integers by the model's element types (modOperandsAreInteger: an INT32/INT8/UINT8
-//    value is carried in fp32 lanes): int64 output, an fp32-carried operand truncated toward zero,
-//    integer remainder (zero divisor -> 0 in both modes, INT64_MIN % -1 -> 0).
+//  - Integer remainder, taken when either operand's runtime dtype is Int64 or the node's operands are
+//    integers by the model's element types (modOperandsAreInteger: an INT32/INT8/UINT8 value is carried
+//    in fp32 lanes): an fp32-carried operand truncated toward zero, integer remainder (zero divisor -> 0
+//    in both modes, INT64_MIN % -1 -> 0). The result is stored as int64 when either operand's runtime
+//    dtype is Int64 (the Binary rule), and otherwise as the fp32 value of the integer remainder, so an
+//    INT32 region carried in fp32 lanes keeps one storage kind for Concat and Where to read.
 //  - Float path otherwise: fp32 output, std::fmod plus the fmod 0 sign fix-up (zero divisor -> 0 for
 //    fmod 0, NaN for fmod 1). shaders/mod.comp computes the same bits on the GPU, and its integer mode
-//    follows the same resolver.
+//    follows the same resolver and stores the same fp32 lanes.
 // Every output element is one independent remainder, so both paths partition across threads.
 #include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
@@ -89,9 +91,11 @@ namespace vknn {
                 const int      threads       = cpu::threadCount(ctx.config);
                 const int64_t  minChunk      = cpu::minChunkForWork(1);
                 const auto     strideSet     = std::vector<const int64_t *> {dividendStrides.data(), divisorStrides.data()};
-                if (dividendInt64 || divisorInt64 || integerOperands)
+                const bool     int64Result   = dividendInt64 || divisorInt64;
+                if (int64Result || integerOperands)
                 {
-                    int64_t *output = cpu::allocOutI64(outputTensor, out);
+                    int64_t *integerOutput = int64Result ? cpu::allocOutI64(outputTensor, out) : nullptr;
+                    float   *floatOutput   = int64Result ? nullptr : cpu::allocOut(outputTensor, out);
                     cpu::parallelFor(threads, 0, elementCount, minChunk, [&](int64_t chunkBegin, int64_t chunkEnd) {
                         cpu::BroadcastWalk walk(out, strideSet);
                         walk.seek(chunkBegin);
@@ -99,7 +103,14 @@ namespace vknn {
                         {
                             const int64_t dividend = dividendInt64 ? dividendInt[walk.offset(kDividendSlot)] : cpu::modOperandToInt64(dividendFloat[walk.offset(kDividendSlot)]);
                             const int64_t divisor = divisorInt64 ? divisorInt[walk.offset(kDivisorSlot)] : cpu::modOperandToInt64(divisorFloat[walk.offset(kDivisorSlot)]);
-                            output[linearIndex] = cpu::modRemainderInt(dividend, divisor, floorRemainder);
+                            const int64_t remainder = cpu::modRemainderInt(dividend, divisor, floorRemainder);
+                            if (int64Result)
+                            {
+                                integerOutput[linearIndex] = remainder;
+                            } else
+                            {
+                                floatOutput[linearIndex] = (float) remainder;
+                            }
                         }
                     });
                     return;

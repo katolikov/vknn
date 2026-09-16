@@ -728,6 +728,128 @@ TEST(ModOps, IntegerElementTypesInFloatLanesTakeTheInt64Path) {
     EXPECT_EQ(floatBitsToUint(floatCast.floats()[0]), kQuietNaNBits);
 }
 
+// An integer Mod over fp32-carried operands (INT32 graph inputs) stores the fp32 value of the remainder,
+// the storage of its operands, so the integer region it belongs to keeps one storage kind: a Concat or a
+// Where reading the remainder beside the INT32 value itself reads both correctly. Concat and Where also
+// read an fp32-carried part or value beside an Int64 one, storing int64.
+TEST(ModOps, IntegerRemainderOfFloatLanesKeepsTheOperandStorageForItsReaders) {
+    enum class Reader { ConcatRemainderFirst, ConcatRemainderSecond, WhereRemainderIfTrue };
+    struct ReaderCase {
+        Reader               reader;
+        const char          *what;
+        std::vector<int32_t> expected;
+    };
+    const Shape                   valueShape {1, 4};
+    const std::vector<int32_t>    values {7, -8, 9, 10};
+    const std::vector<uint8_t>    condition {1, 0, 1, 0};
+    const std::vector<ReaderCase> cases {
+        {Reader::ConcatRemainderFirst, "Concat(Mod(x, k), x)", {1, 1, 0, 1, 7, -8, 9, 10}},
+        {Reader::ConcatRemainderSecond, "Concat(x, Mod(x, k))", {7, -8, 9, 10, 1, 1, 0, 1}},
+        {Reader::WhereRemainderIfTrue, "Where(c, Mod(x, k), x)", {1, -8, 0, 10}},
+    };
+    auto int32Feed = [](const std::string &name, const Shape &shape, const std::vector<int32_t> &payload) {
+        IOTensor feed;
+        feed.name  = name;
+        feed.shape = shape;
+        feed.dtype = DType::Int32;
+        feed.data.resize(payload.size() * sizeof(int32_t));
+        std::memcpy(feed.data.data(), payload.data(), feed.data.size());
+        return feed;
+    };
+    for (const ReaderCase &c: cases)
+    {
+        Graph    g;
+        TensorId x         = addInput(g, "x", valueShape, DType::Int32);
+        TensorId k         = addInput(g, "k", {1}, DType::Int32);
+        TensorId remainder = addTensor(g, "remainder", {});
+        addNode(g, OpType::Mod, "mod", {x, k}, {remainder});
+        TensorId y         = addTensor(g, "y", {}, DType::Int32);
+        g.desc(y).isOutput = true;
+        g.outputs.push_back(y);
+        IOTensor conditionFeed;
+        if (c.reader == Reader::WhereRemainderIfTrue)
+        {
+            TensorId mask = addInput(g, "c", valueShape, DType::UInt8);
+            addNode(g, OpType::Where, "where", {mask, remainder, x}, {y});
+            conditionFeed.name  = "c";
+            conditionFeed.shape = valueShape;
+            conditionFeed.dtype = DType::UInt8;
+            conditionFeed.data  = condition;
+        } else
+        {
+            const bool remainderFirst = c.reader == Reader::ConcatRemainderFirst;
+            addNode(g, OpType::Concat, "concat", {remainderFirst ? remainder : x, remainderFirst ? x : remainder}, {y}, {{"axis", 1}});
+        }
+        Config cfg;
+        cfg.backend    = BackendKind::Cpu;
+        cfg.cpuThreads = 1;
+        auto session   = Session::create(std::move(g), cfg);
+        ASSERT_TRUE(session) << c.what;
+        std::vector<IOTensor> feeds {int32Feed("x", valueShape, values), int32Feed("k", {1}, {3})};
+        if (c.reader == Reader::WhereRemainderIfTrue)
+        {
+            feeds.push_back(conditionFeed);
+        }
+        std::vector<IOTensor> outs;
+        ASSERT_EQ(session->run(feeds, outs), Status::Ok) << c.what;
+        ASSERT_EQ(outs.size(), 1u) << c.what;
+        ASSERT_EQ(outs[0].data.size(), c.expected.size() * sizeof(int32_t)) << c.what;
+        std::vector<int32_t> got(c.expected.size());
+        std::memcpy(got.data(), outs[0].data.data(), outs[0].data.size());
+        EXPECT_EQ(got, c.expected) << c.what;
+    }
+
+    // An Int64 part or value beside an fp32-carried INT32 one: the result is int64 and reads both exactly.
+    for (bool whereReader: {false, true})
+    {
+        Graph    g;
+        TensorId wide      = addInput(g, "wide", {2}, DType::Int64);
+        TensorId narrow    = addInput(g, "narrow", {2}, DType::Int32);
+        TensorId y         = addTensor(g, "y", {}, DType::Int64);
+        g.desc(y).isOutput = true;
+        g.outputs.push_back(y);
+        std::vector<IOTensor> feeds;
+        IOTensor              wideFeed;
+        wideFeed.name  = "wide";
+        wideFeed.shape = {2};
+        wideFeed.dtype = DType::Int64;
+        const std::vector<int64_t> wideValues {int64_t {1} << 40, -3};
+        wideFeed.data.resize(sizeof(int64_t) * wideValues.size());
+        std::memcpy(wideFeed.data.data(), wideValues.data(), wideFeed.data.size());
+        feeds.push_back(wideFeed);
+        feeds.push_back(int32Feed("narrow", {2}, {-5, 6}));
+        std::vector<int64_t> expected;
+        if (whereReader)
+        {
+            TensorId mask = addInput(g, "c", {2}, DType::UInt8);
+            addNode(g, OpType::Where, "where", {mask, narrow, wide}, {y});
+            IOTensor maskFeed;
+            maskFeed.name  = "c";
+            maskFeed.shape = {2};
+            maskFeed.dtype = DType::UInt8;
+            maskFeed.data  = {1, 0};
+            feeds.push_back(maskFeed);
+            expected = {-5, -3};
+        } else
+        {
+            addNode(g, OpType::Concat, "concat", {narrow, wide}, {y}, {{"axis", 0}});
+            expected = {-5, 6, int64_t {1} << 40, -3};
+        }
+        Config cfg;
+        cfg.backend    = BackendKind::Cpu;
+        cfg.cpuThreads = 1;
+        auto session   = Session::create(std::move(g), cfg);
+        ASSERT_TRUE(session);
+        std::vector<IOTensor> outs;
+        ASSERT_EQ(session->run(feeds, outs), Status::Ok);
+        ASSERT_EQ(outs.size(), 1u);
+        ASSERT_EQ(outs[0].data.size(), expected.size() * sizeof(int64_t)) << (whereReader ? "Where" : "Concat");
+        std::vector<int64_t> got(expected.size());
+        std::memcpy(got.data(), outs[0].data.data(), outs[0].data.size());
+        EXPECT_EQ(got, expected) << (whereReader ? "Where" : "Concat");
+    }
+}
+
 // Infinite and NaN operands: an infinite or NaN dividend or a NaN divisor gives the canonical positive
 // quiet NaN (even from a negative NaN operand); a finite dividend over an infinite divisor is the
 // dividend (fmod 1), which fmod 0 moves by the infinite divisor when their signs differ.
