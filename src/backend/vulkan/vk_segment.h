@@ -58,11 +58,11 @@ namespace vknn {
         std::map<TensorId, std::shared_ptr<vk::Buffer>> buffers_;
         std::vector<std::unique_ptr<VulkanOp>>          ops_;
         VkOpEnv                                         env_;
-        // Memo of the flat device buffer uploaded for each initializer of this segment's graph (weak:
-        // the ops own the buffers). A weight feeding several nodes resolves through it instead of
-        // re-digesting host bytes the first upload already released.
-        std::map<TensorId, std::weak_ptr<vk::Buffer>> flatWeightByTensor_;
-        VkCommandBuffer                               cmd_ = VK_NULL_HANDLE;
+        // Memo of the device buffer uploaded for each initializer of this segment's graph, per store it
+        // holds (weak: the ops own the buffers). A weight feeding several nodes at one store resolves
+        // through it instead of re-digesting host bytes the first upload already released.
+        std::map<InitializerDeviceCopyKey, std::weak_ptr<vk::Buffer>> flatWeightByTensor_;
+        VkCommandBuffer                                               cmd_ = VK_NULL_HANDLE;
         std::vector<VkCommandBuffer> cmds_; // chunked submits (one entry unless the segment is split for the GPU watchdog; see Config::maxSubmitNodes)
         VkQueryPool                  queryPool_ = VK_NULL_HANDLE;
         bool                         recorded_  = false;

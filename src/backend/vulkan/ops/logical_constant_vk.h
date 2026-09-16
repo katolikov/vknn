@@ -19,7 +19,7 @@ namespace vknn { namespace logical {
     inline std::shared_ptr<vk::Buffer> constantOperandBuffer(VkOpEnv &env, TensorId id, const std::string &nodeLabel) {
         const Graph                      &g                = *env.graph;
         const TensorDesc                 &desc             = g.desc(id);
-        const std::shared_ptr<vk::Buffer> sharedDeviceCopy = env.lookupFlatWeight ? env.lookupFlatWeight(id) : nullptr;
+        const std::shared_ptr<vk::Buffer> sharedDeviceCopy = env.lookupFlatWeight ? env.lookupFlatWeight(id, flatInitializerStore(env.useFp16)) : nullptr;
         std::optional<size_t>             sharedDeviceBytes;
         if (sharedDeviceCopy)
         {

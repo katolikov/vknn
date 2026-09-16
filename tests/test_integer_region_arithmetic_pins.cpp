@@ -4,6 +4,7 @@
 // operands, while float math keeps its precision tier. Every test runs the Vulkan load sequence
 // (planFlatLayoutAndStorage) on a hand-built graph, or runStandardPasses first where the import lowering
 // is part of the case, and checks the storeFp32 marks and the ConvertDtype bridges markFp32 places.
+#include "core/segment_constant_operands.h"
 #include "core/vk_gates.h"
 #include "import/mod_integer_operands.h"
 #include "import/passes.h"
@@ -873,9 +874,11 @@ TEST(IntegerArithmeticPins, MovementOpsCarryTheRegionToTheirIntegerSources) {
 
 TEST(IntegerArithmeticPins, Nc4ConcatReadingAConstantPartKeepsTheSegmentPrecision) {
     // An NC4HW4 Concat reads each part through the segment's activation buffer, which the segment fills
-    // from a constant at its own storage precision; an fp32 Concat would read that fp16 buffer as fp32.
-    // So the Concat keeps its precision, and the integer Add reading it gets one fp16 -> fp32 bridge. A
-    // flat Concat uploads its constant parts at its own precision and joins the region.
+    // from a constant in any slot at its own storage precision (segmentFilledConstantOperandEnd covers every
+    // part, so a constant after the first part has a buffer too); an fp32 Concat would read that fp16
+    // buffer as fp32. So the Concat keeps its precision, together with the runtime part it reads, and the
+    // integer Add reading it gets one fp16 -> fp32 bridge. A flat Concat uploads its constant parts at its
+    // own precision and joins the region; the segment fills only its operand 0.
     for (size_t constantSlot = 0; constantSlot < kConcatPartCount; ++constantSlot)
     {
         Graph                 g;
@@ -892,6 +895,9 @@ TEST(IntegerArithmeticPins, Nc4ConcatReadingAConstantPartKeepsTheSegmentPrecisio
 
         planFlatLayoutAndStorage(g, "", nullptr);
         EXPECT_FALSE(g.desc(joined).gpuFlat) << "the case exercises the NC4HW4 Concat";
+        const Node *concat = findNode(g, "concat");
+        ASSERT_NE(concat, nullptr);
+        EXPECT_EQ(segmentFilledConstantOperandEnd(g, *concat), kConcatPartCount) << "the segment fills every part";
         EXPECT_FALSE(g.desc(joined).storeFp32) << "constant part in slot " << constantSlot;
         EXPECT_FALSE(g.desc(ids).storeFp32) << "constant part in slot " << constantSlot;
         EXPECT_TRUE(g.desc(other).storeFp32) << "constant part in slot " << constantSlot;
@@ -917,6 +923,9 @@ TEST(IntegerArithmeticPins, Nc4ConcatReadingAConstantPartKeepsTheSegmentPrecisio
 
         planFlatLayoutAndStorage(g, "", nullptr);
         EXPECT_TRUE(g.desc(joined).gpuFlat);
+        const Node *concat = findNode(g, "concat");
+        ASSERT_NE(concat, nullptr);
+        EXPECT_EQ(segmentFilledConstantOperandEnd(g, *concat), kSegmentFilledLeadingOperandEnd) << "a flat Concat uploads its constant parts itself";
         EXPECT_TRUE(g.desc(joined).storeFp32);
         EXPECT_TRUE(g.desc(ids).storeFp32);
         EXPECT_TRUE(g.desc(sum).storeFp32);

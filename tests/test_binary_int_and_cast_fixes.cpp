@@ -16,8 +16,9 @@
 //   transcription against the CPU oracle: every fp16 bit pattern and a stratified set of fp32 bit
 //   patterns for BOOL, a value grid for INT8 and UINT8.
 // - uploadInit's element count and payload guard (upload_init_rule.h): a rank-0 Int64/Int8/UInt8
-//   initializer counts its payload lanes at the stored width. The host tests cover only this count and
-//   guard rule; uploadInit itself runs only on a Vulkan device.
+//   initializer counts its payload lanes at the stored width. The segment's memo of initializer device
+//   copies is keyed per store (fp16, fp32, raw), and a constant read at both storage precisions keeps its
+//   host payload. The host tests cover only these rules; uploadInit itself runs only on a Vulkan device.
 //
 // Values run end to end through CPU Sessions (runStandardPasses included) or through constFold.
 #include "backend/cpu/int64_arithmetic.h"
@@ -36,6 +37,8 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <limits>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1264,4 +1267,68 @@ TEST(UploadInitRule, FloatStorageWidthsFollowTheFourAndTwoByteRule) {
             }
         }
     }
+}
+
+TEST(UploadInitRule, DeviceCopiesOfOneInitializerAreMemoizedPerStore) {
+    // A segment memoizes one device copy per (initializer, store): an fp16 flat copy, an fp32 flat copy and
+    // a raw-byte copy of the same constant never stand in for one another.
+    EXPECT_EQ(flatInitializerStore(true), InitializerDeviceStore::FlatFp16);
+    EXPECT_EQ(flatInitializerStore(false), InitializerDeviceStore::FlatFp32);
+    constexpr TensorId                      kScale = 3;
+    std::map<InitializerDeviceCopyKey, int> memo;
+    memo[InitializerDeviceCopyKey {kScale, InitializerDeviceStore::FlatFp16}]     = 16;
+    memo[InitializerDeviceCopyKey {kScale, InitializerDeviceStore::FlatFp32}]     = 32;
+    memo[InitializerDeviceCopyKey {kScale, InitializerDeviceStore::RawBytes}]     = 8;
+    memo[InitializerDeviceCopyKey {kScale + 1, InitializerDeviceStore::FlatFp16}] = 1;
+    EXPECT_EQ(memo.size(), 4u);
+    EXPECT_EQ(memo.at(InitializerDeviceCopyKey {kScale, flatInitializerStore(false)}), 32);
+    EXPECT_EQ(memo.at(InitializerDeviceCopyKey {kScale, flatInitializerStore(true)}), 16);
+}
+
+TEST(UploadInitRule, AConstantReadAtBothPrecisionsKeepsItsPayload) {
+    // scale = 8.0 feeds Mul(x, scale) -> Cast(INT64) -> Add(offset), an integer region pinned to fp32, and
+    // Mul(y, scale) -> a float graph output left at the segment's fp16 precision. The pin splits the two
+    // readers of one constant across storage precisions, so the segment must keep scale's payload for the
+    // reader at the second precision, while a constant read at one precision can release its payload.
+    Graph    g;
+    TensorId x       = addGraphInput(g, "x", {4}, DType::Float32);
+    TensorId y       = addGraphInput(g, "y", {4}, DType::Float32);
+    TensorId scale   = addFloatConstant(g, "scale", {1}, {8.0f});
+    TensorId bias    = addFloatConstant(g, "bias", {1}, {0.5f});
+    TensorId offset  = addInt64Constant(g, "offset", {1}, {7});
+    TensorId scaledX = g.addTensor({"scaled_x"});
+    TensorId scaledY = g.addTensor({"scaled_y"});
+    TensorId shifted = g.addTensor({"shifted"});
+    TensorId castX   = g.addTensor({"cast_x"});
+    addBinary(g, BinaryType::Mul, "mul_x", x, scale, scaledX);
+    addCast(g, "cast_x", scaledX, castX, kOnnxInt64);
+    TensorId sum = addGraphOutput(g, "sum", DType::Int64);
+    addNode(g, OpType::Add, "add_offset", {castX, offset}, {sum});
+    addBinary(g, BinaryType::Mul, "mul_y", y, scale, scaledY);
+    addBinary(g, BinaryType::Sub, "shift_y", scaledY, bias, shifted);
+    g.desc(shifted).isOutput = true;
+    g.outputs.push_back(shifted);
+    inferShapes(g, 1);
+    g.topoSort();
+    planFlatLayoutAndStorage(g, "", nullptr);
+
+    std::vector<int> segment;
+    const Node      *mulX = nullptr;
+    const Node      *mulY = nullptr;
+    for (int nodeIndex = 0; nodeIndex < (int) g.nodes.size(); ++nodeIndex)
+    {
+        segment.push_back(nodeIndex);
+        mulX = g.nodes[(size_t) nodeIndex].name == "mul_x" ? &g.nodes[(size_t) nodeIndex] : mulX;
+        mulY = g.nodes[(size_t) nodeIndex].name == "mul_y" ? &g.nodes[(size_t) nodeIndex] : mulY;
+    }
+    ASSERT_TRUE(mulX && mulY);
+    const auto nodeStoresFp16 = [&](const Node &node) {
+        return node.outputs.empty() || node.outputs[0] == kNoTensor || !g.desc(node.outputs[0]).storeFp32;
+    };
+    ASSERT_FALSE(nodeStoresFp16(*mulX)) << "the integer region pins mul_x to fp32";
+    ASSERT_TRUE(nodeStoresFp16(*mulY)) << "the float reader stays at the segment precision";
+    const std::set<TensorId> kept = initializersReadAtBothPrecisions(g, segment, nodeStoresFp16);
+    EXPECT_EQ(kept, (std::set<TensorId> {scale}));
+    EXPECT_FALSE(kept.count(bias)) << "a constant read at one precision releases its payload";
+    EXPECT_FALSE(kept.count(offset));
 }

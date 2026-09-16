@@ -1,3 +1,4 @@
+#include "core/segment_constant_operands.h"
 #include "import/mod_integer_operands.h"
 #include "import/onnx/onnx_types.h"
 #include "passes_internal.h"
@@ -622,15 +623,10 @@ namespace vknn {
             }
         }
 
-        // Operand slots [0, end) the segment fills from a constant into a shared activation buffer: operand
-        // 0 of every node. A Concat reads each of its parts as an activation, so all of them count.
-        constexpr size_t kSegmentFilledOperandEnd = 1;
-
-        // Whether a node reads a constant operand through the segment's shared activation buffer, so its
-        // output must keep the segment's storage precision.
+        // Whether a node reads a constant operand through the segment's shared activation buffer (the slots
+        // segmentFilledConstantOperandEnd names), so its output must keep the segment's storage precision.
         bool readsConstantAtSegmentPrecision(const Graph &g, const Node &nd) {
-            const size_t coreOperands = std::min(nd.inputs.size(), (size_t) pwCoreInputs(nd));
-            const size_t filledEnd    = nd.type == OpType::Concat ? coreOperands : std::min(coreOperands, kSegmentFilledOperandEnd);
+            const size_t filledEnd = segmentFilledConstantOperandEnd(g, nd);
             for (size_t slot = 0; slot < filledEnd; ++slot)
             {
                 if (nd.inputs[slot] != kNoTensor && g.isInitializer(nd.inputs[slot]))

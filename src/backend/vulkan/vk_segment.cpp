@@ -1,13 +1,14 @@
 #include "vk_segment.h"
-#include "backend/cpu/parallel.h" // cpu::threadCount (host boundary pack/unpack partitioning)
-#include "boundary_rebind_rule.h" // two-pass boundary rebind + the recording-stale flag rule
-#include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
-#include "core/dispatch_tally.h"  // recorded-dispatch counter + per-node attribution
-#include "core/kv_quant.h"        // int8 KV-cache scheme: eligibility rule + host codec (Hint::KvCacheQuant)
-#include "core/matmul_tile.h"     // vec4-load routing + the activation row-pad rule
-#include "core/matmul_view.h"     // kMmView (a view-addressed MatMul reads its own geometry, never a padded stride)
-#include "core/quant_int4.h"      // kWq (a packed-quantized MatMul has its own operand layout)
-#include "import/passes.h"        // readI64Param (raster-core view-eligibility diagnostic)
+#include "backend/cpu/parallel.h"           // cpu::threadCount (host boundary pack/unpack partitioning)
+#include "boundary_rebind_rule.h"           // two-pass boundary rebind + the recording-stale flag rule
+#include "core/boundary_pack.h"             // parallel canonical<->boundary layout/precision conversion
+#include "core/dispatch_tally.h"            // recorded-dispatch counter + per-node attribution
+#include "core/kv_quant.h"                  // int8 KV-cache scheme: eligibility rule + host codec (Hint::KvCacheQuant)
+#include "core/matmul_tile.h"               // vec4-load routing + the activation row-pad rule
+#include "core/matmul_view.h"               // kMmView (a view-addressed MatMul reads its own geometry, never a padded stride)
+#include "core/quant_int4.h"                // kWq (a packed-quantized MatMul has its own operand layout)
+#include "core/segment_constant_operands.h" // constant operands the segment fills into activation buffers
+#include "import/passes.h"                  // readI64Param (raster-core view-eligibility diagnostic)
 #include "ops/boundary_convert.h"
 #include "vk_backend.h"
 #include "vknn/dtype.h"
@@ -1251,11 +1252,13 @@ namespace vknn {
             env_.gpuTag = tag;
         }
         // Const-folding can leave an initializer as a spatial op's ACTIVATION input[0] (e.g. a baked
-        // image constant fed through Cast->Resize). Such ops read input[0] via env.devBuf(), which
-        // returns null for initializers — they are otherwise consumed only as weights via operandBuf.
-        // Materialize any such constant into an activation buffer packed in its assigned layout so every
-        // devBuf-reading op finds a valid buffer. operandBuf consumers are unaffected: they test
-        // isInitializer first and upload their own flat copy, ignoring this entry.
+        // image constant fed through Cast->Resize), and an NC4HW4 Concat reads every part as an
+        // activation. Such ops read those operands via env.devBuf(), which returns null for initializers
+        // — they are otherwise consumed only as weights via operandBuf. Materialize every such constant
+        // (the slots segmentFilledConstantOperandEnd names, plus the fused residual) into an activation
+        // buffer packed in its assigned layout so every devBuf-reading op finds a valid buffer. operandBuf
+        // consumers are unaffected: they test isInitializer first and upload their own flat copy, ignoring
+        // this entry.
         {
             auto materialize = [&](TensorId t) {
                 if (t == kNoTensor || !g.isInitializer(t) || buffers_.count(t))
@@ -1284,10 +1287,11 @@ namespace vknn {
             };
             for (int ni: idx)
             {
-                const Node &nd = g.nodes[ni];
-                if (!nd.inputs.empty())
+                const Node  &nd        = g.nodes[ni];
+                const size_t filledEnd = segmentFilledConstantOperandEnd(g, nd);
+                for (size_t slot = 0; slot < filledEnd; ++slot)
                 {
-                    materialize(nd.inputs[0]);
+                    materialize(nd.inputs[slot]);
                 }
                 materialize(nd.fusedResidual);
             }
@@ -1315,9 +1319,14 @@ namespace vknn {
         };
         // `g` outlives every prepare() below (it is the bucket's owned graph), so the hook can drop
         // uploaded weight payloads as the ops consume them. Session frees whatever survives.
-        env_.releaseInitializer = cfg.freeWeightsAfterUpload ? std::function<void(TensorId)>([&g](TensorId t) {
+        // An initializer this segment reads at both storage precisions keeps its payload: the reader at the
+        // second precision uploads its own copy from it.
+        const std::set<TensorId> payloadKeptInitializers = initializersReadAtBothPrecisions(g, idx, [this](const Node &nd) {
+            return nodeFp32(nd) ? false : useFp16_;
+        });
+        env_.releaseInitializer = cfg.freeWeightsAfterUpload ? std::function<void(TensorId)>([&g, payloadKeptInitializers](TensorId t) {
             auto it = g.initializers.find(t);
-            if (it == g.initializers.end())
+            if (it == g.initializers.end() || payloadKeptInitializers.count(t))
             {
                 return;
             }
@@ -1337,12 +1346,12 @@ namespace vknn {
         // Memo scoped to this segment's graph; the ops themselves own the buffers, so a weak handle
         // keeps the allocation count identical to the pre-memo path.
         flatWeightByTensor_.clear();
-        env_.lookupFlatWeight = [this](TensorId t) -> std::shared_ptr<vk::Buffer> {
-            auto it = flatWeightByTensor_.find(t);
+        env_.lookupFlatWeight = [this](TensorId t, InitializerDeviceStore store) -> std::shared_ptr<vk::Buffer> {
+            auto it = flatWeightByTensor_.find(InitializerDeviceCopyKey {t, store});
             return it == flatWeightByTensor_.end() ? nullptr : it->second.lock();
         };
-        env_.rememberFlatWeight = [this](TensorId t, std::shared_ptr<vk::Buffer> buffer) {
-            flatWeightByTensor_[t] = buffer;
+        env_.rememberFlatWeight = [this](TensorId t, InitializerDeviceStore store, std::shared_ptr<vk::Buffer> buffer) {
+            flatWeightByTensor_[InitializerDeviceCopyKey {t, store}] = buffer;
         };
         for (int ni: idx)
         {
