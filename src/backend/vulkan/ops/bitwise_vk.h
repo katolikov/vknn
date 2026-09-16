@@ -27,10 +27,10 @@ namespace vknn { namespace bitwise_vk {
 
     /// Upload constant initializer `t` flat at the node's precision (rank-0 safe: a scalar keeps its one
     /// element).
-    inline std::shared_ptr<vk::Buffer> uploadConstantOperand(VkOpEnv &env, TensorId t) {
+    inline std::shared_ptr<vk::Buffer> uploadConstantOperand(VkOpEnv &env, TensorId tensor) {
         const Graph       &g      = *env.graph;
-        std::vector<float> values = initFloats(g, t);
-        values.resize((size_t) std::max<int64_t>(1, numElements(g.desc(t).shape)));
+        std::vector<float> values = initFloats(g, tensor);
+        values.resize((size_t) std::max<int64_t>(1, numElements(g.desc(tensor).shape)));
         return upload(*env.ctx, values, env.useFp16);
     }
 
@@ -50,29 +50,29 @@ namespace vknn { namespace bitwise_vk {
             total            = (int) numElements(out);
             std::vector<int32_t> outDim(rank);
             std::vector<int32_t> strides[kOperandCount];
-            for (int k = 0; k < rank; ++k)
+            for (int axis = 0; axis < rank; ++axis)
             {
-                outDim[k] = (int) out[k];
+                outDim[axis] = (int) out[axis];
             }
             for (int operand = 0; operand < kOperandCount; ++operand)
             {
-                const TensorId       t     = node.inputs[operand];
-                const Shape          shape = g.desc(t).shape;
+                const TensorId       tensor = node.inputs[operand];
+                const Shape          shape  = g.desc(tensor).shape;
                 std::vector<int64_t> padded(rank, 1); // right-aligned into the output rank, leading dims 1
-                for (int k = 0; k < (int) shape.size(); ++k)
+                for (int axis = 0; axis < (int) shape.size(); ++axis)
                 {
-                    padded[rank - (int) shape.size() + k] = shape[k];
+                    padded[rank - (int) shape.size() + axis] = shape[axis];
                 }
                 const std::vector<int64_t> rowStride = flat::rowStrides(padded);
                 strides[operand].resize(rank);
-                for (int k = 0; k < rank; ++k)
+                for (int axis = 0; axis < rank; ++axis)
                 {
                     // A size-1 axis gets stride 0 so every output coordinate along it reads the same element.
-                    strides[operand][k] = padded[k] == 1 ? 0 : (int) rowStride[k];
+                    strides[operand][axis] = padded[axis] == 1 ? 0 : (int) rowStride[axis];
                 }
-                if (g.isInitializer(t))
+                if (g.isInitializer(tensor))
                 {
-                    constants[operand] = uploadConstantOperand(env, t);
+                    constants[operand] = uploadConstantOperand(env, tensor);
                 }
             }
             geometry = flat::uploadFlatGeom(env, {outDim, strides[kOperandA], strides[kOperandB]});
