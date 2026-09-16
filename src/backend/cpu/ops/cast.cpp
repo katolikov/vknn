@@ -5,6 +5,10 @@
 
 namespace vknn {
     namespace {
+        // ONNX TensorProto.DataType code of BOOL, the one integer target that normalizes instead of
+        // truncating.
+        constexpr int64_t kOnnxBool = 9;
+
         struct CastCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &X     = ctx.t(node.inputs[0]);
@@ -16,9 +20,30 @@ namespace vknn {
                 // 2=UINT8 3=INT8 4=UINT16 5=INT16 6=INT32 7=INT64 9=BOOL 12=UINT32 13=UINT64.
                 bool outI64 = (to == 2 || to == 3 || to == 4 || to == 5 || to == 6 || to == 7 || to == 9 || to == 12 || to == 13);
                 // Two element loops per branch, selected by the (int64 storage, float storage)
-                // product of input and output kind. Casts are elementwise, so index i maps 1:1 and
-                // the output keeps X.shape.
-                if (outI64)
+                // product of input and output kind; BOOL has its own branch. Casts are elementwise, so
+                // index i maps 1:1 and the output keeps X.shape.
+                if (to == kOnnxBool)
+                {
+                    // BOOL is a truth test, not a truncation: any nonzero value (negative, fractional,
+                    // infinite or NaN) is 1 and only +0 / -0 are 0, stored as int64 0/1 like the other
+                    // integer targets. NaN != 0 compares true under IEEE, so a NaN is 1.
+                    int64_t *y = cpu::allocOutI64(Y, X.shape);
+                    if (inI64)
+                    {
+                        const int64_t *x = X.host.i64();
+                        for (int64_t i = 0; i < n; ++i)
+                        {
+                            y[i] = x[i] != 0 ? 1 : 0;
+                        }
+                    } else
+                    {
+                        const float *x = X.host.f32();
+                        for (int64_t i = 0; i < n; ++i)
+                        {
+                            y[i] = x[i] != 0.0f ? 1 : 0;
+                        }
+                    }
+                } else if (outI64)
                 {
                     int64_t *y = cpu::allocOutI64(Y, X.shape);
                     if (inI64)

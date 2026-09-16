@@ -1,6 +1,8 @@
-// Elementwise binary family (Mul/Sub/Div/Max/Min/Pow) with NumPy-style broadcasting.
+// Elementwise binary family (Mul/Sub/Div/Max/Min/Pow) with NumPy-style broadcasting. An int64 runtime
+// operand selects exact integer arithmetic; a float base with an int64 exponent stays a float power.
 #include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
+#include "backend/cpu/int64_arithmetic.h"
 #include "backend/cpu/parallel.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -68,19 +70,40 @@ namespace vknn {
                         sB *= dimOf(sb, i);
                     }
                 };
+                // Pow types its result by the BASE (ONNX T), independent of the exponent type (T1): a float
+                // base raised to an int64 exponent is a float power. The exponent converts to fp32, the
+                // value the GPU's float lane carries, and the base is never truncated.
+                if ((BinaryType) node.subOp == BinaryType::Pow && A.dtype != DType::Int64 && B.dtype == DType::Int64)
+                {
+                    float               *y        = cpu::allocOut(Y, out);
+                    const float         *base     = A.host.f32();
+                    const int64_t       *exponent = B.host.i64();
+                    std::vector<int64_t> oa(rank), ob(rank);
+                    strides(oa, ob);
+                    cpu::parallelFor(cpu::threadCount(ctx.config), 0, n, cpu::minChunkForWork(1), [&](int64_t lo, int64_t hi) {
+                        cpu::BroadcastWalk w(out, {oa.data(), ob.data()});
+                        w.seek(lo);
+                        for (int64_t lin = lo; lin < hi; ++lin, w.next())
+                        {
+                            y[lin] = binary(base[w.offset(0)], (float) exponent[w.offset(1)], BinaryType::Pow);
+                        }
+                    });
+                    return;
+                }
                 // Shape arithmetic is int64 (Shape/Gather feed Add/Div/Mul to compute slice/reshape bounds).
                 // Compute it in int64 so const-folding stays exact — reading those bytes as float corrupts
-                // them.
+                // them. Every operation is defined for every operand value (int64_arithmetic.h).
                 if (A.dtype == DType::Int64 || B.dtype == DType::Int64)
                 {
                     int64_t             *y = cpu::allocOutI64(Y, out);
                     std::vector<int64_t> oa(rank), ob(rank);
                     strides(oa, ob);
                     // Read either operand as int64: a genuine Int64 tensor directly, a float tensor
-                    // truncated toward zero. This lets an int64 shape operand mix with a float sibling
-                    // while keeping the result in the exact integer domain.
+                    // truncated toward zero (NaN reads 0, out-of-range values saturate). This lets an int64
+                    // shape operand mix with a float sibling while keeping the result in the exact integer
+                    // domain.
                     auto val = [](const RtTensor &T, int64_t i) {
-                        return T.dtype == DType::Int64 ? T.host.i64()[i] : (int64_t) T.host.f32()[i];
+                        return T.dtype == DType::Int64 ? T.host.i64()[i] : cpu::int64FromFp32Operand(T.host.f32()[i]);
                     };
                     // Walk the output in row-major order, carrying each operand's broadcast source
                     // offset by an odometer carry instead of re-unravelling `lin` per element.
@@ -92,15 +115,15 @@ namespace vknn {
                         switch ((BinaryType) node.subOp)
                         {
                             case BinaryType::Mul:
-                                y[lin] = av * bv;
+                                y[lin] = cpu::wrappingMulInt64(av, bv);
                                 break;
                             case BinaryType::Sub:
-                                y[lin] = av - bv;
+                                y[lin] = cpu::wrappingSubInt64(av, bv);
                                 break;
                             case BinaryType::Div:
-                                // Integer division: guard the divisor so a zero yields 0 rather than a
-                                // hardware trap (the float path relies on IEEE inf/NaN instead).
-                                y[lin] = bv ? av / bv : 0;
+                                // Integer division: a zero divisor yields 0 and INT64_MIN / -1 wraps, never
+                                // a hardware trap (the float path relies on IEEE inf/NaN instead).
+                                y[lin] = cpu::divideInt64(av, bv);
                                 break;
                             case BinaryType::Max:
                                 y[lin] = std::max(av, bv);
@@ -108,8 +131,11 @@ namespace vknn {
                             case BinaryType::Min:
                                 y[lin] = std::min(av, bv);
                                 break;
+                            case BinaryType::Pow:
+                                y[lin] = cpu::powInt64(av, bv);
+                                break;
                             default:
-                                y[lin] = av + bv;
+                                y[lin] = cpu::wrappingAddInt64(av, bv);
                                 break;
                         }
                     }

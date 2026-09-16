@@ -2,6 +2,7 @@
 // with the matching shaders/*.comp) and a few small upload/dispatch helpers. Each operator
 // lives in its own .cpp next to this header.
 #pragma once
+#include "backend/vulkan/ops/upload_init_rule.h"
 #include "backend/vulkan/vk_op_env.h"
 #include "backend/vulkan/vk_weight_cache.h"
 #include "vknn/dtype.h"
@@ -229,22 +230,19 @@ namespace vknn {
     inline std::shared_ptr<vk::Buffer> uploadInit(VkOpEnv &env, TensorId id, const Shape &shape) {
         const Graph      &g  = *env.graph;
         const HostBuffer &hb = g.initializers.at(id);
-        int64_t           n  = numElements(shape);
-        if (n <= 0)
+        const DType       dt = g.desc(id).dtype;
+        // A 0-D scalar counts the lanes its payload holds at the stored dtype's native width
+        // (upload_init_rule.h), so a rank-0 Int64/Int8/UInt8 constant binds its value.
+        const int64_t n = uploadInitElemCount(shape, dt, hb.bytes.size());
+        // initFloats materializes the payload at its declared dtype, one dtypeSize(dt)-byte lane per
+        // element. A PACKED quantized weight keeps a Float16 logical desc but a smaller payload (the
+        // native MatMul reads it through uploadInitRaw, never here); reaching this flat path with such
+        // a weight would read out of bounds. Guard it as a clear error naming the tensor, not a segfault.
         {
-            n = (int64_t) (hb.bytes.size() / (g.desc(id).dtype == DType::Float16 ? 2 : 4)); // 0-D scalar
-        }
-        // initFloats materializes the payload at its declared dtype: a Float16 initializer must hold
-        // exactly n*2 bytes, an fp32/other exactly n*elemSize. A PACKED quantized weight keeps a
-        // Float16 logical desc but a smaller payload (the native MatMul reads it through
-        // uploadInitRaw, never here); reaching this flat path with such a weight would read out of
-        // bounds. Guard it as a clear error naming the tensor, not a segfault.
-        {
-            const DType   dt       = g.desc(id).dtype;
-            const int64_t elemSize = dt == DType::Float16 ? 2 : (dt == DType::Int64 ? 8 : 4);
-            if (n > 0 && hb.bytes.size() < (size_t) n * (size_t) elemSize)
+            const size_t neededBytes = uploadInitPayloadBytesNeeded(n, dt);
+            if (hb.bytes.size() < neededBytes)
             {
-                throw Error(Status::InvalidArgument, "uploadInit: '" + g.tensors[id].name + "' payload is " + std::to_string(hb.bytes.size()) + " bytes but its " + dtypeStr(dt) + " [" + std::to_string(n) + "] shape needs " + std::to_string((size_t) n * (size_t) elemSize) + " (a packed quantized weight reached the flat upload path instead of the native kernel)");
+                throw Error(Status::InvalidArgument, "uploadInit: '" + g.tensors[id].name + "' payload is " + std::to_string(hb.bytes.size()) + " bytes but its " + dtypeStr(dt) + " [" + std::to_string(n) + "] shape needs " + std::to_string(neededBytes) + " (a packed quantized weight reached the flat upload path instead of the native kernel)");
             }
         }
         auto make = [&] {

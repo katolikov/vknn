@@ -2,6 +2,7 @@
 // take a NEON fast path; broadcasting falls back to the general index walk.
 #include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
+#include "backend/cpu/int64_arithmetic.h"
 #include "backend/cpu/parallel.h"
 #include "vknn/logging.h"
 #include <algorithm>
@@ -39,9 +40,10 @@ namespace vknn {
                     int64_t  n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                     int64_t *y = cpu::allocOutI64(Y, out);
                     // Read either operand as int64: a float operand (mixed-dtype shape arithmetic) is
-                    // truncated toward zero, since this path only sees integral index/bound values.
+                    // truncated toward zero, since this path only sees integral index/bound values (NaN
+                    // reads 0 and out-of-range values saturate, so the conversion is always defined).
                     auto val = [](const RtTensor &T, int64_t i) {
-                        return T.dtype == DType::Int64 ? T.host.i64()[i] : (int64_t) T.host.f32()[i];
+                        return T.dtype == DType::Int64 ? T.host.i64()[i] : cpu::int64FromFp32Operand(T.host.f32()[i]);
                     };
                     // Per-axis input strides in row-major (C-contiguous) order, built right to left.
                     // A broadcast axis (input dim 1, output dim > 1) gets stride 0 so every output index
@@ -62,7 +64,7 @@ namespace vknn {
                     w.seek(0);
                     for (int64_t lin = 0; lin < n; ++lin, w.next())
                     {
-                        y[lin] = val(A, w.offset(0)) + val(B, w.offset(1));
+                        y[lin] = cpu::wrappingAddInt64(val(A, w.offset(0)), val(B, w.offset(1))); // wraps modulo 2^64
                     }
                     return;
                 }
