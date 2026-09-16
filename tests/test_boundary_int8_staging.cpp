@@ -11,12 +11,13 @@
 //   staging dtypes, the 8-bit storage requirement and the boundary storage dtype.
 // - CMakeLists.txt's bc_variant lines build exactly the rule's variant set, with the element types and
 //   variant defines each pair needs, and the shader tests exactly those defines.
-// - GLSL does not run on the host, so boundary_convert.comp's int8 source and int8 destination arms are
-//   transcribed below; a source check pins the shader's lines and constants to the transcription. The
-//   int8 source arm is compared with the CPU Session's bindInput decode over all 256 bytes, the int8
-//   destination arm with the Session's readbackOutput narrowing over every finite fp16 value and an
-//   fp32 grid. The host lane decode (bindInput and the Vulkan host upload) is checked against the value
-//   the test states for each dtype's lanes, and int64 lanes also against a CPU Session run.
+// - GLSL does not run on the host, so boundary_convert.comp's int8 source and uint8 / int8 destination
+//   arms are transcribed below; a source check pins the shader's lines and constants to the
+//   transcription. The int8 source arm is compared with the CPU Session's bindInput decode over all 256
+//   bytes, the destination arms with the Session's readbackOutput narrowing over every fp16 bit pattern
+//   and fp32 lanes inside and outside the int range (NaN and infinities included). The host lane decode
+//   (bindInput and the Vulkan host upload) is checked against the value the test states for each dtype's
+//   lanes, and int64 lanes also against a CPU Session run.
 #include "core/boundary_convert_rule.h"
 #include "vknn/binary_type.h"
 #include "vknn/graph.h"
@@ -27,6 +28,7 @@
 #include <cstring>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <set>
@@ -161,12 +163,15 @@ namespace {
     // The lines strictly between the preprocessor line `opening` and the next preprocessor line. Empty
     // when `opening` is absent.
     std::vector<std::string> preprocessorArm(const std::vector<std::string> &lines, const std::string &opening) {
-        const auto               start = std::find(lines.begin(), lines.end(), opening);
+        // The last line spelled `opening`: the arms of main() follow the constant blocks, which may open with
+        // the same directive.
+        const auto               found = std::find(lines.rbegin(), lines.rend(), opening);
         std::vector<std::string> body;
-        if (start == lines.end())
+        if (found == lines.rend())
         {
             return body;
         }
+        const auto start = std::prev(found.base());
         for (auto it = start + 1; it != lines.end() && it->rfind("#", 0) != 0; ++it)
         {
             body.push_back(*it);
@@ -175,17 +180,27 @@ namespace {
     }
 
     // --- transcription of shaders/boundary_convert.comp ------------------------------------------------
-    // int8DestinationStoredValue and int8SourceElement transcribe the INT_DST_I8 and INT_SRC_I8 arms of
-    // main() line for line, each C++ line trailed by the shader line it mirrors; `source` stands for the
-    // source lane s[encode(pc.srcFmt, n, c, h, w)]. The tables below hold the shader's own lines
-    // (normalized, comments dropped) and BoundaryConvertShaderSource checks the shader against them, so a
-    // shader edit the transcription does not follow fails a test.
+    // uint8DestinationStoredValue, int8DestinationStoredValue and int8SourceElement transcribe the
+    // INT_DST_U8, INT_DST_I8 and INT_SRC_I8 arms of main() line for line, each C++ line trailed by the
+    // shader line it mirrors; `source` stands for the source lane s[encode(pc.srcFmt, n, c, h, w)]. The
+    // tables below hold the shader's own lines (normalized, comments dropped) and
+    // BoundaryConvertShaderSource checks the shader against them, so a shader edit the transcription does
+    // not follow fails a test.
 
-    const std::string kInt8DestinationArmOpening = "#elif defined(INT_DST_I8)";
-    const std::string kInt8SourceArmOpening      = "#elif defined(INT_SRC_I8)";
+    const std::string kUInt8DestinationArmOpening = "#if defined(INT_DST_U8)";
+    const std::string kInt8DestinationArmOpening  = "#elif defined(INT_DST_I8)";
+    const std::string kInt8SourceArmOpening       = "#elif defined(INT_SRC_I8)";
+
+    const std::vector<std::string> kUInt8DestinationArmLines {
+        "float value = float(s[encode(pc.srcFmt, n, c, h, w)]);",
+        "d[i] = DST_T(isnan(value) ? 0 : int(clamp(trunc(value), kUInt8Min, kUInt8Max)));",
+    };
 
     const std::vector<std::string> kInt8DestinationArmLines {
-        "int lowByte = int(float(s[encode(pc.srcFmt, n, c, h, w)])) & kInt8LowByteMask;",
+        "float value = float(s[encode(pc.srcFmt, n, c, h, w)]);",
+        "float truncated = trunc(value);",
+        "float lowByteFloat = truncated - kByteModulusFloat * floor(truncated / kByteModulusFloat);",
+        "int lowByte = (isnan(value) || value <= -kInt64RangeEndFloat) ? 0 : (value >= kInt64RangeEndFloat ? kInt8LowByteMask : int(lowByteFloat));",
         "d[i] = DST_T(lowByte >= kInt8SignBit ? lowByte - kInt8Modulus : lowByte);",
     };
 
@@ -193,21 +208,44 @@ namespace {
         "d[i] = DST_T(int(s[encode(pc.srcFmt, n, c, h, w)]));",
     };
 
-    constexpr int kInt8LowByteMask = 0xFF;  // const int kInt8LowByteMask = 0xFF;
-    constexpr int kInt8SignBit     = 0x80;  // const int kInt8SignBit     = 0x80;
-    constexpr int kInt8Modulus     = 0x100; // const int kInt8Modulus     = 0x100;
+    constexpr int   kInt8LowByteMask    = 0xFF;                   // const int kInt8LowByteMask = 0xFF;
+    constexpr int   kInt8SignBit        = 0x80;                   // const int kInt8SignBit     = 0x80;
+    constexpr int   kInt8Modulus        = 0x100;                  // const int kInt8Modulus     = 0x100;
+    constexpr float kUInt8Min           = 0.0f;                   // const float kUInt8Min = 0.0;
+    constexpr float kUInt8Max           = 255.0f;                 // const float kUInt8Max = 255.0;
+    constexpr float kByteModulusFloat   = 256.0f;                 // const float kByteModulusFloat = 256.0;
+    constexpr float kInt64RangeEndFloat = 9223372036854775808.0f; // const float kInt64RangeEndFloat = 9223372036854775808.0;
+
+    // 2^31: GLSL int(float) is defined for values in (-2^31 - 1, 2^31), which truncate into the int range.
+    constexpr double kGlslIntRangeEnd = 2147483648.0;
 
     // GLSL int(float): truncation toward zero. Like the GLSL conversion it is defined only for values
-    // inside the int range; the sweeps feed it nothing else.
+    // inside the int range, and the arms narrow a lane in float before converting it, so a value outside
+    // that range fails the sweep instead of converting.
     int glslInt(float value) {
+        EXPECT_TRUE(value > -kGlslIntRangeEnd - 1.0 && value < kGlslIntRangeEnd) << "int() of " << value << " is undefined";
         return (int) value;
+    }
+
+    // GLSL clamp(x, minVal, maxVal), specified as min(max(x, minVal), maxVal).
+    float glslClamp(float value, float lo, float hi) {
+        return std::min(std::max(value, lo), hi);
+    }
+
+    // INT_DST_U8 with SRC_T float (an fp16 or uint8 source widens exactly to the same float first).
+    int uint8DestinationStoredValue(float source) {
+        float value = source;                                                                       // float value = float(s[encode(pc.srcFmt, n, c, h, w)]);
+        return std::isnan(value) ? 0 : glslInt(glslClamp(std::trunc(value), kUInt8Min, kUInt8Max)); // d[i] = DST_T(isnan(value) ? 0 : int(clamp(trunc(value), kUInt8Min, kUInt8Max)));
     }
 
     // INT_DST_I8 with SRC_T float (an fp16 source widens exactly to the same float first). Returns the int
     // the arm hands to DST_T (int8_t), so a caller can check it is already inside the int8 range and the
     // store never relies on a narrowing conversion.
     int int8DestinationStoredValue(float source) {
-        int lowByte = glslInt(source) & kInt8LowByteMask;                  // int lowByte = int(float(s[encode(pc.srcFmt, n, c, h, w)])) & kInt8LowByteMask;
+        float value     = source;            // float value = float(s[encode(pc.srcFmt, n, c, h, w)]);
+        float truncated = std::trunc(value); // float truncated = trunc(value);
+        float lowByteFloat = truncated - kByteModulusFloat * std::floor(truncated / kByteModulusFloat); // float lowByteFloat = truncated - kByteModulusFloat * floor(truncated / kByteModulusFloat);
+        int lowByte = (std::isnan(value) || value <= -kInt64RangeEndFloat) ? 0 : (value >= kInt64RangeEndFloat ? kInt8LowByteMask : glslInt(lowByteFloat)); // int lowByte = (isnan(value) || value <= -kInt64RangeEndFloat) ? 0 : (value >= kInt64RangeEndFloat ? kInt8LowByteMask : int(lowByteFloat));
         return lowByte >= kInt8SignBit ? lowByte - kInt8Modulus : lowByte; // d[i] = DST_T(lowByte >= kInt8SignBit ? lowByte - kInt8Modulus : lowByte);
     }
 
@@ -508,6 +546,24 @@ TEST(BoundaryConvertShaderSource, TranscribedInt8ArmsAndConstantsMatchBoundaryCo
         std::snprintf(declaration, sizeof(declaration), "const int %s = 0x%X;", constant.name, (unsigned) constant.value);
         EXPECT_NE(std::find(lines.begin(), lines.end(), std::string(declaration)), lines.end()) << "boundary_convert.comp lacks `" << declaration << "`";
     }
+    // The float constants, spelled as the shader spells them, against the transcription's values.
+    struct FloatConstantDeclaration {
+        const char *declaration;
+        float       shaderValue;
+        float       transcribedValue;
+    };
+    const std::vector<FloatConstantDeclaration> floatConstants {
+        {"const float kUInt8Min = 0.0;", 0.0f, kUInt8Min},
+        {"const float kUInt8Max = 255.0;", 255.0f, kUInt8Max},
+        {"const float kByteModulusFloat = 256.0;", 256.0f, kByteModulusFloat},
+        {"const float kInt64RangeEndFloat = 9223372036854775808.0;", 9223372036854775808.0f, kInt64RangeEndFloat},
+    };
+    for (const FloatConstantDeclaration &constant: floatConstants)
+    {
+        EXPECT_NE(std::find(lines.begin(), lines.end(), std::string(constant.declaration)), lines.end()) << "boundary_convert.comp lacks `" << constant.declaration << "`";
+        EXPECT_EQ(constant.shaderValue, constant.transcribedValue) << constant.declaration;
+    }
+    EXPECT_EQ(preprocessorArm(lines, kUInt8DestinationArmOpening), kUInt8DestinationArmLines);
     EXPECT_EQ(preprocessorArm(lines, kInt8DestinationArmOpening), kInt8DestinationArmLines);
     EXPECT_EQ(preprocessorArm(lines, kInt8SourceArmOpening), kInt8SourceArmLines);
 
@@ -577,31 +633,53 @@ TEST(BoundaryInt8Staging, SignedByteSourceMatchesCpuBindInputForEveryByte) {
     }
 }
 
-TEST(BoundaryInt8Staging, SignedByteDestinationMatchesReadbackNarrowing) {
-    // Every finite fp16 value (the f16_i8 variant's whole input domain) and an fp32 grid inside the int
-    // range (the f32_i8 variant): wrap boundaries, half-integers, negative zero and the int extremes.
-    std::vector<float> values;
-    constexpr uint32_t kFp16PatternCount = 1u << 16;
-    for (uint32_t bits = 0; bits < kFp16PatternCount; ++bits)
-    {
-        const float value = halfToFloat((fp16_t) bits);
-        if (std::isfinite(value))
+namespace {
+
+    // Lanes the 8-bit destination sweeps feed both the transcription and the Session readback: every fp16
+    // bit pattern (the f16 variants' whole input domain, infinities and NaNs included), a grid across the
+    // wrap and saturation boundaries, and fp32 lanes at and beyond the int range: 2^31 and its neighbours,
+    // multiples of 256 and odd bytes above 2^24, values up to and past 2^63, +-infinity and NaN.
+    std::vector<float> eightBitDestinationSweep() {
+        std::vector<float> values;
+        constexpr uint32_t kFp16PatternCount = 1u << 16;
+        for (uint32_t bits = 0; bits < kFp16PatternCount; ++bits)
         {
-            values.push_back(value);
+            values.push_back(halfToFloat((fp16_t) bits));
         }
+        constexpr int   kWrapGridHalfWidth = 1024;
+        constexpr float kWrapGridStep      = 0.5f;
+        for (int step = -kWrapGridHalfWidth; step <= kWrapGridHalfWidth; ++step)
+        {
+            values.push_back((float) step * kWrapGridStep);
+        }
+        const float twoToThe63 = 9223372036854775808.0f;
+        const float infinity   = std::numeric_limits<float>::infinity();
+        for (float edge: {-0.0f, 127.0f, 127.99f, 128.0f, -128.0f, -128.99f, -129.0f, 255.0f, 256.0f, 65535.0f, 65536.0f, 16777216.0f, 16777217.0f, 16777471.0f, std::nextafter(kInt32RangeLimit, 0.0f), -kInt32RangeLimit, kInt32RangeLimit, std::nextafter(kInt32RangeLimit, infinity), 3.0e9f, -3.0e9f, 4294967296.0f, 1099511627904.0f, -1099511627776.0f, 1.0e18f, std::nextafter(twoToThe63, 0.0f), -std::nextafter(twoToThe63, 0.0f), twoToThe63, -twoToThe63, 1.0e20f, -1.0e20f, std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(), infinity, -infinity, std::numeric_limits<float>::quiet_NaN(), -std::numeric_limits<float>::quiet_NaN()})
+        {
+            values.push_back(edge);
+        }
+        return values;
     }
-    constexpr int   kWrapGridHalfWidth = 1024;
-    constexpr float kWrapGridStep      = 0.5f;
-    for (int step = -kWrapGridHalfWidth; step <= kWrapGridHalfWidth; ++step)
+
+} // namespace
+
+TEST(BoundaryInt8Staging, UnsignedByteDestinationMatchesReadbackNarrowing) {
+    const std::vector<float>    values = eightBitDestinationSweep();
+    const std::vector<IOTensor> outs   = runIdentityOnCpu(DType::Float32, DType::UInt8, (int64_t) values.size(), bytesOf(values.data(), values.size()));
+    ASSERT_EQ(outs.size(), 1u);
+    ASSERT_EQ(outs[0].dtype, DType::UInt8);
+    ASSERT_EQ(outs[0].data.size(), values.size());
+    for (size_t k = 0; k < values.size(); ++k)
     {
-        values.push_back((float) step * kWrapGridStep);
+        EXPECT_EQ(uint8DestinationStoredValue(values[k]), (int) outs[0].data[k]) << values[k];
     }
-    const float largestBelowInt32Limit = std::nextafter(kInt32RangeLimit, 0.0f);
-    for (float edge: {-0.0f, 127.0f, 127.99f, 128.0f, -128.0f, -128.99f, -129.0f, 255.0f, 256.0f, 65535.0f, 65536.0f, 16777216.0f, largestBelowInt32Limit, -kInt32RangeLimit})
-    {
-        values.push_back(edge);
-    }
-    const std::vector<IOTensor> outs = runIdentityOnCpu(DType::Float32, DType::Int8, (int64_t) values.size(), bytesOf(values.data(), values.size()));
+}
+
+TEST(BoundaryInt8Staging, SignedByteDestinationMatchesReadbackNarrowing) {
+    // The sweep covers every lane, including those outside the int range, where the arm takes the low byte
+    // in float and a NaN or a value past +-2^63 takes the saturated int64's low byte.
+    const std::vector<float>    values = eightBitDestinationSweep();
+    const std::vector<IOTensor> outs   = runIdentityOnCpu(DType::Float32, DType::Int8, (int64_t) values.size(), bytesOf(values.data(), values.size()));
     ASSERT_EQ(outs.size(), 1u);
     ASSERT_EQ(outs[0].dtype, DType::Int8);
     ASSERT_EQ(outs[0].data.size(), values.size());

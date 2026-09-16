@@ -1,5 +1,6 @@
 #include "vknn/session.h"
 #include "../import/passes.h"
+#include "backend/cpu/int64_arithmetic.h"
 #include "core/boundary_convert_rule.h"
 #include "core/quant_weights.h"
 #include "vknn/logging.h"
@@ -71,8 +72,11 @@ namespace vknn {
         auto srcF32 = [&](int64_t i) -> float {
             return srcI64 ? (float) rt.host.i64()[i] : rt.host.f32()[i];
         };
+        // An fp32 lane converts to int64 truncated toward zero, a NaN reading 0 and a value outside the
+        // int64 range saturating, so every narrowing below is defined for every lane (the GPU boundary
+        // conversion reproduces the same rule, core/boundary_convert_rule.h).
         auto srcI = [&](int64_t i) -> int64_t {
-            return srcI64 ? rt.host.i64()[i] : (int64_t) rt.host.f32()[i];
+            return srcI64 ? rt.host.i64()[i] : cpu::int64FromFp32Operand(rt.host.f32()[i]);
         };
         io.data.assign((size_t) elems * dtypeSize(dst), 0);
         switch (dst)

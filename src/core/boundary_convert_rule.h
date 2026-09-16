@@ -17,8 +17,9 @@
 //     normalized); exact in both storage precisions.
 //   fp32 / fp16 device -> uint8 destination: truncate toward zero, saturate to [0, 255].
 //   fp32 / fp16 device -> int8 destination: truncate toward zero, wrap modulo 2^8 into [-128, 127].
-// The destination rules are the Session's readbackOutput narrowing, defined for values inside the
-// int range.
+// The destination rules are the Session's readbackOutput narrowing of the lane's int64 value, which is
+// defined for every fp32 value: a NaN reads 0 and a value at or beyond +-2^63 (infinities included)
+// saturates to INT64_MAX / INT64_MIN before the narrowing (uint8: 255 / 0, int8: -1 / 0).
 //
 // tests/test_boundary_int8_staging.cpp pins this.
 #pragma once
