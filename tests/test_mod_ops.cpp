@@ -1206,10 +1206,10 @@ TEST(ModOps, ShaderExactFmodTranscriptionMatchesStdFmodBitwise) {
     const float                        denormMin = std::numeric_limits<float>::denorm_min();
     const float                        floatMax  = std::numeric_limits<float>::max();
     const float                        floatMin  = std::numeric_limits<float>::min();
-    const std::vector<float>           specials {0.0f,       -0.0f,     kInf,     -kInf,     kNaN,       uintBitsToFloat(kNegativeNaNBits),
-                                                 floatMax,   -floatMax, floatMin, denormMin, -denormMin, 1.0f,
-                                                 -1.0f,      3.0f,      0.5f,     1e30f,     3e-30f,     16777216.0f,
-                                                 16777217.0f};
+    const std::vector<float>           specials  = {0.0f,       -0.0f,     kInf,     -kInf,     kNaN,       uintBitsToFloat(kNegativeNaNBits),
+                                                    floatMax,   -floatMax, floatMin, denormMin, -denormMin, 1.0f,
+                                                    -1.0f,      3.0f,      0.5f,     1e30f,     3e-30f,     16777216.0f,
+                                                    16777217.0f};
 
     std::vector<std::pair<float, float>> pairs;
     for (int i = 0; i < kPairsPerCategory; ++i)

@@ -1097,7 +1097,8 @@ TEST(ArgExtremePlan, GateRefusesExactlyTheGeometriesThePlanCannotRun) {
         {{kArgExtremeMaxExactFp32Index + 2, 1}, 0, kExactIndex},
         {{kArgExtremeMaxExactFp32Index + 2, 1}, 1, nullptr},
         {{0, 3, 4}, 1, nullptr},
-        {{0, 4, 65536, 65536}, 1, kAddressing}, // empty, but inner does not fit the int32 push constant
+        // empty, but inner does not fit the int32 push constant
+        {{0, 4, 65536, 65536}, 1, kAddressing},
     };
     for (const Case &c: cases)
     {
