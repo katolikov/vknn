@@ -365,6 +365,21 @@ def _instancenorm_reason(node, graph, index):
     return None
 
 
+def _mean_reason(node):
+    """Blocker reason for a Mean the importer cannot lower, or None when it lowers.
+
+    Mirrors src/import/lower_variadic_elementwise.cpp: a Mean with one or more operands lowers to a
+    left-fold chain of 2-input Adds and one Mul by the reciprocal operand count (one operand becomes an
+    Identity); a node without operands, or with an empty operand name, is rejected at import.
+    OpType::Mean itself has no kernel.
+    """
+    if not node.input:
+        return "op Mean — no inputs (import lowers one or more operands to Add + Mul; zero is rejected)"
+    if any(not name for name in node.input):
+        return "op Mean — an operand input is missing (import requires every operand)"
+    return None
+
+
 def _dropout_reason(node, graph, consumed):
     """Blocker reason for a Dropout the importer cannot erase, or None when it erases.
 
@@ -416,6 +431,11 @@ def scan_nodes(graph, path, name_to_type, vk_ops, cpu_ops, rep, parent_index=Non
         elif node.op_type == "Dropout":
             # Erased at import when inference-mode (see _dropout_reason); otherwise kernel-less.
             reason = _dropout_reason(node, graph, consumed)
+            if reason:
+                rep.blocker("no kernel", reason, label)
+        elif node.op_type == "Mean":
+            # Lowered at import to Add + Mul (see _mean_reason); OpType::Mean has no kernel.
+            reason = _mean_reason(node)
             if reason:
                 rep.blocker("no kernel", reason, label)
         elif node.op_type == "InstanceNormalization":

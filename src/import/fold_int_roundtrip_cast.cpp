@@ -95,9 +95,14 @@ namespace vknn {
             } else if (nd.type == OpType::Cast)
             {
                 out = onnxIsFloat(nd.attr.geti("to", 1)) ? DType::Float32 : DType::Int64;
-            } else if (nd.type == OpType::Equal)
+            } else if (nd.type == OpType::Equal || nd.type == OpType::Or || nd.type == OpType::Xor || nd.type == OpType::Not)
             {
                 out = DType::Int32; // boolean result, not float
+            } else if (nd.type == OpType::ArgMax || nd.type == OpType::ArgMin)
+            {
+                // Indices are int64 whatever the data dtype, so a Cast-to-float of them is a genuine
+                // int->float conversion and must be kept (TopK's indices output, below, is the same).
+                out = DType::Int64;
             } else if (nd.type == OpType::TopK)
             {
                 if (nd.outputs.size() > 1)

@@ -39,6 +39,7 @@ REPO_DEFAULT = os.path.dirname(HERE)
 #   - the quantized family is lowered to float ops by dequantizeGraph (ADR-0012 §2)
 #   - Dropout is removed in inference mode by eliminateDropout
 #   - InstanceNorm is decomposed to ReduceMean/Sub/Mul/Add by lowerInstanceNorm
+#   - Mean is lowered to a 2-input Add chain and one reciprocal Mul by lowerVariadicElementwise
 # plus the fallthrough sentinel. Keep small and justified.
 CPU_KERNEL_EXEMPT = {
     "kUnknown",  # the fallthrough sentinel, never a real op
@@ -47,6 +48,7 @@ CPU_KERNEL_EXEMPT = {
     "MatMulInteger", "ConvInteger", "DynamicQuantizeLinear",
     "Dropout",       # eliminated in inference mode at import
     "InstanceNorm",  # decomposed into existing ops at import
+    "Mean",          # lowered to Add + Mul at import (lowerVariadicElementwise)
     # ORT contrib family — expanded to primitive ops by lowerOrtContribOps at import; a variant
     # the expansion declines (and GroupQueryAttention, recognized but not yet expanded) surfaces
     # through the support report under its real name and has no kernel by design.

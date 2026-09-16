@@ -166,6 +166,30 @@ namespace vknn {
                 return "Det";
             case OpType::ChannelShuffle:
                 return "ChannelShuffle";
+            case OpType::Or:
+                return "Or";
+            case OpType::Xor:
+                return "Xor";
+            case OpType::Not:
+                return "Not";
+            case OpType::ArgMax:
+                return "ArgMax";
+            case OpType::ArgMin:
+                return "ArgMin";
+            case OpType::Mod:
+                return "Mod";
+            case OpType::BitShift:
+                return "BitShift";
+            case OpType::BitwiseAnd:
+                return "BitwiseAnd";
+            case OpType::BitwiseOr:
+                return "BitwiseOr";
+            case OpType::BitwiseXor:
+                return "BitwiseXor";
+            case OpType::BitwiseNot:
+                return "BitwiseNot";
+            case OpType::Mean:
+                return "Mean";
             default:
                 return "Unknown";
         }
@@ -313,6 +337,26 @@ namespace vknn {
             // outputs are the canonical fp32 1.0/0.0 the flat comparison ops emit.
             {"IsNaN", OpType::IsNaN},
             {"And", OpType::And},
+            // Boolean OR/XOR/NOT: nonzero reads as true; outputs are the canonical fp32 1.0/0.0.
+            {"Or", OpType::Or},
+            {"Xor", OpType::Xor},
+            {"Not", OpType::Not},
+            // Index of the extreme element along one axis; the output is int64.
+            {"ArgMax", OpType::ArgMax},
+            {"ArgMin", OpType::ArgMin},
+            // Integer-valued elementwise ops. BitShift and BitwiseNot read the operand width and
+            // signedness from the `int_bits` / `int_signed` attributes the importer stamps.
+            {"Mod", OpType::Mod},
+            {"BitShift", OpType::BitShift},
+            {"BitwiseAnd", OpType::BitwiseAnd},
+            {"BitwiseOr", OpType::BitwiseOr},
+            {"BitwiseXor", OpType::BitwiseXor},
+            {"BitwiseNot", OpType::BitwiseNot},
+            // Variadic elementwise ops. Sum is Add with any input count and Mean has its own OpType;
+            // lowerVariadicElementwise rewrites both (and a Max/Min whose input count is not 2) into
+            // 2-input nodes before the first shape inference, so no kernel ever sees a variadic node.
+            {"Sum", OpType::Add},
+            {"Mean", OpType::Mean},
             // ORT contrib operators (com.microsoft; the wire parser drops the domain, so name
             // matching covers them). lowerOrtContribOps expands each to primitive ops right after
             // the first shape-inference round; a variant it declines keeps its real name through

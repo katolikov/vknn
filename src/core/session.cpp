@@ -668,6 +668,10 @@ namespace vknn {
             // drifts the sample point (~0.5 px at 1920-wide inputs). Pin runtime grid chains to fp32
             // the same way; the GridSample shader decodes the grid at its storage precision.
             pinGridSampleGridFp32(graph_);
+            // Integer results (ArgMax/ArgMin indices, integer Mod, bit shifts and bitwise ops) and the
+            // runtime operands of the integer-valued ops are exact only up to 2^11 in fp16 storage;
+            // pin them to fp32 the same way before markFp32 bridges the frontier.
+            pinIntegerResultsFp32(graph_);
             // Only a caller-supplied fp32Tensors list takes zero-match accounting; the built-in
             // Precision::Normal preset is engine-owned and exempt from the load-end warning.
             markFp32(graph_, fp32Marks, cfg_.fp32Tensors.empty() ? nullptr : &matchedFp32Patterns_);

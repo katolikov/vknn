@@ -128,6 +128,21 @@ namespace vknn {
                                  // (the engine's IR has no rank-0 activations). The GPU kernel
                                  // covers n <= kDetMaxAnalyticN by fixed-order cofactor expansion;
                                  // larger n runs on the CPU (partial-pivot LU) via the named gate.
+        Or,                      // elementwise boolean OR with NumPy broadcasting -> 1.0/0.0 (flat path)
+        Xor,                     // elementwise boolean XOR with NumPy broadcasting -> 1.0/0.0 (flat path)
+        Not,                     // elementwise boolean NOT: zero -> 1.0, nonzero -> 0.0, same shape (flat path)
+        ArgMax,                  // int64 index of the largest element along `axis` (keepdims, select_last_index)
+        ArgMin,                  // int64 index of the smallest element along `axis` (keepdims, select_last_index)
+        Mod,                     // elementwise remainder with broadcasting; `fmod` 0 takes the divisor's sign,
+                                 // `fmod` 1 is C fmod (the dividend's sign)
+        BitShift,                // elementwise integer shift (`direction` LEFT/RIGHT) at the `int_bits` width
+        BitwiseAnd,              // elementwise two's-complement AND with NumPy broadcasting
+        BitwiseOr,               // elementwise two's-complement OR with NumPy broadcasting
+        BitwiseXor,              // elementwise two's-complement XOR with NumPy broadcasting
+        BitwiseNot,              // elementwise complement at the `int_bits` / `int_signed` width, same shape
+        Mean,                    // variadic elementwise mean (ONNX "Mean"): lowered at import to a
+                                 // left-fold chain of 2-input Adds and one Mul by the fp32 reciprocal
+                                 // of the input count (lowerVariadicElementwise) -- no kernel in either backend
     };
 
     /// Fused-pointwise limits. The fusion pass splits any unit that would exceed one of these;

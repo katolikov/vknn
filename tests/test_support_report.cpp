@@ -158,6 +158,179 @@ TEST(SupportReport, IsNaNAndBooleanAndRunOnGpu) {
     EXPECT_TRUE(rows[1].reason.empty());
 }
 
+TEST(SupportReport, LogicalBitwiseModArgExtremeRunOnGpu) {
+    // Every kernel-backed op of the logical / bitwise / Mod / ArgMax-ArgMin family has a flat GPU
+    // kernel, so the survey (the same gate the device runs) must assign each well-formed node to
+    // vulkan with no refusal reason.
+    Graph       g;
+    const Shape full  = {1, 3, 4, 4};
+    const Shape row   = {1, 1, 1, 4};
+    auto        unary = [&](OpType type, const char *name, Attributes attr = {}) {
+        TensorId in  = tensor(g, std::string(name) + "_in", full);
+        TensorId out = tensor(g, std::string(name) + "_out", full);
+        addNode(g, type, name, {in}, {out}, std::move(attr));
+    };
+    auto binary = [&](OpType type, const char *name, Attributes attr = {}) {
+        TensorId lhs = tensor(g, std::string(name) + "_lhs", full);
+        TensorId rhs = tensor(g, std::string(name) + "_rhs", row);
+        TensorId out = tensor(g, std::string(name) + "_out", full);
+        addNode(g, type, name, {lhs, rhs}, {out}, std::move(attr));
+    };
+    auto argExtreme = [&](OpType type, const char *name, int64_t axis) {
+        Attributes attr;
+        attr.map["axis"]     = intAttr(axis);
+        attr.map["keepdims"] = intAttr(0);
+        TensorId in          = tensor(g, std::string(name) + "_in", full);
+        TensorId out         = tensor(g, std::string(name) + "_out", {1, 3, 4}, DType::Int64);
+        addNode(g, type, name, {in}, {out}, attr);
+    };
+    Attributes shiftLeft;
+    shiftLeft.map["direction"] = strAttr("LEFT");
+    Attributes shiftRight;
+    shiftRight.map["direction"] = strAttr("RIGHT");
+    Attributes floatMod;
+    floatMod.map["fmod"] = intAttr(1);
+
+    binary(OpType::Or, "mask_or");
+    binary(OpType::Xor, "mask_xor");
+    unary(OpType::Not, "mask_not");
+    argExtreme(OpType::ArgMax, "argmax_last_axis", -1);
+    argExtreme(OpType::ArgMin, "argmin_axis2", 2);
+    binary(OpType::Mod, "mod_integer");
+    binary(OpType::Mod, "mod_float", floatMod);
+    binary(OpType::BitShift, "shift_left", shiftLeft);
+    binary(OpType::BitShift, "shift_right", shiftRight);
+    binary(OpType::BitwiseAnd, "bit_and");
+    binary(OpType::BitwiseOr, "bit_or");
+    binary(OpType::BitwiseXor, "bit_xor");
+    unary(OpType::BitwiseNot, "bit_not");
+
+    std::vector<NodeSupport> rows = vkSupportSurvey(g);
+    ASSERT_EQ(rows.size(), g.nodes.size());
+    for (size_t i = 0; i < rows.size(); ++i)
+    {
+        EXPECT_EQ(rows[i].node, g.nodes[i].name);
+        EXPECT_EQ(rows[i].backend, "vulkan") << rows[i].node << ": " << rows[i].reason;
+        EXPECT_TRUE(rows[i].reason.empty()) << rows[i].node << ": " << rows[i].reason;
+    }
+}
+
+TEST(SupportReport, MeanHasNoKernel) {
+    // Mean is lowered at import (lowerVariadicElementwise); a survivor has no kernel in either backend.
+    Graph    g;
+    TensorId a = tensor(g, "a", {2, 3});
+    TensorId b = tensor(g, "b", {2, 3});
+    TensorId y = tensor(g, "y", {2, 3});
+    addNode(g, OpType::Mean, "mean_survivor", {a, b}, {y});
+    std::vector<NodeSupport> rows = vkSupportSurvey(g);
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_EQ(rows[0].op, "Mean");
+    EXPECT_EQ(rows[0].backend, "none");
+    EXPECT_EQ(rows[0].reason, "no kernel in any backend");
+}
+
+TEST(SupportReport, ArgExtremeGateRefusesInvalidAxisAndShape) {
+    // ArgMax/ArgMin run on the GPU only for a resolved, non-rank-0 input whose `axis` is in range and
+    // whose axis extent is non-zero; each refusal is named.
+    auto gate = [&](OpType type, Shape inShape, int64_t axis, bool constantInput, bool setAxis = true) {
+        Graph      g;
+        TensorId   in  = constantInput ? initializer(g, "data", inShape) : tensor(g, "data", inShape);
+        TensorId   out = tensor(g, "indices", {1}, DType::Int64);
+        Attributes attr;
+        if (setAxis)
+        {
+            attr.map["axis"] = intAttr(axis);
+        }
+        addNode(g, type, "arg_extreme", {in}, {out}, attr);
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        EXPECT_EQ(rows.size(), 1u);
+        return rows.empty() ? NodeSupport {} : rows[0];
+    };
+    NodeSupport row = gate(OpType::ArgMax, {}, 0, false);
+    EXPECT_EQ(row.backend, "cpu");
+    EXPECT_EQ(row.reason, "ArgMax: unresolved input shape");
+
+    row = gate(OpType::ArgMax, {}, 0, true);
+    EXPECT_EQ(row.backend, "cpu");
+    EXPECT_EQ(row.reason, "ArgMax: rank-0 input");
+
+    row = gate(OpType::ArgMin, {2, 3}, 2, false);
+    EXPECT_EQ(row.backend, "cpu");
+    EXPECT_EQ(row.reason, "ArgMin: axis out of range");
+
+    row = gate(OpType::ArgMax, {2, 3}, -3, false);
+    EXPECT_EQ(row.backend, "cpu");
+    EXPECT_EQ(row.reason, "ArgMax: axis out of range");
+
+    row = gate(OpType::ArgMin, {2, 0, 3}, 1, false);
+    EXPECT_EQ(row.backend, "cpu");
+    EXPECT_EQ(row.reason, "ArgMin: zero-extent axis");
+
+    row = gate(OpType::ArgMax, {2, 3}, -2, false);
+    EXPECT_EQ(row.backend, "vulkan") << "axis -2 of a rank-2 input is axis 0";
+    EXPECT_TRUE(row.reason.empty());
+
+    row = gate(OpType::ArgMin, {2, 0, 3}, 0, false, false);
+    EXPECT_EQ(row.backend, "vulkan") << "the default axis 0 has extent 2; an empty OTHER axis is not refused";
+    EXPECT_TRUE(row.reason.empty());
+}
+
+TEST(SupportReport, BitShiftGateRequiresExactDirection) {
+    // ONNX spells the direction exactly LEFT or RIGHT; any other spelling (or a missing / non-string
+    // attribute) is refused by name.
+    auto gate = [&](const Attributes &attr) {
+        Graph    g;
+        TensorId a = tensor(g, "a", {4});
+        TensorId b = tensor(g, "b", {4});
+        TensorId y = tensor(g, "y", {4});
+        addNode(g, OpType::BitShift, "shift", {a, b}, {y}, attr);
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        EXPECT_EQ(rows.size(), 1u);
+        return rows.empty() ? NodeSupport {} : rows[0];
+    };
+    for (const char *valid: {"LEFT", "RIGHT"})
+    {
+        Attributes attr;
+        attr.map["direction"] = strAttr(valid);
+        NodeSupport row       = gate(attr);
+        EXPECT_EQ(row.backend, "vulkan") << valid;
+        EXPECT_TRUE(row.reason.empty()) << valid;
+    }
+    for (const char *invalid: {"left", "Right", "", "UP"})
+    {
+        Attributes attr;
+        attr.map["direction"] = strAttr(invalid);
+        NodeSupport row       = gate(attr);
+        EXPECT_EQ(row.backend, "cpu") << "'" << invalid << "'";
+        EXPECT_EQ(row.reason, "BitShift: direction must be LEFT or RIGHT") << "'" << invalid << "'";
+    }
+    NodeSupport missing = gate(Attributes {});
+    EXPECT_EQ(missing.backend, "cpu");
+    EXPECT_EQ(missing.reason, "BitShift: direction must be LEFT or RIGHT");
+    Attributes intDirection;
+    intDirection.map["direction"] = intAttr(1);
+    NodeSupport wrongKind         = gate(intDirection);
+    EXPECT_EQ(wrongKind.backend, "cpu");
+    EXPECT_EQ(wrongKind.reason, "BitShift: direction must be LEFT or RIGHT");
+}
+
+TEST(OpDescriptor, LogicalBitwiseModArgExtremeAreFlat) {
+    // These flat kernels read row-major buffers: a missing descriptor row (or a table bound that
+    // stops short) would give them the default NC4HW4 layout and feed them packed data.
+    for (OpType t: {OpType::Or, OpType::Xor, OpType::Not, OpType::ArgMax, OpType::ArgMin, OpType::Mod, OpType::BitShift, OpType::BitwiseAnd, OpType::BitwiseOr, OpType::BitwiseXor, OpType::BitwiseNot})
+    {
+        const OpDescriptor &d = opDescriptor(t);
+        EXPECT_EQ(d.layout, LayoutClass::Flat) << opTypeName(t);
+        EXPECT_FALSE(d.pwMember) << opTypeName(t);
+        EXPECT_FALSE(d.pwEpilogue) << opTypeName(t);
+    }
+    // Mean is kernel-less (lowered at import): it keeps the default row.
+    const OpDescriptor &mean = opDescriptor(OpType::Mean);
+    EXPECT_EQ(mean.layout, LayoutClass::Nc4);
+    EXPECT_FALSE(mean.pwMember);
+    EXPECT_FALSE(mean.pwEpilogue);
+}
+
 TEST(SupportReport, CastFromInt64TargetGate) {
     // An int64 input Cast runs on the GPU for the shape-arithmetic targets (FLOAT/FLOAT16/DOUBLE,
     // INT32, INT64) and for INT8/UINT8: the int64 lanes decode to compute-precision float at the pack
@@ -589,6 +762,7 @@ TEST(OpDescriptor, LayoutClassAgreesWithGpuFlatNode) {
             case OpType::Binary:
             case OpType::Add:
             case OpType::FusedPointwise:
+            case OpType::ChannelShuffle:
                 return true;
             default:
                 return false;
@@ -599,7 +773,9 @@ TEST(OpDescriptor, LayoutClassAgreesWithGpuFlatNode) {
     Graph    g;
     TensorId a = tensor(g, "a", {1, 4, 4, 4});
     TensorId b = tensor(g, "b", {1, 4, 4, 4});
-    for (int i = 1; i <= (int) OpType::QGemm; ++i)
+    // Every OpType through the last enumerator: a descriptor row past the table bound would silently
+    // read the default {Nc4} row, so the loop must reach the newest op.
+    for (int i = 1; i <= (int) OpType::Mean; ++i)
     {
         OpType              t = (OpType) i;
         const OpDescriptor &d = opDescriptor(t);
@@ -639,6 +815,10 @@ TEST(OpDescriptor, FusionRolesAreStable) {
     for (OpType t: {OpType::Conv, OpType::MatMul, OpType::Gemm, OpType::Softmax, OpType::Reduce, OpType::Concat})
     {
         expectMember(t, false); // epilogue hosts / structural ops are not pointwise members
+    }
+    for (OpType t: {OpType::And, OpType::Or, OpType::Xor, OpType::Not, OpType::ArgMax, OpType::ArgMin, OpType::Mod, OpType::BitShift, OpType::BitwiseAnd, OpType::BitwiseOr, OpType::BitwiseXor, OpType::BitwiseNot, OpType::Mean})
+    {
+        expectMember(t, false); // own flat kernels (or lowered at import): no pw step code exists for them
     }
 
     auto expectEpi = [](OpType t, bool want) {

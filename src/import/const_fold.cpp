@@ -1,4 +1,5 @@
 #include "passes_internal.h"
+#include <cstring>
 
 namespace vknn {
 
@@ -41,6 +42,36 @@ namespace vknn {
         Config cfg;
         ctx.config = &cfg;
 
+        // An INT8/UINT8 initializer keeps its native 1-byte lanes in the graph (materializeInitializers),
+        // but the CPU kernels read every non-int64 operand through host.f32(), which on a 1-byte payload
+        // reads past the buffer. Widen such an operand to integer-valued fp32 host bytes -- the values
+        // the session's CPU pool loads -- right before a node that reads it folds. The pool entry is
+        // relabeled Float32 along with its bytes (the session keeps the int8/uint8 label, but on the
+        // fold path a label-preserving kernel such as Reshape sizes its copy from the label, and a
+        // Float32 label keeps the folded initializer's bytes and dtype consistent). Widening is lazy
+        // and per operand, so a packed int4/uint8 weight no foldable node reads never quadruples in
+        // host memory.
+        auto widenByteInitializerOperands = [&](const Node &nd) {
+            for (TensorId in: nd.inputs)
+            {
+                if (in == kNoTensor || !pool[in].hostValid || (pool[in].dtype != DType::Int8 && pool[in].dtype != DType::UInt8))
+                {
+                    continue;
+                }
+                const bool         isSigned  = pool[in].dtype == DType::Int8;
+                const size_t       laneCount = pool[in].host.bytes.size(); // one byte per element
+                const uint8_t     *lanes     = pool[in].host.bytes.data();
+                std::vector<float> values(laneCount);
+                for (size_t k = 0; k < laneCount; ++k)
+                {
+                    values[k] = isSigned ? (float) (int8_t) lanes[k] : (float) lanes[k];
+                }
+                pool[in].host.resizeElems((int64_t) laneCount, DType::Float32);
+                std::memcpy(pool[in].host.bytes.data(), values.data(), laneCount * sizeof(float));
+                pool[in].dtype = DType::Float32;
+            }
+        };
+
         std::set<int> removeNodes;
         auto          foldable = [&](const Node &nd) {
             switch (nd.type)
@@ -63,7 +94,16 @@ namespace vknn {
                 case OpType::Slice:
                 case OpType::Transpose:
                 case OpType::Cast:
-                case OpType::Reduce: {
+                case OpType::Reduce:
+                // Integer-valued elementwise ops: shape/index arithmetic and packed-flag masks must
+                // fold exactly on the CPU (an int64 value above the fp32 mantissa cannot survive the
+                // GPU float lanes), so they fold unbounded like Binary.
+                case OpType::Mod:
+                case OpType::BitShift:
+                case OpType::BitwiseAnd:
+                case OpType::BitwiseOr:
+                case OpType::BitwiseXor:
+                case OpType::BitwiseNot: {
                     if (nd.inputs.empty())
                     {
                         return false;
@@ -88,6 +128,10 @@ namespace vknn {
                 case OpType::GreaterEqual:
                 case OpType::Less:
                 case OpType::LessEqual:
+                case OpType::And: // boolean mask logic: an all-constant mask folds like the compares feeding it
+                case OpType::Or:
+                case OpType::Xor:
+                case OpType::Not:
                 case OpType::EyeLike: // identity matrix is constant once the (now-known) shape is fixed
                 case OpType::ConstantOfShape: {
                     if (nd.inputs.empty())
@@ -232,6 +276,7 @@ namespace vknn {
             {
                 pool[nd.inputs[0]].shape = g.desc(nd.inputs[0]).shape;
             }
+            widenByteInitializerOperands(nd);
             auto op = CpuOpRegistry::instance().create(nd.type);
             if (!op)
             {
@@ -296,7 +341,17 @@ namespace vknn {
                 case OpType::Greater:
                 case OpType::GreaterEqual:
                 case OpType::Less:
-                case OpType::LessEqual: {
+                case OpType::LessEqual:
+                case OpType::And:
+                case OpType::Or:
+                case OpType::Xor:
+                case OpType::Not:
+                case OpType::Mod:
+                case OpType::BitShift:
+                case OpType::BitwiseAnd:
+                case OpType::BitwiseOr:
+                case OpType::BitwiseXor:
+                case OpType::BitwiseNot: {
                     scalarOut = !nd.inputs.empty();
                     for (TensorId in: nd.inputs)
                     {

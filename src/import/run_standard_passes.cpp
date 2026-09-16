@@ -85,6 +85,9 @@ namespace vknn {
         eliminateDropout(g);        // before shape inference: Dropout has no shape rule -- the eliminable
                                     // (inference-mode) form is an identity and is rewired past here
         normalizeConv1d(g);         // before shape inference: conv arms assume 2-D weight/attr geometry
+        // Before shape inference: the Add/Binary arms read exactly two operands, while Sum/Max/Min carry
+        // any operand count and Mean has no kernel at all.
+        lowerVariadicElementwise(g);
         inferShapes(g, batch, declared, bindings);
         lowerOrtContribOps(g); // ORT contrib ops (Skip/SimplifiedLayerNorm, RotaryEmbedding,
                                // MultiHeadAttention, MatMulNBits) expand to primitives in a

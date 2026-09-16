@@ -207,6 +207,14 @@ namespace vknn {
                 {
                     continue;
                 }
+                // ArgMax/ArgMin read their data (input 0) at the data tensor's OWN storage precision (the
+                // kernel selects its fp16 or fp32 variant from it), while pinIntegerResultsFp32 pins the
+                // indices output -- and so the node -- to fp32. A bridge here would only copy the whole
+                // data tensor to fp32 for a comparison scan that needs no extra precision.
+                if ((nd.type == OpType::ArgMax || nd.type == OpType::ArgMin) && inIdx == 0)
+                {
+                    continue;
+                }
                 convertRead(nd.inputs[inIdx], nodeFp32);
             }
             // Fused residual/bias edges are reads outside the inputs list (rewireTensor's contract)
@@ -351,6 +359,115 @@ namespace vknn {
         if (pinned)
         {
             VKNN_INFO << "pinGridSampleGridFp32: pinned " << pinned << " grid tensor(s) to fp32";
+        }
+    }
+
+    void pinIntegerResultsFp32(Graph &g) {
+        // ONNX Mod `fmod` value (also the attribute's default) selecting the integer remainder whose sign
+        // follows the divisor; fmod == 1 is the float C fmod and keeps the node's normal precision.
+        static constexpr int64_t kModIntegerRemainder = 0;
+        // Upper bound on the passthrough hops followed from one operand (the ConvertLayout chains the
+        // layout pass splices are one or two hops; the cap only guards a malformed graph).
+        static constexpr int kMaxPassthroughHops = 64;
+
+        // Last writer of each tensor, so an operand can be traced back toward its source.
+        std::vector<int> producer(g.tensors.size(), -1);
+        for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
+        {
+            for (TensorId o: g.nodes[ni].outputs)
+            {
+                if (o != kNoTensor)
+                {
+                    producer[(size_t) o] = ni;
+                }
+            }
+        }
+        int  pinned  = 0;
+        auto pinFlat = [&](TensorId t) {
+            if (t == kNoTensor || g.isInitializer(t) || !g.desc(t).gpuFlat || g.desc(t).storeFp32)
+            {
+                return;
+            }
+            g.desc(t).storeFp32 = true;
+            ++pinned;
+        };
+        for (const Node &nd: g.nodes)
+        {
+            bool pinsResult    = false; // the output holds integers
+            bool walksOperands = false; // the operands hold integers too
+            switch (nd.type)
+            {
+                case OpType::ArgMax:
+                case OpType::ArgMin:
+                    pinsResult = true; // int64 indices over float data: only the result is integer
+                    break;
+                case OpType::Mod:
+                    pinsResult    = nd.attr.geti("fmod", kModIntegerRemainder) == kModIntegerRemainder;
+                    walksOperands = pinsResult;
+                    break;
+                case OpType::BitShift:
+                case OpType::BitwiseAnd:
+                case OpType::BitwiseOr:
+                case OpType::BitwiseXor:
+                case OpType::BitwiseNot:
+                    pinsResult    = true;
+                    walksOperands = true;
+                    break;
+                default:
+                    break;
+            }
+            if (!pinsResult)
+            {
+                continue;
+            }
+            for (TensorId o: nd.outputs)
+            {
+                pinFlat(o);
+            }
+            if (!walksOperands)
+            {
+                continue;
+            }
+            // A constant operand is uploaded by the op itself at the node's (now fp32) precision, so only
+            // a runtime operand needs pinning. Walk it up through pure passthrough producers (the
+            // ConvertLayout the flat pass splices in) while the hop is FLAT, pinning every hop: the
+            // NC4HW4 conv family is fp16-only, so a non-flat hop is left to markFp32's frontier convert.
+            for (TensorId operand: nd.inputs)
+            {
+                TensorId t = operand;
+                for (int hop = 0; t != kNoTensor && !g.isInitializer(t) && g.desc(t).gpuFlat && hop < kMaxPassthroughHops; ++hop)
+                {
+                    const bool alreadyPinned = g.desc(t).storeFp32;
+                    pinFlat(t);
+                    int p = producer[(size_t) t];
+                    if (p < 0)
+                    {
+                        break; // graph-input boundary: pinned, nothing upstream to follow
+                    }
+                    const Node &pn = g.nodes[(size_t) p];
+                    // markFp32 gives every output of a node outputs[0]'s precision, so a pin on a
+                    // secondary output survives only if the producer's primary output is pinned too.
+                    if (pn.outputs.size() > 1 && pn.outputs[0] != t)
+                    {
+                        pinFlat(pn.outputs[0]);
+                    }
+                    if (alreadyPinned)
+                    {
+                        break; // a shared operand, or a prior walk: its upstream is already handled
+                    }
+                    if (pn.type == OpType::ConvertLayout && pn.inputs.size() == 1)
+                    {
+                        t = pn.inputs[0]; // same values, different layout -- keep pinning toward the source
+                    } else
+                    {
+                        break; // a real op computes the operand; its (now-pinned) output runs fp32 via nodeFp32
+                    }
+                }
+            }
+        }
+        if (pinned)
+        {
+            VKNN_INFO << "pinIntegerResultsFp32: pinned " << pinned << " integer tensor(s) to fp32";
         }
     }
 

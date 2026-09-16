@@ -90,6 +90,14 @@ namespace vknn {
     // absent or unconsumed), rewiring consumers to the input. A Dropout that is not provably
     // inference-mode, or whose mask is consumed, stays in place and is unsupported downstream.
     void eliminateDropout(Graph &g);
+    // Rewrite the variadic elementwise ops into the 2-input nodes every kernel implements: a Sum
+    // (OpType::Add) or Max/Min (OpType::Binary) whose operand count is not 2, and every Mean. One
+    // operand becomes an Identity; N operands become a left fold op(op(op(x0, x1), x2), ...) whose last
+    // step writes the original output; Mean folds with Add and then multiplies ONCE by a rank-0 fp32
+    // initializer holding the fp32 reciprocal 1.0f / N (ONNX Runtime's CPU Mean, bit-identical to it).
+    // Runs before the first inferShapes, which reads exactly two operands on Add/Binary.
+    // @throws Error{InvalidArgument} for a node with no operands or a missing operand/output.
+    void lowerVariadicElementwise(Graph &g);
     // Remove nodes whose outputs are unused (keeps graph outputs alive).
     void eliminateDeadNodes(Graph &g);
     // Drop initializer payloads no node/output references (folded-chain intermediates, Cast-copied
@@ -299,6 +307,16 @@ namespace vknn {
     // decodes the grid at its storage precision via the GRID_FP32 spec constant. Runs at load, after
     // insertLayoutConverts, before markFp32.
     void pinGridSampleGridFp32(Graph &g);
+
+    // Pin integer results to fp32 storage, where consecutive integers are exact up to 2^24 (fp16 is
+    // exact only up to 2^11 and saturates at 65504): the flat outputs of ArgMax, ArgMin, Mod with
+    // fmod == 0, BitShift, BitwiseAnd, BitwiseOr, BitwiseXor and BitwiseNot. For the integer-valued
+    // elementwise ops (not ArgMax/ArgMin, whose data input is float) every runtime operand is also
+    // walked upstream through ConvertLayout hops while the hop is flat, pinning each hop so an integer
+    // graph input packs at fp32 instead of saturating at fp16; a hop that is a secondary output of a
+    // multi-output producer also pins that producer's flat outputs[0], since markFp32 aligns every
+    // output of a node to outputs[0]. Runs at load, after insertLayoutConverts, before markFp32.
+    void pinIntegerResultsFp32(Graph &g);
 
     // Fold chains of movement ops — a Transpose or Slice fed by another Transpose or Slice — into
     // ONE strided gather: the consumer reads the chain's source through the composed per-axis map

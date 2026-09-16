@@ -36,6 +36,7 @@ namespace vknn {
             // Erased/lowered at import; a survivor has no kernel in either backend.
             case OpType::Dropout:
             case OpType::InstanceNorm:
+            case OpType::Mean:
             // ONNX quantized family that still has no direct kernel: recognized at import for precise
             // reporting; execution goes through the import-time dequantize lowering. (Quantize/
             // DequantizeLinear DO have flat kernels — the graph-boundary dequant a genuine int input
@@ -291,9 +292,61 @@ namespace vknn {
             }
             return true;
         }
-        if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual || nd.type == OpType::Less || nd.type == OpType::LessEqual || nd.type == OpType::And)
+        if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual || nd.type == OpType::Less || nd.type == OpType::LessEqual || nd.type == OpType::And || nd.type == OpType::Or || nd.type == OpType::Xor || nd.type == OpType::Not)
         {
             // flat broadcasting kernels decode any output rank (geometry in a plan SSBO).
+            return true;
+        }
+        if (nd.type == OpType::Mod || nd.type == OpType::BitwiseAnd || nd.type == OpType::BitwiseOr || nd.type == OpType::BitwiseXor || nd.type == OpType::BitwiseNot)
+        {
+            // Flat elementwise kernels with integer semantics (broadcasting, any output rank). An integer
+            // result is pinned to fp32 storage at load (pinIntegerResultsFp32), so no attribute or shape
+            // limits them.
+            return true;
+        }
+        if (nd.type == OpType::BitShift)
+        {
+            // The shift direction selects the kernel's arithmetic. ONNX spells it exactly "LEFT" or
+            // "RIGHT" (case-sensitive); any other value is an invalid node that stays on the CPU op,
+            // which reports it as InvalidArgument.
+            const std::string direction = nd.attr.gets("direction", "");
+            if (direction != "LEFT" && direction != "RIGHT")
+            {
+                return refuse(whyNot, "BitShift: direction must be LEFT or RIGHT");
+            }
+            return true;
+        }
+        if (nd.type == OpType::ArgMax || nd.type == OpType::ArgMin)
+        {
+            // Per-slice index selection along `axis` (flat row-major). The static plan sizes the output
+            // from the resolved input shape and the kernel scans a non-empty axis, so an unresolved
+            // shape, a rank-0 input, an out-of-range axis or a zero-extent axis stays on the CPU op
+            // (which reports the three invalid forms as InvalidArgument).
+            const std::string op = opTypeName(nd.type);
+            if (nd.inputs.empty() || nd.inputs[0] == kNoTensor)
+            {
+                return refuse(whyNot, op + ": missing data input");
+            }
+            const Shape &in = g.desc(nd.inputs[0]).shape;
+            if (in.empty())
+            {
+                // An empty shape is a rank-0 value only on an initializer; on an activation it is unresolved.
+                return refuse(whyNot, op + (g.isInitializer(nd.inputs[0]) ? ": rank-0 input" : ": unresolved input shape"));
+            }
+            const int64_t rank = (int64_t) in.size();
+            int64_t       axis = nd.attr.geti("axis", 0);
+            if (axis < -rank || axis >= rank)
+            {
+                return refuse(whyNot, op + ": axis out of range");
+            }
+            if (axis < 0)
+            {
+                axis += rank;
+            }
+            if (in[(size_t) axis] == 0)
+            {
+                return refuse(whyNot, op + ": zero-extent axis");
+            }
             return true;
         }
         if (nd.type == OpType::FusedAttention)
