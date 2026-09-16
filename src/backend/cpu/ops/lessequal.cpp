@@ -28,11 +28,8 @@ namespace vknn {
                     size_t off = rank - s.size();
                     return i < off ? 1 : s[i - off];
                 };
-                for (size_t i = 0; i < rank; ++i)
-                {
-                    int64_t da = dimOf(sa, i), db = dimOf(sb, i);
-                    out[i] = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
-                }
+                // A 0 extent broadcasts to 0; operand shapes that do not broadcast throw.
+                out       = cpu::broadcastOutputShape(node, sa, sb);
                 int64_t n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                 // Per-operand broadcast strides in the common frame, built by a right-to-left
                 // row-major scan: sA/sB accumulate each operand's own row-major stride, while a size-1

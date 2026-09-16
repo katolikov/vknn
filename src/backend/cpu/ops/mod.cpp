@@ -58,24 +58,13 @@ namespace vknn {
                 const Shape    &dividendShape  = dividendTensor.shape;
                 const Shape    &divisorShape   = divisorTensor.shape;
                 const size_t    rank           = std::max(dividendShape.size(), divisorShape.size());
-                Shape           out(rank, 1);
+                const Shape     out            = cpu::broadcastOutputShape(node, dividendShape, divisorShape);
                 // NumPy broadcasting right-aligns shapes: a lower-rank operand is padded on the LEFT with
                 // size-1 axes, which extentOf reports for the padded prefix.
                 auto extentOf = [&](const Shape &operandShape, size_t axis) -> int64_t {
                     const size_t paddingAxes = rank - operandShape.size();
                     return axis < paddingAxes ? 1 : operandShape[axis - paddingAxes];
                 };
-                for (size_t axis = 0; axis < rank; ++axis)
-                {
-                    const int64_t dividendExtent = extentOf(dividendShape, axis);
-                    const int64_t divisorExtent  = extentOf(divisorShape, axis);
-                    if (dividendExtent != divisorExtent && dividendExtent != 1 && divisorExtent != 1)
-                    {
-                        throw Error(Status::InvalidArgument, "Mod '" + node.name + "': operand shapes " + shapeStr(dividendShape) + " and " + shapeStr(divisorShape) + " do not broadcast (axis " + std::to_string(axis) + ")");
-                    }
-                    // A 0 extent broadcasts to 0 (NumPy), never to 1.
-                    out[axis] = (dividendExtent == 0 || divisorExtent == 0) ? 0 : std::max(dividendExtent, divisorExtent);
-                }
                 const int64_t elementCount = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                 // Per-operand broadcast strides (row-major, built back-to-front): 0 on a size-1 axis so
                 // every output index along it re-reads the one source element; otherwise the operand's

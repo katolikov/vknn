@@ -131,6 +131,8 @@ namespace vknn { namespace cpu { namespace bitwise {
     /// Evaluate `integerOp(a, b)` over node.inputs[0..1] with NumPy broadcasting into node.outputs[0]:
     /// int64 storage when either operand is Int64, else the fp32 value of each int64 result. Elements are
     /// independent, so the sweep partitions across threads with bit-identical output.
+    /// @throws Error(InvalidArgument) naming the node when the operand shapes do not broadcast
+    ///         (cpu::broadcastOutputShape).
     template <class IntegerOp> void runBroadcastInteger(const Node &node, ExecContext &ctx, IntegerOp integerOp) {
         const RtTensor &operandA = ctx.t(node.inputs[0]);
         const RtTensor &operandB = ctx.t(node.inputs[1]);
@@ -143,12 +145,8 @@ namespace vknn { namespace cpu { namespace bitwise {
             const size_t padding = rank - shape.size();
             return axis < padding ? 1 : shape[axis - padding];
         };
-        Shape out(rank, 1);
-        for (size_t axis = 0; axis < rank; ++axis)
-        {
-            const int64_t extentA = extentOf(shapeA, axis), extentB = extentOf(shapeB, axis);
-            out[axis] = (extentA == 0 || extentB == 0) ? 0 : std::max(extentA, extentB); // a 0 extent broadcasts to 0
-        }
+        // A 0 extent broadcasts to 0; operand shapes that do not broadcast throw.
+        const Shape   out   = cpu::broadcastOutputShape(node, shapeA, shapeB);
         const int64_t count = cpu::elemCount(out); // a rank-0 result carries its one element
         // Row-major source strides per operand, 0 on a broadcast axis so every output coordinate along it
         // re-reads the operand's single element.

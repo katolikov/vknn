@@ -1,11 +1,41 @@
-// Row-major broadcast index walker shared by the CPU elementwise ops.
+// Row-major broadcast index walker and output-shape rule shared by the CPU elementwise ops.
 #pragma once
+#include "vknn/error.h"
+#include "vknn/op.h"
 #include "vknn/shape.h"
 #include <algorithm>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace vknn { namespace cpu {
+
+    /// Output shape of NumPy broadcasting two operand shapes. The shapes right-align (an operand of lower
+    /// rank reads extent 1 on its missing leading axes), a size-1 axis stretches to the other operand's
+    /// extent, and a 0 extent broadcasts to 0, never to 1. A rank-0 operand broadcasts over any shape.
+    /// @param node the op evaluating the broadcast, named in the error.
+    /// @throws Error(InvalidArgument) "<Op> '<name>': operand shapes A and B do not broadcast (axis k)" when
+    ///         an axis pairs two different extents neither of which is 1: a stride walk over such shapes
+    ///         would read past the smaller operand's buffer.
+    inline Shape broadcastOutputShape(const Node &node, const Shape &shapeA, const Shape &shapeB) {
+        const size_t rank     = std::max(shapeA.size(), shapeB.size());
+        auto         extentOf = [&](const Shape &shape, size_t axis) -> int64_t {
+            const size_t leadingPadding = rank - shape.size();
+            return axis < leadingPadding ? 1 : shape[axis - leadingPadding];
+        };
+        Shape out(rank, 1);
+        for (size_t axis = 0; axis < rank; ++axis)
+        {
+            const int64_t extentA = extentOf(shapeA, axis);
+            const int64_t extentB = extentOf(shapeB, axis);
+            if (extentA != extentB && extentA != 1 && extentB != 1)
+            {
+                throw Error(Status::InvalidArgument, std::string(opTypeName(node.type)) + " '" + node.name + "': operand shapes " + shapeStr(shapeA) + " and " + shapeStr(shapeB) + " do not broadcast (axis " + std::to_string(axis) + ")");
+            }
+            out[axis] = (extentA == 0 || extentB == 0) ? 0 : std::max(extentA, extentB);
+        }
+        return out;
+    }
 
     /// Walks a row-major output shape one flat element at a time, carrying the source element
     /// offset of every broadcast operand.

@@ -27,11 +27,9 @@ namespace vknn {
                     size_t off = rank - s.size();
                     return i < off ? 1 : s[i - off];
                 };
-                for (size_t i = 0; i < rank; ++i)
-                {
-                    int64_t dc = dimOf(sc, i), dx = dimOf(sx, i), dy = dimOf(sy, i);
-                    out[i] = (dc == 0 || dx == 0 || dy == 0) ? 0 : std::max(dc, std::max(dx, dy)); // a 0 dim broadcasts to 0 (NumPy), never to 1
-                }
+                // Pairwise NumPy broadcast of all three shapes: a 0 extent broadcasts to 0, and shapes that do
+                // not broadcast throw instead of letting a stride walk read past an operand.
+                out       = cpu::broadcastOutputShape(node, cpu::broadcastOutputShape(node, sc, sx), sy);
                 int64_t n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                 // Per-axis input strides in row-major (C-contiguous) order, built right to left. A
                 // broadcast axis (input dim 1, output dim > 1) gets stride 0 so every output index

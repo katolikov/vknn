@@ -88,17 +88,7 @@ namespace vknn { namespace cpu {
             const size_t leadingPad = rank - shape.size();
             return axis < leadingPad ? 1 : shape[axis - leadingPad];
         };
-        Shape out(rank, 1);
-        for (size_t axis = 0; axis < rank; ++axis)
-        {
-            const int64_t aExtent = extentOnAxis(aShape, axis);
-            const int64_t bExtent = extentOnAxis(bShape, axis);
-            if (aExtent != bExtent && aExtent != 1 && bExtent != 1)
-            {
-                throw Error(Status::InvalidArgument, std::string(opTypeName(node.type)) + " '" + node.name + "': operand shapes " + shapeStr(aShape) + " and " + shapeStr(bShape) + " do not broadcast");
-            }
-            out[axis] = (aExtent == 0 || bExtent == 0) ? 0 : std::max(aExtent, bExtent);
-        }
+        const Shape   out   = broadcastOutputShape(node, aShape, bShape);
         const int64_t count = elemCount(out);
         // Row-major operand strides, built back to front: 0 on an axis where the operand's extent is 1,
         // so every output coordinate along it re-reads the single source element.
