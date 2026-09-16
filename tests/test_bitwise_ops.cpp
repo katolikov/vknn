@@ -11,10 +11,12 @@
 // same order with the same names (GLSL builtins spelled through the glsl:: helpers below, control flow
 // braced by the C++ format) so a reviewer can diff the two, and is swept bit for bit against the CPU
 // oracle's fp32 lane over integer operands within +-2^24, fractional and NaN operands, every width, and
-// shift counts 0..70.
+// shift counts 0..70; the BitwiseNot and BitShift sweeps add lanes just below 2^32, multiples of 2^32,
+// lanes that saturate the int64 range, and pseudo-random fp32 bit patterns.
 #include "backend/cpu/bitwise_int.h"
 #include "backend/cpu/parallel.h"
 #include "core/bitwise_attrs.h"
+#include "core/vk_gates.h"
 #include "import/passes.h"
 #include "vknn/graph.h"
 #include "vknn/session.h"
@@ -201,6 +203,19 @@ namespace {
         return t;
     }
 
+    RtTensor floatRt(const Shape &shape, const std::vector<float> &values) {
+        RtTensor t;
+        t.shape = shape;
+        t.dtype = DType::Float32;
+        t.host.resizeElems((int64_t) values.size(), DType::Float32);
+        if (!values.empty())
+        {
+            std::memcpy(t.host.f32(), values.data(), values.size() * sizeof(float));
+        }
+        t.hostValid = true;
+        return t;
+    }
+
     // Two-operand broadcast of int64 operands a {2,3} and b {3} through a Session: a runtime Int64 input
     // and an Int64 initializer, output declared Int64.
     std::vector<int64_t> runInt64Binary(OpType type, const std::vector<int64_t> &a, const std::vector<int64_t> &b, const std::function<void(Node &)> &configure = nullptr) {
@@ -331,6 +346,105 @@ TEST(BitwiseOps, MixedInt64AndFloatOperandsStoreInt64) {
     EXPECT_EQ(int64Values(outs[0]), (std::vector<int64_t> {1 ^ 7, 1 ^ -2, kTwoPow40 ^ int64_t {10000000000}}));
 }
 
+TEST(BitwiseOps, FloatFirstOperandWithInt64SecondStoresInt64) {
+    // The Int64 operand decides int64 storage in either input slot. The kernel's own output tensor carries
+    // the dtype (a Session download converts to the declared output dtype, so only an inexact fp32 value
+    // shows through it): an fp32 value shifted by an Int64 count, and an fp32 value OR an Int64 initializer
+    // whose exact result 2^30 + 1 has no fp32 lane.
+    for (OpType type: {OpType::BitShift, OpType::BitwiseOr})
+    {
+        Node node;
+        node.type    = type;
+        node.name    = "float_then_int64";
+        node.inputs  = {0, 1};
+        node.outputs = {2};
+        if (type == OpType::BitShift)
+        {
+            node.attr.map[bitwise::kDirectionAttr] = stringAttr("LEFT");
+        }
+        std::vector<RtTensor> pool(3);
+        pool[0] = floatRt({2}, {200.0f, 3.0f});
+        pool[1] = int64Rt({2}, {1, 40});
+        runKernel(node, pool);
+        EXPECT_EQ(pool[2].dtype, DType::Int64) << opTypeName(type);
+        ASSERT_EQ(pool[2].host.bytes.size(), 2 * sizeof(int64_t)) << opTypeName(type);
+        const std::vector<int64_t> want = type == OpType::BitShift ? std::vector<int64_t> {400, int64_t {3} << 40} : std::vector<int64_t> {200 | 1, 3 | 40};
+        EXPECT_EQ(std::vector<int64_t>(pool[2].host.i64(), pool[2].host.i64() + 2), want) << opTypeName(type);
+    }
+    {
+        Graph    g;
+        TensorId x                          = addInput(g, "x", {2}, DType::Float32);
+        TensorId count                      = addInt64Initializer(g, "count", {2}, {1, 40});
+        TensorId y                          = addOutput(g, "y", DType::Int64);
+        Node    &n                          = addNode(g, OpType::BitShift, "shl", {x, count}, {y});
+        n.attr.map[bitwise::kDirectionAttr] = stringAttr("LEFT");
+        std::vector<IOTensor> outs;
+        ASSERT_EQ(runCpu(std::move(g), {floatTensor("x", {2}, {200.0f, 3.0f})}, outs), Status::Ok);
+        ASSERT_EQ(outs.size(), 1u);
+        EXPECT_EQ(int64Values(outs[0]), (std::vector<int64_t> {400, int64_t {3} << 40}));
+    }
+    {
+        Graph    g;
+        TensorId x   = addInput(g, "x", {2}, DType::Float32);
+        TensorId low = addInt64Initializer(g, "low", {2}, {1, -2});
+        TensorId y   = addOutput(g, "y", DType::Int64);
+        addNode(g, OpType::BitwiseOr, "or", {x, low}, {y});
+        std::vector<IOTensor> outs;
+        ASSERT_EQ(runCpu(std::move(g), {floatTensor("x", {2}, {1073741824.0f, -7.0f})}, outs), Status::Ok);
+        ASSERT_EQ(outs.size(), 1u);
+        EXPECT_EQ(int64Values(outs[0]), (std::vector<int64_t> {(int64_t {1} << 30) + 1, -7 | -2}));
+    }
+}
+
+TEST(BitwiseOps, EmptyInt64OperandsKeepInt64Storage) {
+    // An empty Int64 tensor has no element storage; its dtype alone keeps the result Int64.
+    Node notNode;
+    notNode.type    = OpType::BitwiseNot;
+    notNode.name    = "not";
+    notNode.inputs  = {0};
+    notNode.outputs = {1};
+    std::vector<RtTensor> unary(2);
+    unary[0] = int64Rt({0}, {});
+    runKernel(notNode, unary);
+    EXPECT_EQ(unary[1].shape, (Shape {0}));
+    EXPECT_EQ(unary[1].dtype, DType::Int64);
+
+    for (OpType type: {OpType::BitwiseOr, OpType::BitShift})
+    {
+        Node node;
+        node.type    = type;
+        node.name    = "binary";
+        node.inputs  = {0, 1};
+        node.outputs = {2};
+        if (type == OpType::BitShift)
+        {
+            node.attr.map[bitwise::kDirectionAttr] = stringAttr("RIGHT");
+        }
+        std::vector<RtTensor> pool(3);
+        pool[0] = int64Rt({0}, {});
+        pool[1] = int64Rt({0}, {});
+        runKernel(node, pool);
+        EXPECT_EQ(pool[2].shape, (Shape {0})) << opTypeName(type);
+        EXPECT_EQ(pool[2].dtype, DType::Int64) << opTypeName(type);
+    }
+}
+
+TEST(BitwiseOps, IntegerFromFloatSaturatesToInt64Range) {
+    // NaN reads 0; a lane at or above 2^63 saturates to INT64_MAX, below -2^63 to INT64_MIN; every other
+    // lane truncates toward zero.
+    const float inf = std::numeric_limits<float>::infinity();
+    EXPECT_EQ(cpu::bitwise::integerFromFloat(inf), std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(cpu::bitwise::integerFromFloat(9223372036854775808.0f), std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(cpu::bitwise::integerFromFloat(1.0e19f), std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(cpu::bitwise::integerFromFloat(std::nextafter(9223372036854775808.0f, 0.0f)), int64_t {9223371487098961920LL});
+    EXPECT_EQ(cpu::bitwise::integerFromFloat(-inf), std::numeric_limits<int64_t>::min());
+    EXPECT_EQ(cpu::bitwise::integerFromFloat(-9223372036854775808.0f), std::numeric_limits<int64_t>::min());
+    EXPECT_EQ(cpu::bitwise::integerFromFloat(-1.0e19f), std::numeric_limits<int64_t>::min());
+    EXPECT_EQ(cpu::bitwise::integerFromFloat(std::numeric_limits<float>::quiet_NaN()), 0);
+    EXPECT_EQ(cpu::bitwise::integerFromFloat(-0.5f), 0);
+    EXPECT_EQ(cpu::bitwise::integerFromFloat(-2.75f), -2);
+}
+
 TEST(BitwiseOps, ZeroExtentAndRankZeroBroadcast) {
     // A 0 extent broadcasts to 0 (never to 1); a rank-0 operand broadcasts over any shape.
     Node node;
@@ -433,7 +547,96 @@ TEST(BitwiseOps, BitwiseNotInvalidWidthIsInvalidArgument) {
     {
         EXPECT_EQ(e.status(), Status::InvalidArgument);
         EXPECT_NE(std::string(e.what()).find("BitwiseNot 'probe'"), std::string::npos) << e.what();
+        EXPECT_NE(std::string(e.what()).find(bitwise::kIntBitsAttr), std::string::npos) << e.what();
     }
+
+    // A valid width with an int_signed other than 0 or 1 is rejected the same way.
+    Graph    signedGraph;
+    TensorId signedIn                            = addInput(signedGraph, "x", {2}, DType::Int64);
+    TensorId signedOut                           = addOutput(signedGraph, "y", DType::Int64);
+    Node    &signedNode                          = addNode(signedGraph, OpType::BitwiseNot, "not", {signedIn}, {signedOut});
+    signedNode.attr.map[bitwise::kIntBitsAttr]   = intAttr(8);
+    signedNode.attr.map[bitwise::kIntSignedAttr] = intAttr(2);
+    EXPECT_NE(runCpu(std::move(signedGraph), {int64Tensor("x", {2}, {1, 2})}, outs), Status::Ok);
+    probe.attr.map[bitwise::kIntBitsAttr]   = intAttr(8);
+    probe.attr.map[bitwise::kIntSignedAttr] = intAttr(2);
+    try
+    {
+        bitwise::readIntegerWidth(probe);
+        ADD_FAILURE() << "an int_signed of 2 must be rejected";
+    } catch (const Error &e)
+    {
+        EXPECT_EQ(e.status(), Status::InvalidArgument);
+        EXPECT_NE(std::string(e.what()).find("BitwiseNot 'probe'"), std::string::npos) << e.what();
+        EXPECT_NE(std::string(e.what()).find(bitwise::kIntSignedAttr), std::string::npos) << e.what();
+    }
+}
+
+TEST(BitwiseOps, VulkanGateRefusesInvalidWidthByName) {
+    // BitwiseNot and BitShift read int_bits / int_signed in their Vulkan prepare(), so the gate keeps a node
+    // with an invalid width on the CPU op (which reports InvalidArgument at run) and names the attribute.
+    // A valid or absent width passes; BitShift's direction is checked first.
+    auto gate = [](OpType type, const Attributes &attr) {
+        Graph      g;
+        TensorDesc a, b, y;
+        a.name  = "a";
+        a.shape = {4};
+        b.name  = "b";
+        b.shape = {4};
+        y.name  = "y";
+        y.shape = {4};
+        Node node;
+        node.type = type;
+        node.name = "probe";
+        node.attr = attr;
+        node.inputs.push_back(g.addTensor(a));
+        if (type == OpType::BitShift)
+        {
+            node.inputs.push_back(g.addTensor(b));
+        }
+        node.outputs.push_back(g.addTensor(y));
+        g.nodes.push_back(node);
+        std::vector<NodeSupport> rows = vkSupportSurvey(g);
+        EXPECT_EQ(rows.size(), 1u);
+        return rows.empty() ? NodeSupport {} : rows[0];
+    };
+    auto widthAttributes = [](const char *direction, int64_t bits, int64_t isSigned) {
+        Attributes attr;
+        if (direction)
+        {
+            attr.map[bitwise::kDirectionAttr] = stringAttr(direction);
+        }
+        attr.map[bitwise::kIntBitsAttr]   = intAttr(bits);
+        attr.map[bitwise::kIntSignedAttr] = intAttr(isSigned);
+        return attr;
+    };
+    for (OpType type: {OpType::BitwiseNot, OpType::BitShift})
+    {
+        const char       *direction = type == OpType::BitShift ? "LEFT" : nullptr;
+        const std::string op        = opTypeName(type);
+        for (int bits: {8, 16, 32, 64})
+        {
+            NodeSupport valid = gate(type, widthAttributes(direction, bits, 0));
+            EXPECT_EQ(valid.backend, "vulkan") << op << " bits " << bits;
+            EXPECT_TRUE(valid.reason.empty()) << op << " bits " << bits;
+        }
+        Attributes absent;
+        if (direction)
+        {
+            absent.map[bitwise::kDirectionAttr] = stringAttr(direction);
+        }
+        EXPECT_EQ(gate(type, absent).backend, "vulkan") << op << ": absent attributes read as 64-bit signed";
+
+        NodeSupport badBits = gate(type, widthAttributes(direction, 12, 1));
+        EXPECT_EQ(badBits.backend, "cpu") << op;
+        EXPECT_EQ(badBits.reason, op + ": int_bits must be 8, 16, 32 or 64");
+        NodeSupport badSigned = gate(type, widthAttributes(direction, 8, 2));
+        EXPECT_EQ(badSigned.backend, "cpu") << op;
+        EXPECT_EQ(badSigned.reason, op + ": int_signed must be 0 or 1");
+    }
+    NodeSupport both = gate(OpType::BitShift, widthAttributes("UP", 12, 2));
+    EXPECT_EQ(both.backend, "cpu");
+    EXPECT_EQ(both.reason, "BitShift: direction must be LEFT or RIGHT");
 }
 
 TEST(BitwiseOps, BitShiftLeftUint8Wraps) {
@@ -715,6 +918,7 @@ namespace glsl {
     // ---- transcription of shaders/bitwise_int.glsl ----
 
     const int   kInt64Bits             = 64;
+    const int   kInt64SignBit          = 63;
     const int   kShiftWordBits         = 32;
     const int   kFloatExactIntegerBits = 24;
     const float kTwoPow32              = 4294967296.0f;
@@ -722,6 +926,7 @@ namespace glsl {
     const float kTwoPow64              = 18446744073709551616.0f;
     const float kInt32MinFloat         = -2147483648.0f;
     const float kInt32MaxFloat         = 2147483520.0f;
+    const float kAllBitsSet            = -1.0f;
 
     float integerOperand(float value) {
         if (isnan(value))
@@ -738,6 +943,10 @@ namespace glsl {
             return 0;
         }
         return int(trunc(clamp(value, kInt32MinFloat, kInt32MaxFloat)));
+    }
+
+    float narrowWidthOperand(float integer) {
+        return integer >= kTwoPow63 ? kAllBitsSet : integer;
     }
 
     float powerOfTwo(int exponent) {
@@ -799,17 +1008,35 @@ namespace glsl {
             float complement = -integer - 1.0f;
             return complement;
         }
+        float operand = narrowWidthOperand(integer);
         if (intBits <= kFloatExactIntegerBits)
         {
             float mask    = powerOfTwo(intBits) - 1.0f;
-            float flipped = mask - residueModPowerOfTwo(integer, intBits);
+            float flipped = mask - residueModPowerOfTwo(operand, intBits);
             return flipped;
         }
-        float wideComplement = -integer - 1.0f;
-        return residueModPowerOfTwo(wideComplement, intBits);
+        int   highBits       = intBits - kFloatExactIntegerBits;
+        float lowScale       = powerOfTwo(kFloatExactIntegerBits);
+        float lowComplement  = (lowScale - 1.0f) - residueModPowerOfTwo(operand, kFloatExactIntegerBits);
+        float highComplement = (powerOfTwo(highBits) - 1.0f) - residueModPowerOfTwo(floor(operand / lowScale), highBits);
+        float flipped        = highComplement * lowScale + lowComplement;
+        return flipped;
     }
 
     // ---- transcription of shaders/bitshift.comp ----
+
+    float int64MaxShifted(int s, int directionLeft) {
+        if (s == 0)
+        {
+            return kTwoPow63;
+        }
+        if (directionLeft != 0)
+        {
+            return -powerOfTwo(s);
+        }
+        float shifted = powerOfTwo(kInt64SignBit - s) - 1.0f;
+        return shifted;
+    }
 
     float bitShiftValue(float value, float shift, int directionLeft, int intBits) {
         float shiftCount = integerOperand(shift);
@@ -818,15 +1045,20 @@ namespace glsl {
             return 0.0f;
         }
         int   s       = int(shiftCount);
-        float operand = integerOperand(value);
+        float integer = integerOperand(value);
+        if (intBits >= kInt64Bits && integer >= kTwoPow63)
+        {
+            return int64MaxShifted(s, directionLeft);
+        }
+        float operand = narrowWidthOperand(integer);
+        if (s == 0)
+        {
+            return wrapToWidth(operand, intBits);
+        }
         if (directionLeft != 0)
         {
             float shifted = operand * powerOfTwo(s);
             return wrapToWidth(shifted, intBits);
-        }
-        if (s == 0)
-        {
-            return wrapToWidth(operand, intBits);
         }
         float quotient = floor(operand / powerOfTwo(s));
         return residueModPowerOfTwo(quotient, intBits - s);
@@ -864,12 +1096,52 @@ namespace {
             state ^= state << 5;
             values.push_back((float) ((int64_t) (state % (2 * kTwoPow24 + 1)) - kTwoPow24));
         }
-        for (float v: {0.5f, -0.5f, 2.75f, -2.75f, 255.9f, -255.9f, 16777215.5f, -0.0f})
+        for (float v: {0.5f, -0.5f, 2.75f, -2.75f, 255.9f, -255.9f, 8388607.5f, -8388607.5f, -0.0f})
         {
             values.push_back(v);
         }
         values.push_back(std::numeric_limits<float>::quiet_NaN());
         return values;
+    }
+
+    // Operand lanes past the +-2^24 window for the BitwiseNot and BitShift sweeps (the And/Or/Xor kernel
+    // computes in int32 and keeps to sweepOperands): lanes in (2^32 - 2^24, 2^32), multiples of 2^32 (every
+    // fp32 lane from 2^55 up is one), lanes that saturate the int64 range, each with its negation, and
+    // pseudo-random fp32 bit patterns (NaN payloads, infinities, subnormals and every magnitude).
+    std::vector<float> wideOperands(int randomBitPatterns) {
+        const float twoPow32 = 4294967296.0f;
+        std::vector<float> magnitudes {twoPow32 - 256.0f, twoPow32 - 65536.0f, twoPow32 - 16777216.0f + 256.0f, twoPow32 - 16777216.0f + 1024.0f, twoPow32, twoPow32 + 512.0f, 3.0f * twoPow32, 4.5e16f, 1099511627776.0f, 72057594037927936.0f};
+        for (int step = 1; step < 64; step += 7)
+        {
+            magnitudes.push_back(twoPow32 - (float) step * 262144.0f); // 2^32 - step * 2^18
+        }
+        const float inf = std::numeric_limits<float>::infinity();
+        for (float v: {inf, 1.0e19f, 9223372036854775808.0f, std::nextafter(9223372036854775808.0f, 0.0f), 1.0e30f})
+        {
+            magnitudes.push_back(v);
+        }
+        std::vector<float> values;
+        for (float v: magnitudes)
+        {
+            values.push_back(v);
+            values.push_back(-v);
+        }
+        uint32_t state = 88675123u;
+        for (int i = 0; i < randomBitPatterns; ++i)
+        {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            float pattern;
+            std::memcpy(&pattern, &state, sizeof pattern);
+            values.push_back(pattern);
+        }
+        return values;
+    }
+
+    std::vector<float> concatenated(std::vector<float> first, const std::vector<float> &second) {
+        first.insert(first.end(), second.begin(), second.end());
+        return first;
     }
 
     bool sameBits(float a, float b) {
@@ -899,6 +1171,10 @@ TEST(BitwiseShaderMath, PowerOfTwoAndWrapHelpersAreExact) {
     EXPECT_EQ(glsl::int32Operand(-3.0e9f), std::numeric_limits<int32_t>::min());
     EXPECT_EQ(glsl::int32Operand(std::numeric_limits<float>::quiet_NaN()), 0);
     EXPECT_EQ(glsl::integerOperand(std::numeric_limits<float>::infinity()), 9223372036854775808.0f);
+    // A lane saturated at +2^63 is the oracle's INT64_MAX, whose low bits below 64 are -1's.
+    EXPECT_EQ(glsl::narrowWidthOperand(9223372036854775808.0f), -1.0f);
+    EXPECT_EQ(glsl::narrowWidthOperand(-9223372036854775808.0f), -9223372036854775808.0f);
+    EXPECT_EQ(glsl::narrowWidthOperand(std::nextafter(9223372036854775808.0f, 0.0f)), std::nextafter(9223372036854775808.0f, 0.0f));
 }
 
 TEST(BitwiseShaderMath, BitwiseAndOrXorMatchesOracle) {
@@ -925,7 +1201,7 @@ TEST(BitwiseShaderMath, BitwiseAndOrXorMatchesOracle) {
 }
 
 TEST(BitwiseShaderMath, BitwiseNotMatchesOracle) {
-    const std::vector<float> operands = sweepOperands(70000, 20000);
+    const std::vector<float> operands = concatenated(sweepOperands(70000, 20000), wideOperands(1000000));
     int64_t                  checked = 0, mismatches = 0;
     for (int bits: {8, 16, 32, 64})
     {
@@ -950,13 +1226,13 @@ TEST(BitwiseShaderMath, BitwiseNotMatchesOracle) {
 }
 
 TEST(BitwiseShaderMath, BitShiftMatchesOracle) {
-    const std::vector<float> operands = sweepOperands(300, 1500);
+    const std::vector<float> operands = concatenated(sweepOperands(300, 1500), wideOperands(20000));
     std::vector<float>       shifts;
     for (int s = 0; s <= 70; ++s)
     {
         shifts.push_back((float) s);
     }
-    for (float s: {-1.0f, -64.0f, 0.5f, 7.9f, -0.5f, 1.0e10f, std::numeric_limits<float>::quiet_NaN()})
+    for (float s: {-1.0f, -64.0f, 0.5f, 7.9f, -0.5f, 1.0e10f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity()})
     {
         shifts.push_back(s);
     }

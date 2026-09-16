@@ -35,7 +35,8 @@ namespace vknn { namespace bitwise_vk {
     }
 
     /// Output extent, per-operand broadcast strides (geometry SSBO) and constant operand buffers of a
-    /// two-operand flat broadcast kernel, in the layout shaders/and.comp decodes.
+    /// two-operand flat broadcast kernel, in the layout shaders/bitwise.comp and shaders/bitshift.comp
+    /// decode (outDim = g[0..rank), aStride = g[rank..2*rank), bStride = g[2*rank..3*rank)).
     struct BroadcastOperands {
         int                         rank  = 0;
         int                         total = 0;

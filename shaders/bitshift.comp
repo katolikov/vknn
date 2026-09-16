@@ -4,9 +4,9 @@
 #include "precision.glsl"
 // Flat broadcasting BitShift of operand a by operand b at the operand's integer width (push constant
 // intBits, from the node's int_bits attribute; directionLeft is 1 for LEFT, 0 for RIGHT). Power-of-two
-// float scaling reproduces the CPU oracle's bit arithmetic on the integer values (see bitShiftValue);
-// exact while operands and results stay within +-2^24. The per-axis output dims and operand strides live
-// in a geometry SSBO (binding 3) packed back-to-back: outDim = g[0..rank), aStride = g[rank..2*rank),
+// float scaling reproduces the CPU oracle's bit arithmetic on the integer values (see bitShiftValue) and
+// stores the oracle's fp32 lane for every operand. The per-axis output dims and operand strides live in a
+// geometry SSBO (binding 3) packed back-to-back: outDim = g[0..rank), aStride = g[rank..2*rank),
 // bStride = g[2*rank..3*rank).
 #include "bitwise_int.glsl"
 layout(local_size_x = 256) in;
@@ -16,20 +16,31 @@ layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
 layout(std430, binding = 3) readonly  buffer G { int g[]; } geom;
 layout(push_constant) uniform PC { int rank, total, directionLeft, intBits; } pc;
 
+// INT64_MAX (0x7FFF...F, the oracle's value of a lane saturated at +2^63) shifted by s at 64 bits: itself
+// (stored as 2^63) for s == 0; LEFT wraps to -2^s; RIGHT is 2^(63 - s) - 1.
+float int64MaxShifted(int s, int directionLeft) {
+  if (s == 0) return kTwoPow63;
+  if (directionLeft != 0) return -powerOfTwo(s);
+  precise float shifted = powerOfTwo(kInt64SignBit - s) - 1.0;
+  return shifted;
+}
+
 // value shifted by shift at intBits width. A shift count outside [0, intBits) yields 0 (checked on the
-// float before any int conversion). LEFT: the low intBits bits of value * 2^s. RIGHT: the logical shift
-// of value's low intBits bits, which equals floor(value / 2^s) reduced modulo 2^(intBits - s); a zero
-// shift is value's own intBits-wide wrap (signed at 64 bits, like the oracle's int64 view).
+// float before any int conversion). A zero shift is value's own intBits-wide wrap (signed at 64 bits, like
+// the oracle's int64 view). LEFT: the low intBits bits of value * 2^s. RIGHT: the logical shift of value's
+// low intBits bits, which equals floor(value / 2^s) reduced modulo 2^(intBits - s).
 float bitShiftValue(float value, float shift, int directionLeft, int intBits) {
   float shiftCount = integerOperand(shift);
   if (shiftCount < 0.0 || shiftCount >= float(intBits)) return 0.0;
   int s = int(shiftCount);
-  float operand = integerOperand(value);
+  float integer = integerOperand(value);
+  if (intBits >= kInt64Bits && integer >= kTwoPow63) return int64MaxShifted(s, directionLeft);
+  float operand = narrowWidthOperand(integer);
+  if (s == 0) return wrapToWidth(operand, intBits);
   if (directionLeft != 0) {
     precise float shifted = operand * powerOfTwo(s);
     return wrapToWidth(shifted, intBits);
   }
-  if (s == 0) return wrapToWidth(operand, intBits);
   precise float quotient = floor(operand / powerOfTwo(s));
   return residueModPowerOfTwo(quotient, intBits - s);
 }

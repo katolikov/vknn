@@ -6,7 +6,8 @@
 // zero), so no conversion is undefined. All arithmetic is two's-complement int64. The result is stored as
 // int64 when any operand's runtime dtype is Int64, otherwise as the fp32 value of the int64 result (the
 // Binary rule). The GLSL kernels (shaders/bitwise_int.glsl and the three bitwise .comp files) compute the
-// same integers on float lanes; they are exact while operands and results stay within +-2^24.
+// same integers on float lanes and store the same fp32 lanes: BitwiseNot and BitShift for every fp32
+// operand, BitwiseAnd/Or/Xor for operands within the int32 range.
 #pragma once
 #include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
@@ -103,12 +104,15 @@ namespace vknn { namespace cpu { namespace bitwise {
 
     /// Typed read views of one operand, resolved once before a parallel sweep: the const host accessors
     /// materialize a mapped payload on first touch, which must not happen concurrently inside a chunk.
+    /// The storage decision reads the tensor's dtype, never a data pointer: an empty tensor's accessor is
+    /// null whatever its dtype.
     struct OperandView {
-        const int64_t *integers = nullptr; ///< non-null for an Int64 runtime tensor
-        const float   *floats   = nullptr; ///< non-null for every other runtime dtype (fp32 lanes)
+        bool           int64    = false;   ///< the runtime dtype is Int64
+        const int64_t *integers = nullptr; ///< an Int64 tensor's elements
+        const float   *floats   = nullptr; ///< every other runtime dtype's elements (fp32 lanes)
 
-        explicit OperandView(const RtTensor &tensor) {
-            if (tensor.dtype == DType::Int64)
+        explicit OperandView(const RtTensor &tensor): int64(tensor.dtype == DType::Int64) {
+            if (int64)
             {
                 integers = tensor.host.i64();
             } else
@@ -117,10 +121,10 @@ namespace vknn { namespace cpu { namespace bitwise {
             }
         }
         bool isInt64() const noexcept {
-            return integers != nullptr;
+            return int64;
         }
         int64_t at(int64_t index) const noexcept {
-            return integers ? integers[index] : integerFromFloat(floats[index]);
+            return int64 ? integers[index] : integerFromFloat(floats[index]);
         }
     };
 
@@ -167,7 +171,7 @@ namespace vknn { namespace cpu { namespace bitwise {
             for (int64_t index = first; index < end; ++index, walk.next())
             {
                 const int64_t value = integerOp(viewA.at(walk.offset(0)), viewB.at(walk.offset(1)));
-                if (integerOut)
+                if (int64Result)
                 {
                     integerOut[index] = value;
                 } else
@@ -186,13 +190,14 @@ namespace vknn { namespace cpu { namespace bitwise {
         const Shape       shape   = operand.shape;
         const int64_t     count   = cpu::elemCount(shape);
         const OperandView view(operand);
-        int64_t          *integerOut = view.isInt64() ? cpu::allocOutI64(result, shape) : nullptr;
-        float            *floatOut   = view.isInt64() ? nullptr : cpu::allocOut(result, shape);
+        const bool        int64Result = view.isInt64();
+        int64_t          *integerOut  = int64Result ? cpu::allocOutI64(result, shape) : nullptr;
+        float            *floatOut    = int64Result ? nullptr : cpu::allocOut(result, shape);
         cpu::parallelFor(cpu::threadCount(ctx.config), 0, count, cpu::minChunkForWork(1), [&](int64_t first, int64_t end) {
             for (int64_t index = first; index < end; ++index)
             {
                 const int64_t value = integerOp(view.at(index));
-                if (integerOut)
+                if (int64Result)
                 {
                     integerOut[index] = value;
                 } else

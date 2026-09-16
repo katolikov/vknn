@@ -1,8 +1,8 @@
 // Flat (row-major) BitShift on the GPU: operand a shifted by operand b at the node's int_bits width
 // (absent: 64) with N-D broadcasting at any rank, on shaders/bitshift.comp. The direction is the string
-// attribute "LEFT" / "RIGHT"; vkNodeGate keeps any other value on the CPU op, and prepare() rejects one by
-// name. Geometry, constant operands and precision follow bitwise_vk.h. Push-constant layout byte-matches
-// shaders/bitshift.comp.
+// attribute "LEFT" / "RIGHT"; vkNodeGate keeps any other value, and an invalid int_bits / int_signed, on
+// the CPU op, and prepare() rejects either by name. Geometry, constant operands and precision follow
+// bitwise_vk.h. Push-constant layout byte-matches shaders/bitshift.comp.
 #include "bitwise_vk.h"
 #include "core/bitwise_attrs.h"
 

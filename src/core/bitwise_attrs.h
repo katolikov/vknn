@@ -40,19 +40,50 @@ namespace vknn { namespace bitwise {
         Right,
     };
 
+    /// Requirement text of each width attribute: vkNodeGate's refusal reason for a node that violates it,
+    /// and the message of the kernels' InvalidArgument.
+    inline constexpr const char *kIntBitsRequirement   = "int_bits must be 8, 16, 32 or 64";
+    inline constexpr const char *kIntSignedRequirement = "int_signed must be 0 or 1";
+
+    /// True for an `int_bits` value of 8, 16, 32 or 64.
+    inline constexpr bool intBitsValid(int64_t bits) noexcept {
+        return bits == kInt8Bits || bits == kInt16Bits || bits == kInt32Bits || bits == kInt64Bits;
+    }
+    /// True for an `int_signed` value of 0 or 1.
+    inline constexpr bool intSignedValid(int64_t isSigned) noexcept {
+        return isSigned == 0 || isSigned == 1;
+    }
+
+    /// Check `int_bits` / `int_signed` (absent attributes read as their defaults) without throwing.
+    /// @returns true when both are valid; otherwise false, with `requirement` (when non-null) set to the
+    ///          violated attribute's requirement text.
+    inline bool integerWidthValid(const Node &node, const char **requirement) noexcept {
+        const char *violated = nullptr;
+        if (!intBitsValid(node.attr.geti(kIntBitsAttr, kDefaultIntBits)))
+        {
+            violated = kIntBitsRequirement;
+        } else if (!intSignedValid(node.attr.geti(kIntSignedAttr, kDefaultIntSigned)))
+        { violated = kIntSignedRequirement; }
+        if (requirement)
+        {
+            *requirement = violated;
+        }
+        return violated == nullptr;
+    }
+
     /// Read `int_bits` / `int_signed` with their defaults.
     /// @throws Error(InvalidArgument) naming the node when `int_bits` is not 8, 16, 32 or 64 or
     ///         `int_signed` is not 0 or 1.
     inline IntegerWidth readIntegerWidth(const Node &node) {
         const int64_t bits     = node.attr.geti(kIntBitsAttr, kDefaultIntBits);
         const int64_t isSigned = node.attr.geti(kIntSignedAttr, kDefaultIntSigned);
-        if (bits != kInt8Bits && bits != kInt16Bits && bits != kInt32Bits && bits != kInt64Bits)
+        if (!intBitsValid(bits))
         {
-            throw Error(Status::InvalidArgument, std::string(opTypeName(node.type)) + " '" + node.name + "': " + kIntBitsAttr + " must be 8, 16, 32 or 64 (got " + std::to_string(bits) + ")");
+            throw Error(Status::InvalidArgument, std::string(opTypeName(node.type)) + " '" + node.name + "': " + kIntBitsRequirement + " (got " + std::to_string(bits) + ")");
         }
-        if (isSigned != 0 && isSigned != 1)
+        if (!intSignedValid(isSigned))
         {
-            throw Error(Status::InvalidArgument, std::string(opTypeName(node.type)) + " '" + node.name + "': " + kIntSignedAttr + " must be 0 or 1 (got " + std::to_string(isSigned) + ")");
+            throw Error(Status::InvalidArgument, std::string(opTypeName(node.type)) + " '" + node.name + "': " + kIntSignedRequirement + " (got " + std::to_string(isSigned) + ")");
         }
         IntegerWidth width;
         width.bits     = (int) bits;

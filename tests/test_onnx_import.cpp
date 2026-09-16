@@ -376,7 +376,7 @@ namespace {
         {
             for (uint64_t v: vals)
             {
-                putTag(b, kUint64DataField, 0);
+                putTag(b, kUint64DataField, kWireVarint);
                 putVarint(b, v);
             }
         }
@@ -728,6 +728,53 @@ TEST(OnnxImport, IntegerWidthFromValueInfoAndProducers) {
     expectWidth(g, "not_shape", 64, 1);
     expectWidth(g, "not_bool", 8, 0);
     expectWidth(g, "shift_constant", 64, 0);
+}
+
+TEST(OnnxImport, IntegerWidthFromDeclaredOutputAndSlotRules) {
+    // A graph output's declared INT32 type reaches a consumer of the node that produces it (the output
+    // carry), and INT32 is signed 32-bit. TopK's output 1 is INT64 whatever its input, while its output 0
+    // takes the FLOAT data type (no stamp). Where takes its result type from X (input 1): an INT16 X
+    // resolves to signed 16-bit, never the BOOL condition's type; a Where whose X is untyped and whose Y
+    // is INT16 stays unresolved, so Y (input 2) is not the typing slot.
+    const std::vector<int64_t> k {1};
+    const std::vector<int16_t> sixteen {-2, 3};
+    GraphParts                 parts;
+    parts.inputs = {valueInfo("untyped", OnnxType::Undefined, {2}), valueInfo("f", OnnxType::Float, {2})};
+    parts.initializers = {namedRawTensor("k", OnnxType::Int64, {1}, rawBytes(k)), namedRawTensor("x16", OnnxType::Int16, {2}, rawBytes(sixteen)), namedRawTensor("y16", OnnxType::Int16, {2}, rawBytes(sixteen))};
+    parts.nodes = {
+        graphNode("Relu", "relu", {"untyped"}, {"y"}),
+        graphNode("BitwiseNot", "not_declared_output", {"y"}, {"flipped_output"}),
+        graphNode("TopK", "topk", {"f", "k"}, {"top_values", "top_indices"}),
+        graphNode("BitwiseNot", "not_topk_indices", {"top_indices"}, {"flipped_indices"}),
+        graphNode("BitwiseNot", "not_topk_values", {"top_values"}, {"flipped_values"}),
+        graphNode("Less", "less", {"f", "f"}, {"mask"}),
+        graphNode("Where", "where_typed_x", {"mask", "x16", "y16"}, {"selected"}),
+        graphNode("BitwiseNot", "not_where", {"selected"}, {"flipped_selected"}),
+        graphNode("Where", "where_untyped_x", {"mask", "untyped", "y16"}, {"selected_untyped"}),
+        graphNode("BitwiseNot", "not_where_untyped_x", {"selected_untyped"}, {"flipped_selected_untyped"}),
+    };
+    parts.outputs = {valueInfo("y", OnnxType::Int32, {2}), valueInfo("flipped_output", OnnxType::Undefined, {2}), valueInfo("flipped_indices", OnnxType::Undefined, {1}), valueInfo("flipped_values", OnnxType::Undefined, {1}), valueInfo("flipped_selected", OnnxType::Undefined, {2}), valueInfo("flipped_selected_untyped", OnnxType::Undefined, {2})};
+    Graph g = importModel("vknn_import_width_output_slots", parts);
+    expectWidth(g, "not_declared_output", 32, 1);
+    expectWidth(g, "not_topk_indices", 64, 1);
+    expectWidth(g, "not_where", 16, 1);
+    for (const char *name: {"not_topk_values", "not_where_untyped_x"})
+    {
+        const Node *node = findNode(g, name);
+        ASSERT_NE(node, nullptr);
+        EXPECT_FALSE(node->attr.has(bitwise::kIntBitsAttr)) << name;
+        EXPECT_FALSE(node->attr.has(bitwise::kIntSignedAttr)) << name;
+    }
+}
+
+TEST(OnnxTensorProto, Uint32Int32DataZeroExtendsToInt64) {
+    // A UINT32 written to int32_data arrives as its wrapped int32 (-1 for 4294967295); the int64 lane
+    // zero-extends its bits, packed or one varint per tag.
+    for (bool packed: {true, false})
+    {
+        auto got = decodeI64(protoWithInt32Data(OnnxType::Uint32, {2}, {-1, 5}, packed), 2);
+        EXPECT_EQ(got, (std::vector<int64_t> {4294967295LL, 5})) << "packed=" << packed;
+    }
 }
 
 TEST(OnnxImport, UnresolvedIntegerWidthLeavesDefaults) {

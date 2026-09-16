@@ -1,5 +1,6 @@
 // Flat (row-major) BitwiseNot on the GPU: the complement of each operand's integer value at the width the
 // node's int_bits / int_signed attributes give (absent: 64-bit signed), a 1:1 map with no geometry SSBO.
+// vkNodeGate keeps a node with an invalid width on the CPU op, and prepare() rejects one by name.
 // Precision and constant operand upload follow bitwise_vk.h. Push-constant layout byte-matches
 // shaders/bitwise_not.comp.
 #include "bitwise_vk.h"

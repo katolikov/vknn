@@ -304,16 +304,23 @@ namespace vknn { namespace onnx {
             return ops;
         }
 
-        // ONNX ops whose result takes the element type of an input other than input 0 (Where's condition
-        // and a DequantizeLinear's quantized data are not the result type), keyed to that input's slot.
-        const std::map<std::string, size_t> &typeCarryingInput() {
-            static const std::map<std::string, size_t> slots = {{"Where", 1}, {"CastLike", 1}, {"DequantizeLinear", 1}, {"OneHot", 2}};
-            return slots;
-        }
-
         constexpr size_t kTopKIndicesOutput        = 1; // TopK's output slot holding the INT64 indices
         constexpr size_t kQuantizeZeroPointInput   = 2; // QuantizeLinear's zero point, which carries the result type
         constexpr size_t kDefaultTypeCarryingInput = 0; // every other op's result takes input 0's type
+        constexpr size_t kWhereTrueValueInput      = 1; // Where's X (input 0 is the BOOL condition)
+        constexpr size_t kCastLikeTargetInput      = 1; // CastLike's target_type tensor
+        constexpr size_t kDequantizeScaleInput     = 1; // DequantizeLinear's scale (input 0 is the quantized data)
+        constexpr size_t kOneHotValuesInput        = 2; // OneHot's [off_value, on_value] pair
+
+        // ONNX ops whose result takes the element type of an input other than input 0 (Where's condition
+        // and a DequantizeLinear's quantized data are not the result type), keyed to that input's slot.
+        const std::map<std::string, size_t> &typeCarryingInput() {
+            static const std::map<std::string, size_t> slots = {{"Where", kWhereTrueValueInput}, {"CastLike", kCastLikeTargetInput}, {"DequantizeLinear", kDequantizeScaleInput}, {"OneHot", kOneHotValuesInput}};
+            return slots;
+        }
+
+        constexpr size_t kBitShiftTypedOperands   = 2; // BitShift's value and shift count share one element type
+        constexpr size_t kBitwiseNotTypedOperands = 1; // BitwiseNot's one operand
 
         Attr intAttr(int64_t value) {
             Attr attribute;
@@ -439,7 +446,7 @@ namespace vknn { namespace onnx {
             }
             // BitShift's two operands share one type, so the shift count resolves the width when the
             // shifted operand does not.
-            const size_t          operandsToTry = node.type == OpType::BitShift ? 2 : 1;
+            const size_t          operandsToTry = node.type == OpType::BitShift ? kBitShiftTypedOperands : kBitwiseNotTypedOperands;
             bitwise::IntegerWidth width;
             bool                  isResolved = false;
             for (size_t operand = 0; operand < operandsToTry && operand < node.inputs.size() && !isResolved; ++operand)

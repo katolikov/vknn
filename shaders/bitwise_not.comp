@@ -4,9 +4,8 @@
 #include "precision.glsl"
 // Flat elementwise BitwiseNot at the operand's integer width (push constants intBits / intSigned, from
 // the node's int_bits / int_signed attributes). A signed type or a 64-bit width complements all bits,
-// -v - 1; an unsigned type narrower than 64 bits keeps the low intBits bits of that complement, which is
-// (2^intBits - 1) - v for v in [0, 2^intBits - 1] (see bitwiseNotValue). Exact within +-2^24; a 1:1 map
-// with no geometry SSBO.
+// -v - 1; an unsigned type narrower than 64 bits keeps the low intBits bits of that complement (see
+// bitwiseNotValue). Stores the CPU oracle's fp32 lane for every operand; a 1:1 map with no geometry SSBO.
 #include "bitwise_int.glsl"
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer S { STORE s[]; };
@@ -14,22 +13,27 @@ layout(std430, binding = 1) writeonly buffer D { STORE d[]; };
 layout(push_constant) uniform PC { int total, intBits, intSigned; } pc;
 
 // The complement of one operand lane at the given width. An unsigned width of at most 24 bits subtracts
-// the operand's residue from the exact mask 2^intBits - 1, exact for every integer-valued lane. The
-// 32-bit mask is not exact in fp32, so that width takes the residue of the complement -v - 1 instead,
-// exact whenever the result is.
+// the operand's low intBits bits from the exact mask 2^intBits - 1. The 32-bit mask is not exact in fp32,
+// so that width complements the low 24 bits and the high intBits - 24 bits separately, each against its
+// exact mask, and joins them in one addition that rounds the exact complement once.
 float bitwiseNotValue(float value, int intBits, int intSigned) {
   float integer = integerOperand(value);
   if (intSigned != 0 || intBits >= kInt64Bits) {
     precise float complement = -integer - 1.0;
     return complement;
   }
+  float operand = narrowWidthOperand(integer);
   if (intBits <= kFloatExactIntegerBits) {
     precise float mask = powerOfTwo(intBits) - 1.0;
-    precise float flipped = mask - residueModPowerOfTwo(integer, intBits);
+    precise float flipped = mask - residueModPowerOfTwo(operand, intBits);
     return flipped;
   }
-  precise float wideComplement = -integer - 1.0;
-  return residueModPowerOfTwo(wideComplement, intBits);
+  int highBits = intBits - kFloatExactIntegerBits;
+  float lowScale = powerOfTwo(kFloatExactIntegerBits);
+  precise float lowComplement = (lowScale - 1.0) - residueModPowerOfTwo(operand, kFloatExactIntegerBits);
+  precise float highComplement = (powerOfTwo(highBits) - 1.0) - residueModPowerOfTwo(floor(operand / lowScale), highBits);
+  precise float flipped = highComplement * lowScale + lowComplement;
+  return flipped;
 }
 
 void main() {

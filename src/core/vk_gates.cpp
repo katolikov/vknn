@@ -6,6 +6,7 @@
 #include "core/vk_gates.h"
 #include "backend/cpu/cpu_backend.h"
 #include "core/arg_extreme_limits.h"
+#include "core/bitwise_attrs.h"
 #include "core/fused_attention.h"
 #include "core/fused_dwpw.h"
 #include "vknn/dtype.h"
@@ -298,7 +299,7 @@ namespace vknn {
             // flat broadcasting kernels decode any output rank (geometry in a plan SSBO).
             return true;
         }
-        if (nd.type == OpType::Mod || nd.type == OpType::BitwiseAnd || nd.type == OpType::BitwiseOr || nd.type == OpType::BitwiseXor || nd.type == OpType::BitwiseNot)
+        if (nd.type == OpType::Mod || nd.type == OpType::BitwiseAnd || nd.type == OpType::BitwiseOr || nd.type == OpType::BitwiseXor)
         {
             // Flat elementwise kernels (broadcasting, any output rank); no attribute or shape limits them.
             // The bitwise ops, Mod with fmod 0, and Mod with an Int32/Int64-typed operand compute integers,
@@ -306,15 +307,24 @@ namespace vknn {
             // operands. Mod with fmod 1 on float operands is the C fmod at the node's normal precision.
             return true;
         }
-        if (nd.type == OpType::BitShift)
+        if (nd.type == OpType::BitShift || nd.type == OpType::BitwiseNot)
         {
-            // The shift direction selects the kernel's arithmetic. ONNX spells it exactly "LEFT" or
-            // "RIGHT" (case-sensitive); any other value is an invalid node that stays on the CPU op,
-            // which reports it as InvalidArgument.
-            const std::string direction = nd.attr.gets("direction", "");
-            if (direction != "LEFT" && direction != "RIGHT")
+            // BitShift's direction and both ops' integer width (int_bits / int_signed, absent: 64-bit
+            // signed) select the kernel's arithmetic. ONNX spells the direction exactly "LEFT" or "RIGHT"
+            // (case-sensitive). A node with any other direction or an invalid width stays on the CPU op,
+            // which reports it as InvalidArgument at run.
+            if (nd.type == OpType::BitShift)
             {
-                return refuse(whyNot, "BitShift: direction must be LEFT or RIGHT");
+                const std::string direction = nd.attr.gets("direction", "");
+                if (direction != "LEFT" && direction != "RIGHT")
+                {
+                    return refuse(whyNot, "BitShift: direction must be LEFT or RIGHT");
+                }
+            }
+            const char *requirement = nullptr;
+            if (!bitwise::integerWidthValid(nd, &requirement))
+            {
+                return refuse(whyNot, std::string(opTypeName(nd.type)) + ": " + requirement);
             }
             return true;
         }
