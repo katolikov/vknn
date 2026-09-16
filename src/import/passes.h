@@ -314,19 +314,29 @@ namespace vknn {
     void pinGridSampleGridFp32(Graph &g);
 
     // Pin integer tensors to fp32 storage, where consecutive integers are exact up to 2^24 (fp16 is
-    // exact only up to 2^11 and saturates at 65504). Seeds: the flat outputs of ArgMax, ArgMin, Mod
-    // with fmod == 0 or integer operands (modOperandsAreInteger), BitShift, BitwiseAnd, BitwiseOr, BitwiseXor and
-    // BitwiseNot; the runtime operands of those Mod and bitwise ops; and ArgMax/ArgMin data typed
-    // Int32/Int64. From every seed the pin floods the value-preserving region around it: toward sources
-    // through layout converts, Identity, metadata reshapes, Cast, movement and selection ops (so an
-    // integer graph input packs at fp32), and toward consumers through the same ops (a Cast only to an
-    // integer type), so an integer result reaches a graph output or the next integer op without an fp16
-    // narrowing. A Cast's operand is followed toward its source only. A tensor is pinned while it can
-    // take fp32 storage: flat, or NC4HW4 written by no fp16-only kernel (a graph input, a layout
-    // convert, a metadata reshape or a Cast); the region stops at an NC4HW4 conv-family output, which
-    // markFp32 bridges. A hop that is a secondary output of a multi-output producer also pins that
-    // producer's outputs[0], since markFp32 aligns every output of a node to outputs[0]. Runs at load,
-    // after insertLayoutConverts, before markFp32.
+    // exact only up to 2^11 and saturates at 65504). An integer value is an Int32/Int64-typed tensor
+    // (initializers included), a result that is an integer whatever its operands hold (a Cast to an integer
+    // type, Shape, ArgMax/ArgMin, TopK's indices, an integer-filled ConstantOfShape, the bitwise ops, an
+    // integer Mod), or a value copied or computed from integer values: movement and selection ops (layout
+    // converts, Identity, metadata reshapes, Slice, Transpose, Expand, Tile, Split, Gather data, Concat,
+    // Where values), Add, Binary Add/Sub/Mul/Div/Max/Min, Pow of an integer base, ReduceSum/Max/Min/Prod,
+    // Range, Clip, Neg and Abs. Integer values are pinned where a node needs them exact. Seeds: the flat
+    // outputs of ArgMax, ArgMin, Mod with fmod == 0 or integer operands (modOperandsAreInteger), BitShift,
+    // BitwiseAnd, BitwiseOr, BitwiseXor and BitwiseNot; the runtime operands of those Mod and bitwise ops;
+    // integer ArgMax/ArgMin data; every arithmetic node above reading an integer value (its result, its
+    // operands, and Pow's exponent); and the operands of an Equal/Greater/GreaterEqual/Less/LessEqual
+    // reading an integer value, with its 0/1 result pinned without spreading so the comparison runs fp32.
+    // From every seed the pin floods the region: toward sources through the movement ops, the arithmetic
+    // ops and Cast (so an integer graph input packs at fp32), and toward consumers through the movement and
+    // arithmetic ops and a Cast to an integer type, so an integer result reaches a graph output or the next
+    // integer op without an fp16 narrowing. A Cast's operand is followed toward its source only. An integer
+    // value no node computes on (an int64 mask read only through reshapes into a Cast to float) keeps its
+    // storage precision, and a graph with no integer value pins nothing. A tensor is pinned while it can take fp32 storage:
+    // flat, or NC4HW4 written by no fp16-only kernel (a graph input, a layout convert, a metadata reshape, a
+    // Cast, Add, Binary, Unary or Concat); the region stops at an NC4HW4 conv-family output, which markFp32
+    // bridges. A hop that is a secondary output of a multi-output producer also pins that producer's
+    // outputs[0], since markFp32 aligns every output of a node to outputs[0]. Runs at load, after
+    // insertLayoutConverts, before markFp32.
     void pinIntegerResultsFp32(Graph &g);
 
     // The Vulkan flat-layout load sequence, in its load-bearing order: insertLayoutConverts assigns
