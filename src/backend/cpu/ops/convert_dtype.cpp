@@ -6,7 +6,8 @@
 
 namespace vknn {
     namespace {
-        /// CPU reference kernel for ConvertDtype: a shape-, value- and dtype-preserving element copy.
+        /// CPU reference kernel for ConvertDtype: a shape- and value-preserving element copy. An int64
+        /// input stays int64; every other input is copied as fp32 lanes under the Float32 label.
         ///
         /// The importer's fp32 pass (mark_fp32.cpp) inserts a ConvertDtype at every fp16/fp32 storage
         /// frontier so downstream nodes read their input at the storage precision they expect. That
@@ -18,9 +19,11 @@ namespace vknn {
         /// Host storage is either fp32 lanes or exact int64 lanes (integer results such as ArgMax indices
         /// or shape arithmetic). An int64 input stays int64 (a raw byte copy, the ConvertLayoutCpu
         /// precedent), so a value past fp32's 24-bit mantissa survives the convert and every consumer keeps
-        /// reading it through i64(). Every other input holds fp32 lanes (the session pool widens a native
-        /// INT8/UINT8 initializer to fp32 lanes while keeping its 1-byte label, so a byte copy under that
-        /// label would truncate) and is copied as fp32.
+        /// reading it through i64(). Every other input holds fp32 lanes and is copied as fp32 under the
+        /// Float32 label. The session pool widens a native INT8/UINT8 initializer to fp32 lanes while
+        /// keeping its 1-byte label; the output does not carry that label, because the byte-copying
+        /// consumers (cpu::copyAs: Reshape, Squeeze, Unsqueeze, Flatten, ConvertLayout) size their output
+        /// at the label's width and would keep a quarter of the fp32 lanes.
         struct ConvertDtypeCpu: CpuOp {
             void run(const Node &node, ExecContext &ctx) override {
                 const RtTensor &X = ctx.t(node.inputs[0]);

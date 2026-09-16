@@ -17,8 +17,9 @@ namespace vknn {
                 int64_t         n     = cpu::elemCount(X.shape); // a rank-0 scalar carries its one element
                 bool            inI64 = X.dtype == DType::Int64;
                 // Integer targets are carried as int64 storage (truncate toward zero, ONNX Cast semantics):
-                // 2=UINT8 3=INT8 4=UINT16 5=INT16 6=INT32 7=INT64 9=BOOL 12=UINT32 13=UINT64.
-                bool outI64 = (to == 2 || to == 3 || to == 4 || to == 5 || to == 6 || to == 7 || to == 9 || to == 12 || to == 13);
+                // 2=UINT8 3=INT8 4=UINT16 5=INT16 6=INT32 7=INT64 12=UINT32 13=UINT64. BOOL (kOnnxBool) is
+                // also stored as int64 but has its own truth-test branch below.
+                bool outI64 = (to == 2 || to == 3 || to == 4 || to == 5 || to == 6 || to == 7 || to == 12 || to == 13);
                 // Two element loops per branch, selected by the (int64 storage, float storage)
                 // product of input and output kind; BOOL has its own branch. Casts are elementwise, so
                 // index i maps 1:1 and the output keeps X.shape.

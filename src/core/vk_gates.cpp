@@ -9,6 +9,7 @@
 #include "core/bitwise_attrs.h"
 #include "core/fused_attention.h"
 #include "core/fused_dwpw.h"
+#include "vknn/binary_type.h"
 #include "vknn/dtype.h"
 #include "vknn/node.h"
 
@@ -461,8 +462,9 @@ namespace vknn {
             // int64 -> FLOAT/FLOAT16/DOUBLE, INT32, INT64: the shape-arithmetic targets, exact in the
             // compute float. int64 -> INT8 (3) / UINT8 (2): cast.comp narrows to match the CPU Cast op
             // followed by the readback narrowing bit-for-bit (INT8 modulo-wrap, UINT8 saturate); the
-            // narrowed value is small and exact in fp16/fp32. int64 -> BOOL (9): cast.comp truncates and
-            // clamps to [0,1], bit-identical to the CPU op for the {0,1} mask tensors this targets.
+            // narrowed value is small and exact in fp16/fp32. int64 -> BOOL (9): cast.comp's BOOL mode
+            // stores 1 for any nonzero value and 0 for zero, bit-identical to the CPU op for every int64
+            // input (a nonzero int64 packs to a nonzero fp32/fp16 lane: its magnitude is at least 1).
             if (to == 1 || to == 10 || to == 11 || to == 6 || to == 7 || to == 2 || to == 3 || to == 9)
             {
                 return true;
@@ -609,11 +611,31 @@ namespace vknn {
         // flat kernel (chosen by the layout pass) does everything else incl. constant operands.
         if (nd.type == OpType::Add || nd.type == OpType::Binary)
         {
-            if (nd.inputs.size() == 2)
+            if (nd.inputs.size() != 2)
             {
-                return true;
+                return refuse(whyNot, std::string(opTypeName(nd.type)) + ": input count != 2");
             }
-            return refuse(whyNot, std::string(opTypeName(nd.type)) + ": input count != 2");
+            // An int64 operand makes the CPU op compute exact integer Div and Pow (int64_arithmetic.h): a
+            // quotient truncated toward zero, and a power typed by its int64 base (2^-1 == 0). The GPU
+            // kernels divide and raise in float (7 / 2 == 3.5, 2^-1 == 0.5), so those nodes keep the CPU
+            // op. A float base raised to an int64 exponent is a float power on both backends and stays
+            // on the GPU; Add/Sub/Mul/Max/Min yield the integer result whenever the operands and the
+            // result fit the float lane exactly.
+            if (nd.type == OpType::Binary)
+            {
+                const BinaryType op       = (BinaryType) nd.subOp;
+                const bool       lhsInt64 = g.desc(nd.inputs[0]).dtype == DType::Int64;
+                const bool       rhsInt64 = g.desc(nd.inputs[1]).dtype == DType::Int64;
+                if (op == BinaryType::Div && (lhsInt64 || rhsInt64))
+                {
+                    return refuse(whyNot, "Binary: integer Div on an int64 operand");
+                }
+                if (op == BinaryType::Pow && lhsInt64)
+                {
+                    return refuse(whyNot, "Binary: integer Pow on an int64 base");
+                }
+            }
+            return true;
         }
         // Conv: the GPU kernels cover group == 1 (dense) and pure depthwise (group == Cin == Cout).
         // A general grouped conv (1 < group < Cin, e.g. ResNeXt cardinality, and the channel-multiplier

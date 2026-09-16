@@ -27,8 +27,9 @@ namespace vknn {
             return to == 1 || to == 10 || to == 11; // FLOAT, FLOAT16, DOUBLE
         };
         // Wide integer targets: truncate toward zero with no modulo/saturation, so the round-trip back
-        // to float is exactly trunc(x). The narrow targets (UINT8=2, INT8=3, UINT16=4, INT16=5,
-        // BOOL=9) wrap or saturate and are deliberately excluded.
+        // to float is exactly trunc(x). The narrow targets (UINT8=2, INT8=3, UINT16=4, INT16=5) wrap or
+        // saturate and BOOL=9 is a truth test, so none of them round-trips as trunc(x) and all are
+        // excluded.
         auto onnxIsWideInt = [](int64_t to) {
             return to == 6 || to == 7 || to == 12 || to == 13; // INT32, INT64, UINT32, UINT64
         };

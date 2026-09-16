@@ -8,6 +8,7 @@
 // any nonzero value, NaN included; 0 for +0/-0) rather than a truncation. supportsNode runs int64 -> the
 // scalar/narrow targets on the GPU (the int64 lanes decode to compute-precision float at the pack
 // boundary); INT16/UINT16 are not distinct vknn dtypes (they map to fp32 storage) and saturate here.
+#include "backend/vulkan/ops/cast_modes.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 #include <limits>
@@ -17,12 +18,6 @@ namespace vknn {
 
         // Local workgroup size along x; matches local_size_x in shaders/cast.comp.
         constexpr uint32_t kCastLocalSize = 256;
-
-        // cast.comp's `mode` push-constant values, mirrored by the kCastMode* constants in the shader.
-        constexpr int kCastModeWide          = 0; // truncate, then clamp to [lo, hi] (INT16/UINT16 saturate there)
-        constexpr int kCastModeInt8Wrap      = 1; // truncate, then wrap modulo 2^8
-        constexpr int kCastModeUInt8Saturate = 2; // truncate, then saturate to [lo, hi]
-        constexpr int kCastModeBool          = 3; // nonzero (NaN included) -> 1, +0/-0 -> 0
 
         // ONNX TensorProto.DataType code of BOOL.
         constexpr int64_t kOnnxBool = 9;

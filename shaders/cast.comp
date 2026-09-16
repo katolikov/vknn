@@ -7,7 +7,7 @@
 //
 // `mode` selects the narrowing so the stored value matches the CPU Cast op followed by the readback
 // narrowing (session.cpp readbackOutput), bit-for-bit. The values mirror the kCastMode* constants in
-// src/backend/vulkan/ops/cast.cpp:
+// src/backend/vulkan/ops/cast_modes.h (tests/test_binary_int_and_cast_fixes.cpp checks both):
 //   kCastModeWide (0)          wide integer (INT32/INT64/UINT32/UINT64): truncate toward zero, clamp
 //                              only to fence off inf/NaN. INT16/UINT16 share it with saturating bounds.
 //   kCastModeInt8Wrap (1)      INT8: truncate, then wrap modulo 2^8 into [-128,127] (ONNX Cast to a

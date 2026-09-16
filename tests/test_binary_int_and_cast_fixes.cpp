@@ -3,31 +3,40 @@
 //
 // - Binary and Add on int64 operands (backend/cpu/int64_arithmetic.h): Pow is an exact integer power
 //   whose products wrap modulo 2^64, with the negative-exponent rules (1 -> 1, -1 -> +-1 by parity,
-//   every other base -> 0); INT64_MIN / -1 wraps to INT64_MIN; Mul/Sub/Add wrap; an fp32 operand
-//   truncates toward zero with NaN reading 0 and out-of-range values saturating. A float base raised to
-//   an int64 exponent stays a float power.
+//   every other base -> 0); an int64 base with a fractional, infinite or NaN fp32 exponent takes the
+//   fp64 power truncated to int64; INT64_MIN / -1 wraps to INT64_MIN; Mul/Sub/Add wrap; an fp32
+//   operand truncates toward zero with NaN reading 0 and out-of-range values saturating. A float base
+//   raised to an int64 exponent stays a float power. The Vulkan gate keeps int64 Div and int64-base Pow
+//   on the CPU op, since the GPU kernels divide and raise in float.
 // - ConvertDtype on the CPU copies an int64 tensor as int64 (values past 2^53 survive).
 // - Cast to BOOL is a truth test: nonzero (negative, fractional, infinite, NaN) -> 1, +0/-0 -> 0, on
 //   the CPU oracle and in shaders/cast.comp's kCastModeBool. GLSL does not run on the host, so the
-//   shader's truth test is transcribed below and swept against the CPU oracle over every fp16 bit
-//   pattern and a stratified set of fp32 bit patterns.
+//   per-element body of cast.comp's main() is transcribed below. A source check pins the shader's lines
+//   and mode values to the transcription and to backend/vulkan/ops/cast_modes.h, and sweeps compare the
+//   transcription against the CPU oracle: every fp16 bit pattern and a stratified set of fp32 bit
+//   patterns for BOOL, a value grid for INT8 and UINT8.
 // - uploadInit's element count and payload guard (upload_init_rule.h): a rank-0 Int64/Int8/UInt8
-//   initializer counts its payload lanes at the stored width. The upload itself is Vulkan-only; the
-//   device probe covering it is a flat Mul of an int64 graph input by a rank-0 int64 initializer,
-//   whose output must equal the CPU oracle's.
+//   initializer counts its payload lanes at the stored width. The host tests cover only this count and
+//   guard rule; uploadInit itself runs only on a Vulkan device.
 //
 // Values run end to end through CPU Sessions (runStandardPasses included) or through constFold.
 #include "backend/cpu/int64_arithmetic.h"
 #include "backend/cpu/parallel.h"
+#include "backend/vulkan/ops/cast_modes.h"
 #include "backend/vulkan/ops/upload_init_rule.h"
+#include "core/vk_gates.h"
 #include "import/passes.h"
 #include "vknn/graph.h"
 #include "vknn/session.h"
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
 #include <limits>
+#include <string>
 #include <vector>
 
 using namespace vknn;
@@ -35,6 +44,8 @@ using namespace vknn;
 namespace {
 
     // ONNX TensorProto.DataType codes the Cast nodes below target.
+    constexpr int64_t kOnnxUInt8 = 2;
+    constexpr int64_t kOnnxInt8  = 3;
     constexpr int64_t kOnnxInt32 = 6;
     constexpr int64_t kOnnxInt64 = 7;
     constexpr int64_t kOnnxBool  = 9;
@@ -215,27 +226,178 @@ namespace {
     }
 
     // --- transcription of shaders/cast.comp -------------------------------------------------------------
-    // A line-for-line C++ transcription of the kCastModeBool arm of shaders/cast.comp, kept textually
-    // parallel to the shader so the two diff cleanly. floatBitsToUint is the GLSL builtin (the IEEE bit
-    // pattern of an fp32 value).
+    // castBoolValue and castElement transcribe cast.comp line for line, each C++ line trailed by the
+    // shader line it mirrors. The kCast*Lines tables below hold the shader's own source lines (surrounding
+    // whitespace trimmed, internal whitespace runs collapsed, blank and comment lines dropped), and
+    // CastShaderSource.TranscribedLinesAndModeValuesMatchCastComp checks cast.comp against them, so a
+    // shader edit the transcription does not follow fails a test. The kCastMode* values come from
+    // backend/vulkan/ops/cast_modes.h, the header cast.cpp dispatches with; the same test checks the
+    // shader declares those values.
 
+    // The push-constant block the transcription's `mode`, `lo` and `hi` parameters stand for.
+    const std::string kCastPushConstantLine = "layout(push_constant) uniform PC { int total; float lo, hi; int mode; } pc;";
+
+    // The lines between `float castBoolValue(float source) {` and its closing brace.
+    const std::vector<std::string> kCastBoolValueBodyLines {
+        "return (floatBitsToUint(source) & kCastFloatMagnitudeBits) != 0u ? 1.0 : 0.0;",
+    };
+
+    // The lines between `void main() {` and its closing brace.
+    const std::vector<std::string> kCastMainBodyLines {
+        "uint g = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;",
+        "if (g >= uint(pc.total)) return;",
+        "float t = trunc(float(s[g]));",
+        "float outv;",
+        "if (pc.mode == kCastModeBool) {",
+        "outv = castBoolValue(float(s[g]));",
+        "} else if (pc.mode == kCastModeInt8Wrap) {",
+        "int m = int(t) & 0xFF;",
+        "if (m >= 128) m -= 256;",
+        "outv = float(m);",
+        "} else {",
+        "outv = clamp(t, pc.lo, pc.hi);",
+        "}",
+        "d[g] = STORE(outv);",
+    };
+
+    // GLSL floatBitsToUint: the IEEE bit pattern of an fp32 value.
     uint32_t floatBitsToUint(float value) {
         uint32_t bits;
         std::memcpy(&bits, &value, sizeof(bits));
         return bits;
     }
 
-    // const uint kCastFloatMagnitudeBits = 0x7FFFFFFFu;
-    constexpr uint32_t kCastFloatMagnitudeBits = 0x7FFFFFFFu;
+    // GLSL trunc.
+    float glslTrunc(float value) {
+        return std::trunc(value);
+    }
+
+    // GLSL int(float): truncation toward zero. Like the GLSL conversion it is defined only for values
+    // inside the int range; the sweeps feed it nothing else.
+    int glslInt(float value) {
+        return (int) value;
+    }
+
+    // GLSL clamp(x, minVal, maxVal), specified as min(max(x, minVal), maxVal); std::max / std::min pick
+    // the same operand as GLSL max / min for every ordered pair.
+    float glslClamp(float value, float lo, float hi) {
+        return std::min(std::max(value, lo), hi);
+    }
+
+    constexpr uint32_t kCastFloatMagnitudeBits = 0x7FFFFFFFu; // const uint kCastFloatMagnitudeBits = 0x7FFFFFFFu;
 
     // float castBoolValue(float source) {
-    //   return (floatBitsToUint(source) & kCastFloatMagnitudeBits) != 0u ? 1.0 : 0.0;
-    // }
     float castBoolValue(float source) {
-        return (floatBitsToUint(source) & kCastFloatMagnitudeBits) != 0u ? 1.0f : 0.0f;
+        return (floatBitsToUint(source) & kCastFloatMagnitudeBits) != 0u ? 1.0f : 0.0f; // return (floatBitsToUint(source) & kCastFloatMagnitudeBits) != 0u ? 1.0 : 0.0;
+    }
+
+    // main()'s per-element body for one lane: `source` is float(s[g]) (an fp16 lane widens exactly),
+    // `mode`, `lo` and `hi` are the push constants, and the return value is what d[g] stores. The g /
+    // pc.total dispatch-bound lines have no per-element counterpart. The integer literals are the
+    // shader's own.
+    float castElement(float source, int mode, float lo, float hi) {
+        float t = glslTrunc(source); // float t = trunc(float(s[g]));
+        float outv;                  // float outv;
+        if (mode == kCastModeBool)   // if (pc.mode == kCastModeBool) {
+        {
+            outv = castBoolValue(source);     // outv = castBoolValue(float(s[g]));
+        } else if (mode == kCastModeInt8Wrap) // } else if (pc.mode == kCastModeInt8Wrap) {
+        {
+            int m = glslInt(t) & 0xFF; // int m = int(t) & 0xFF;
+            if (m >= 128)              // if (m >= 128) m -= 256;
+            {
+                m -= 256;
+            }
+            outv = float(m); // outv = float(m);
+        } else               // } else {
+        {
+            outv = glslClamp(t, lo, hi); // outv = clamp(t, pc.lo, pc.hi);
+        }
+        return outv; // d[g] = STORE(outv);
     }
 
     // --- end of transcription -------------------------------------------------------------------------
+
+    // cast.cpp leaves the push constant's lo/hi zero for BOOL; the BOOL arm reads neither.
+    constexpr float kBoolModeBound = 0.0f;
+    // The [lo, hi] bounds cast.cpp passes for INT8 (read by no arm: INT8 wraps) and UINT8 (saturation).
+    constexpr float kInt8ModeLo  = -128.0f;
+    constexpr float kInt8ModeHi  = 127.0f;
+    constexpr float kUInt8ModeLo = 0.0f;
+    constexpr float kUInt8ModeHi = 255.0f;
+
+    // shaders/cast.comp in the source tree. CMake globs tests/*.cpp as absolute paths, so __FILE__ names
+    // this file inside the tree and the shader sits in the sibling shaders/ directory.
+    std::string castShaderPath() {
+        const std::string thisFile      = __FILE__;
+        const size_t      testsDirEnd   = thisFile.find_last_of("/\\");
+        const size_t      sourceRootEnd = testsDirEnd == std::string::npos ? std::string::npos : thisFile.find_last_of("/\\", testsDirEnd - 1);
+        if (sourceRootEnd == std::string::npos)
+        {
+            return "shaders/cast.comp";
+        }
+        return thisFile.substr(0, sourceRootEnd + 1) + "shaders/cast.comp";
+    }
+
+    // A source line with surrounding whitespace trimmed and every internal whitespace run collapsed to
+    // one space.
+    std::string normalizedSourceLine(const std::string &line) {
+        std::string out;
+        bool        pendingSpace = false;
+        for (char c: line)
+        {
+            if (c == ' ' || c == '\t' || c == '\r')
+            {
+                pendingSpace = !out.empty();
+                continue;
+            }
+            if (pendingSpace)
+            {
+                out.push_back(' ');
+                pendingSpace = false;
+            }
+            out.push_back(c);
+        }
+        return out;
+    }
+
+    // cast.comp's normalized lines without blank and whole-line comment lines; empty when the file
+    // cannot be read.
+    std::vector<std::string> castShaderLines() {
+        std::ifstream            file(castShaderPath());
+        std::vector<std::string> lines;
+        for (std::string raw; std::getline(file, raw);)
+        {
+            std::string line = normalizedSourceLine(raw);
+            if (!line.empty() && line.rfind("//", 0) != 0)
+            {
+                lines.push_back(line);
+            }
+        }
+        return lines;
+    }
+
+    // The lines strictly between `header` (a line that opens a brace) and the line closing that brace.
+    // Empty when `header` is absent or its block never closes.
+    std::vector<std::string> blockBody(const std::vector<std::string> &lines, const std::string &header) {
+        const auto opening = std::find(lines.begin(), lines.end(), header);
+        if (opening == lines.end())
+        {
+            return {};
+        }
+        std::vector<std::string> body;
+        int64_t                  depth = std::count(header.begin(), header.end(), '{') - std::count(header.begin(), header.end(), '}');
+        for (auto it = opening + 1; it != lines.end(); ++it)
+        {
+            depth += std::count(it->begin(), it->end(), '{') - std::count(it->begin(), it->end(), '}');
+            if (depth <= 0)
+            {
+                return body;
+            }
+            body.push_back(*it);
+        }
+        return {};
+    }
 
     // Cast(to=BOOL) of a float runtime input on the CPU oracle, read back through a BOOL (UInt8) output.
     std::vector<uint8_t> castFloatsToBoolOnCpu(const std::vector<float> &values) {
@@ -416,9 +578,10 @@ TEST(IntegerBinaryFixes, FloatOperandOfInt64PathTruncatesWithDefinedSaturation) 
     const float                quietNaN            = std::numeric_limits<float>::quiet_NaN();
     const float                infinity            = std::numeric_limits<float>::infinity();
     const float                largestBelowTwoTo63 = 9223371487098961920.0f; // 2^63 - 2^39
+    const float                twoTo63             = 9223372036854775808.0f; // the first positive value that saturates
     const float                minusTwoTo63        = -9223372036854775808.0f;
-    const std::vector<float>   floats {quietNaN, infinity, -infinity, 1e30f, -1e30f, -2.7f, 2.7f, largestBelowTwoTo63, minusTwoTo63, -0.0f};
-    const std::vector<int64_t> expected {0, kInt64Max, kInt64Min, kInt64Max, kInt64Min, -2, 2, 9223371487098961920LL, kInt64Min, 0};
+    const std::vector<float>   floats {quietNaN, infinity, -infinity, 1e30f, -1e30f, -2.7f, 2.7f, largestBelowTwoTo63, twoTo63, minusTwoTo63, -0.0f};
+    const std::vector<int64_t> expected {0, kInt64Max, kInt64Min, kInt64Max, kInt64Min, -2, 2, 9223371487098961920LL, kInt64Max, kInt64Min, 0};
     const Shape                shape {(int64_t) floats.size()};
     const std::vector<int64_t> zeros(floats.size(), 0);
     for (bool standaloneAdd: {false, true})
@@ -438,6 +601,27 @@ TEST(IntegerBinaryFixes, FloatOperandOfInt64PathTruncatesWithDefinedSaturation) 
         ASSERT_EQ(outs.size(), 1u);
         EXPECT_EQ(int64Values(outs[0]), expected) << (standaloneAdd ? "Add" : "Binary Sub");
     }
+}
+
+TEST(IntegerBinaryFixes, FloatToInt64ConversionsSaturateExactlyAtTwoToThe63) {
+    // +2^63 is the one positive value where a `>=` and a `>` range test differ: it must saturate, since
+    // converting it with (int64_t) is undefined. The largest value below it converts exactly, and -2^63
+    // is INT64_MIN exactly.
+    const float  twoTo63Fp32  = 9223372036854775808.0f;
+    const double twoTo63Fp64  = 9223372036854775808.0;
+    const double infinityFp64 = std::numeric_limits<double>::infinity();
+    EXPECT_EQ(cpu::int64FromFp32Operand(twoTo63Fp32), kInt64Max);
+    EXPECT_EQ(cpu::int64FromFp32Operand(std::nextafter(twoTo63Fp32, 0.0f)), 9223371487098961920LL);
+    EXPECT_EQ(cpu::int64FromFp32Operand(-twoTo63Fp32), kInt64Min);
+    EXPECT_EQ(cpu::int64FromFp64Result(twoTo63Fp64), kInt64Max);
+    EXPECT_EQ(cpu::int64FromFp64Result(std::nextafter(twoTo63Fp64, 0.0)), 9223372036854774784LL);
+    EXPECT_EQ(cpu::int64FromFp64Result(-twoTo63Fp64), kInt64Min);
+    EXPECT_EQ(cpu::int64FromFp64Result(std::nextafter(-twoTo63Fp64, 0.0)), -9223372036854774784LL);
+    EXPECT_EQ(cpu::int64FromFp64Result(std::numeric_limits<double>::quiet_NaN()), 0);
+    EXPECT_EQ(cpu::int64FromFp64Result(infinityFp64), kInt64Max);
+    EXPECT_EQ(cpu::int64FromFp64Result(-infinityFp64), kInt64Min);
+    EXPECT_EQ(cpu::int64FromFp64Result(-2.7), -2);
+    EXPECT_EQ(cpu::int64FromFp64Result(24.08), 24);
 }
 
 TEST(IntegerBinaryFixes, Int64ArithmeticHelpersMatchReferencesOnRandomOperands) {
@@ -469,6 +653,140 @@ TEST(IntegerBinaryFixes, Int64ArithmeticHelpersMatchReferencesOnRandomOperands) 
     }
     EXPECT_EQ(cpu::divideInt64(kInt64Min, -1), kInt64Min);
     EXPECT_EQ(cpu::divideInt64(kInt64Min, 0), 0);
+}
+
+namespace {
+
+    struct MixedPowCase {
+        int64_t base;
+        float   exponent;
+        int64_t expected;
+    };
+
+    // An int64 base raised to an fp32 exponent. The first group is ONNX Runtime's output for the same
+    // Pow (int64 X, float Y): the fp64 power truncated to int64, with NaN reading 0 and an out-of-range
+    // result saturating. The second group has integral exponents, which take the exact integer power
+    // (the value an int64 exponent yields): 3^39 keeps all its digits where the fp64 power rounds to
+    // ...256, and 0^-1 is the defined 0 of the negative-exponent rule where the fp64 power is +inf.
+    std::vector<MixedPowCase> mixedPowCases() {
+        const float kQuietNaN = std::numeric_limits<float>::quiet_NaN();
+        const float kInfinity = std::numeric_limits<float>::infinity();
+        const float kTwoTo63  = 9223372036854775808.0f;
+        return {
+            {4, 0.5f, 2},                      // ONNX Runtime
+            {64, -0.5f, 0},                    // ONNX Runtime: 0.125
+            {2, 1.5f, 2},                      // ONNX Runtime: 2.83
+            {9, 0.5f, 3},                      // ONNX Runtime
+            {3, 2.9f, 24},                     // ONNX Runtime: 24.08
+            {2, kQuietNaN, 0},                 // ONNX Runtime: NaN power reads 0
+            {2, kInfinity, kInt64Max},         // ONNX Runtime: +inf saturates
+            {2, -kInfinity, 0},                // ONNX Runtime
+            {1, kQuietNaN, 1},                 // ONNX Runtime: pow(1, NaN) == 1
+            {-8, 1.0f / 3.0f, 0},              // ONNX Runtime: a negative base to a fraction is NaN
+            {16, 0.25f, 2},                    // ONNX Runtime
+            {2, -2.5f, 0},                     // ONNX Runtime: 0.177
+            {-2, 2.5f, 0},                     // ONNX Runtime: NaN
+            {2, 63.5f, kInt64Max},             // ONNX Runtime: a result past 2^63 saturates
+            {-2, 63.5f, 0},                    // ONNX Runtime: NaN
+            {-1, kTwoTo63, 1},                 // ONNX Runtime: an even exponent past the int64 range
+            {3, 39.0f, 4052555153018976267LL}, // integral: exact integer power
+            {-1, -3.0f, -1},                   // integral: negative odd exponent
+            {0, -1.0f, 0},                     // integral: zero base, negative exponent
+            {7, -0.0f, 1},                     // integral: -0 is exponent 0
+            {2, 63.0f, kInt64Min},             // integral: wraps onto the sign bit
+            {-1, -kTwoTo63, 1},                // integral: INT64_MIN is even
+        };
+    }
+
+} // namespace
+
+TEST(IntegerBinaryFixes, Int64BaseWithFloatExponentKeepsTheFraction) {
+    const std::vector<MixedPowCase> cases = mixedPowCases();
+    std::vector<int64_t>            bases;
+    std::vector<float>              exponents;
+    for (const MixedPowCase &c: cases)
+    {
+        bases.push_back(c.base);
+        exponents.push_back(c.exponent);
+    }
+    const Shape shape {(int64_t) cases.size()};
+    // Runtime operands through a CPU Session.
+    {
+        Graph    g;
+        TensorId base     = addGraphInput(g, "base", shape, DType::Int64);
+        TensorId exponent = addGraphInput(g, "exponent", shape, DType::Float32);
+        TensorId y        = addGraphOutput(g, "y", DType::Int64);
+        addBinary(g, BinaryType::Pow, "pow", base, exponent, y);
+        std::vector<IOTensor> outs = runOnCpu(std::move(g), {int64Tensor("base", shape, bases), floatTensor("exponent", shape, exponents)});
+        ASSERT_EQ(outs.size(), 1u);
+        const std::vector<int64_t> got = int64Values(outs[0]);
+        ASSERT_EQ(got.size(), cases.size());
+        for (size_t k = 0; k < cases.size(); ++k)
+        {
+            EXPECT_EQ(got[k], cases[k].expected) << "runtime " << cases[k].base << " ^ " << cases[k].exponent;
+        }
+    }
+    // Constant operands through constFold, which runs the same kernel and bakes the result.
+    {
+        Graph    g;
+        TensorId base     = addInt64Constant(g, "base", shape, bases);
+        TensorId exponent = addFloatConstant(g, "exponent", shape, exponents);
+        TensorId y        = g.addTensor({"y"});
+        addBinary(g, BinaryType::Pow, "pow", base, exponent, y);
+        g.outputs = {y};
+        inferShapes(g, 1);
+        constFold(g);
+        EXPECT_TRUE(g.nodes.empty()) << "an all-constant int64-base Pow must fold away";
+        ASSERT_TRUE(g.isInitializer(y));
+        ASSERT_EQ(g.desc(y).dtype, DType::Int64);
+        ASSERT_EQ(g.initializers[y].bytes.size(), cases.size() * sizeof(int64_t));
+        const int64_t *folded = g.initializers[y].i64();
+        for (size_t k = 0; k < cases.size(); ++k)
+        {
+            EXPECT_EQ(folded[k], cases[k].expected) << "folded " << cases[k].base << " ^ " << cases[k].exponent;
+        }
+    }
+}
+
+TEST(IntegerBinaryFixes, FloatBaseWithInt64ExponentBroadcastsAndTakesARankZeroExponent) {
+    // Both operands broadcast: a float base [3] against a runtime int64 exponent [2,1] -> [2,3]. Every
+    // expected power is exact in fp32.
+    {
+        Graph    g;
+        TensorId x = addGraphInput(g, "x", {3}, DType::Float32);
+        TensorId e = addGraphInput(g, "e", {2, 1}, DType::Int64);
+        TensorId y = addGraphOutput(g, "y", DType::Float32);
+        addBinary(g, BinaryType::Pow, "pow", x, e, y);
+        std::vector<IOTensor> outs = runOnCpu(std::move(g), {floatTensor("x", {3}, {1.5f, -2.0f, 0.5f}), int64Tensor("e", {2, 1}, {2, 3})});
+        ASSERT_EQ(outs.size(), 1u);
+        EXPECT_EQ(outs[0].shape, (Shape {2, 3}));
+        EXPECT_EQ(floatValues(outs[0]), (std::vector<float> {2.25f, 4.0f, 0.25f, 3.375f, -8.0f, 0.125f}));
+    }
+    // The int64 exponent broadcasts along the last axis of a [2,1] base -> [2,3], negative exponents
+    // included.
+    {
+        Graph    g;
+        TensorId x = addGraphInput(g, "x", {2, 1}, DType::Float32);
+        TensorId e = addInt64Constant(g, "e", {3}, {-1, 0, 3});
+        TensorId y = addGraphOutput(g, "y", DType::Float32);
+        addBinary(g, BinaryType::Pow, "pow", x, e, y);
+        std::vector<IOTensor> outs = runOnCpu(std::move(g), {floatTensor("x", {2, 1}, {2.0f, -4.0f})});
+        ASSERT_EQ(outs.size(), 1u);
+        EXPECT_EQ(outs[0].shape, (Shape {2, 3}));
+        EXPECT_EQ(floatValues(outs[0]), (std::vector<float> {0.5f, 1.0f, 8.0f, -0.25f, 1.0f, -64.0f}));
+    }
+    // A rank-0 int64 constant exponent.
+    {
+        Graph    g;
+        TensorId x = addGraphInput(g, "x", {3}, DType::Float32);
+        TensorId e = addInt64Constant(g, "square", {}, {2});
+        TensorId y = addGraphOutput(g, "y", DType::Float32);
+        addBinary(g, BinaryType::Pow, "pow", x, e, y);
+        std::vector<IOTensor> outs = runOnCpu(std::move(g), {floatTensor("x", {3}, {1.5f, -2.0f, 4.0f})});
+        ASSERT_EQ(outs.size(), 1u);
+        EXPECT_EQ(outs[0].shape, (Shape {3}));
+        EXPECT_EQ(floatValues(outs[0]), (std::vector<float> {2.25f, 4.0f, 16.0f}));
+    }
 }
 
 TEST(IntegerBinaryFixes, FloatBaseWithInt64ExponentIsAFloatPower) {
@@ -512,16 +830,35 @@ TEST(IntegerBinaryFixes, FloatBaseWithInt64ExponentIsByteIdenticalAcrossThreads)
         state = state * 1664525u + 1013904223u;
         v     = (float) ((int32_t) (state >> 8) % 2001 - 1000) * 0.002f;
     }
-    auto build = [&] {
+    const std::vector<int64_t> exponents {-2, -1, 0, 1, 2, 3, 4};
+    auto                       build = [&] {
         Graph    g;
         TensorId x = addGraphInput(g, "x", shape, DType::Float32);
-        TensorId e = addInt64Constant(g, "e", {kCols}, {-2, -1, 0, 1, 2, 3, 4});
+        TensorId e = addInt64Constant(g, "e", {kCols}, exponents);
         TensorId y = addGraphOutput(g, "y", DType::Float32);
         addBinary(g, BinaryType::Pow, "pow", x, e, y);
         return g;
     };
     const std::vector<IOTensor> reference = runOnCpu(build(), {floatTensor("x", shape, base)}, 1);
     ASSERT_EQ(reference.size(), 1u);
+    // The 1-thread reference itself is the broadcast power: element [r, c] is base[r, c] ^ exponents[c].
+    const std::vector<float> referenceValues = floatValues(reference[0]);
+    ASSERT_EQ(referenceValues.size(), base.size());
+    int64_t mismatches = 0, firstMismatch = -1;
+    for (int64_t row = 0; row < kRows; ++row)
+    {
+        for (int64_t col = 0; col < kCols; ++col)
+        {
+            const int64_t at   = row * kCols + col;
+            const float   want = std::pow(base[(size_t) at], (float) exponents[(size_t) col]);
+            if (std::memcmp(&referenceValues[(size_t) at], &want, sizeof(float)) != 0)
+            {
+                firstMismatch = mismatches == 0 ? at : firstMismatch;
+                ++mismatches;
+            }
+        }
+    }
+    EXPECT_EQ(mismatches, 0) << "first mismatch at flat index " << firstMismatch;
     const int64_t dispatchesBefore = cpu::detail::poolDispatches();
     for (int threads: {2, 3, 5, 8})
     {
@@ -642,7 +979,7 @@ TEST(CastToBool, ShaderBoolModeTranscriptionMatchesCpuOracleOnFp32Patterns) {
     ASSERT_EQ(oracle.size(), sources.size());
     for (size_t k = 0; k < sources.size(); ++k)
     {
-        const float shader = castBoolValue(sources[k]);
+        const float shader = castElement(sources[k], kCastModeBool, kBoolModeBound, kBoolModeBound);
         EXPECT_EQ(shader, (float) oracle[k]) << "bits 0x" << std::hex << floatBitsToUint(sources[k]);
         EXPECT_EQ(shader, sources[k] != 0.0f ? 1.0f : 0.0f) << "bits 0x" << std::hex << floatBitsToUint(sources[k]);
     }
@@ -662,11 +999,183 @@ TEST(CastToBool, ShaderBoolModeTranscriptionMatchesCpuOracleOnEveryFp16Pattern) 
     int64_t zeros = 0;
     for (uint32_t bits = 0; bits < kHalfPatternCount; ++bits)
     {
-        const float shader = castBoolValue(sources[bits]);
+        const float shader = castElement(sources[bits], kCastModeBool, kBoolModeBound, kBoolModeBound);
         EXPECT_EQ(shader, (float) oracle[bits]) << "half bits 0x" << std::hex << bits;
         zeros += shader == 0.0f ? 1 : 0;
     }
     EXPECT_EQ(zeros, 2) << "exactly +0 and -0 are false";
+}
+
+TEST(CastToBool, ShaderBoolArmReadsTheUntruncatedSource) {
+    // Every value here truncates to 0 yet is nonzero, so the BOOL arm must test float(s[g]) and not the
+    // truncated t: an arm reading t stores 0 for all of them and fails against the CPU oracle.
+    const std::vector<float> fractional {
+        0.5f,
+        -0.5f,
+        0.999f,
+        -0.25f,
+        std::numeric_limits<float>::denorm_min(),
+        -std::numeric_limits<float>::denorm_min(),
+        std::nextafter(std::numeric_limits<float>::min(), 0.0f),
+        -std::nextafter(std::numeric_limits<float>::min(), 0.0f),
+        std::numeric_limits<float>::min(),
+    };
+    const std::vector<uint8_t> oracle = castFloatsToBoolOnCpu(fractional);
+    ASSERT_EQ(oracle.size(), fractional.size());
+    for (size_t k = 0; k < fractional.size(); ++k)
+    {
+        const float source = fractional[k];
+        ASSERT_EQ(glslTrunc(source), 0.0f) << source;
+        EXPECT_EQ(oracle[k], 1u) << source;
+        EXPECT_EQ(castElement(source, kCastModeBool, kBoolModeBound, kBoolModeBound), 1.0f) << source;
+        EXPECT_EQ(castBoolValue(glslTrunc(source)), 0.0f) << "the truncated operand would read false for " << source;
+    }
+}
+
+TEST(CastShaderTranscription, IntegerArmsMatchCpuOracleNarrowing) {
+    // The INT8 wrap and UINT8 saturate arms of the transcribed body against the CPU Cast op followed by
+    // the session's readback narrowing, over a quarter-step grid spanning several wraps and both
+    // saturation edges plus large magnitudes inside the int range GLSL int() is defined on.
+    static constexpr int kGridMagnitude = 1300; // the grid spans [-1300, 1300]: five INT8 wraps each way
+    static constexpr int kStepsPerUnit  = 4;    // quarter steps: fractions of both signs at every integer
+    std::vector<float>   values;
+    for (int step = -kGridMagnitude * kStepsPerUnit; step <= kGridMagnitude * kStepsPerUnit; ++step)
+    {
+        values.push_back((float) step / (float) kStepsPerUnit);
+    }
+    for (float large: {65535.5f, 70000.75f, 1073741824.0f, 2147483520.0f, 16777217.0f})
+    {
+        values.push_back(large);
+        values.push_back(-large);
+    }
+    values.push_back(-2147483648.0f);
+    values.push_back(-0.0f);
+    const Shape shape {(int64_t) values.size()};
+    Graph       g;
+    TensorId    x   = addGraphInput(g, "x", shape, DType::Float32);
+    TensorId    yi8 = addGraphOutput(g, "yi8", DType::Int8);
+    TensorId    yu8 = addGraphOutput(g, "yu8", DType::UInt8);
+    addCast(g, "to_int8", x, yi8, kOnnxInt8);
+    addCast(g, "to_uint8", x, yu8, kOnnxUInt8);
+    std::vector<IOTensor> outs = runOnCpu(std::move(g), {floatTensor("x", shape, values)});
+    ASSERT_EQ(outs.size(), 2u);
+    ASSERT_EQ(outs[0].dtype, DType::Int8);
+    ASSERT_EQ(outs[1].dtype, DType::UInt8);
+    ASSERT_EQ(outs[0].data.size(), values.size());
+    ASSERT_EQ(outs[1].data.size(), values.size());
+    for (size_t k = 0; k < values.size(); ++k)
+    {
+        const float int8Oracle  = (float) (int8_t) outs[0].data[k];
+        const float uint8Oracle = (float) outs[1].data[k];
+        EXPECT_EQ(castElement(values[k], kCastModeInt8Wrap, kInt8ModeLo, kInt8ModeHi), int8Oracle) << values[k];
+        EXPECT_EQ(castElement(values[k], kCastModeUInt8Saturate, kUInt8ModeLo, kUInt8ModeHi), uint8Oracle) << values[k];
+    }
+}
+
+TEST(CastShaderSource, TranscribedLinesAndModeValuesMatchCastComp) {
+    const std::vector<std::string> lines = castShaderLines();
+#if defined(__ANDROID__)
+    if (lines.empty())
+    {
+        GTEST_SKIP() << "the shader sources are not present on the device";
+    }
+#endif
+    ASSERT_FALSE(lines.empty()) << "cannot read " << castShaderPath();
+
+    // Every mode value cast.cpp dispatches with is the value the shader declares, and the shader declares
+    // no other mode.
+    struct ModeDeclaration {
+        const char *name;
+        int         value;
+    };
+    const std::vector<ModeDeclaration> modes {
+        {"kCastModeWide", kCastModeWide},
+        {"kCastModeInt8Wrap", kCastModeInt8Wrap},
+        {"kCastModeUInt8Saturate", kCastModeUInt8Saturate},
+        {"kCastModeBool", kCastModeBool},
+    };
+    for (const ModeDeclaration &mode: modes)
+    {
+        const std::string declaration = std::string("const int ") + mode.name + " = " + std::to_string(mode.value) + ";";
+        EXPECT_NE(std::find(lines.begin(), lines.end(), declaration), lines.end()) << "cast.comp lacks `" << declaration << "`";
+    }
+    const std::string modePrefix   = "const int kCastMode";
+    auto              declaresMode = [&](const std::string &line) {
+        return line.rfind(modePrefix, 0) == 0;
+    };
+    EXPECT_EQ((size_t) std::count_if(lines.begin(), lines.end(), declaresMode), modes.size());
+
+    // The magnitude mask the transcription uses, the push-constant block its parameters stand for, and
+    // the transcribed function bodies.
+    static constexpr size_t kLineCapacity = 96;
+    char                    magnitudeDeclaration[kLineCapacity];
+    std::snprintf(magnitudeDeclaration, sizeof(magnitudeDeclaration), "const uint kCastFloatMagnitudeBits = 0x%08Xu;", (unsigned) kCastFloatMagnitudeBits);
+    EXPECT_NE(std::find(lines.begin(), lines.end(), std::string(magnitudeDeclaration)), lines.end()) << "cast.comp lacks `" << magnitudeDeclaration << "`";
+    EXPECT_NE(std::find(lines.begin(), lines.end(), kCastPushConstantLine), lines.end()) << "cast.comp lacks `" << kCastPushConstantLine << "`";
+    EXPECT_EQ(blockBody(lines, "float castBoolValue(float source) {"), kCastBoolValueBodyLines);
+    EXPECT_EQ(blockBody(lines, "void main() {"), kCastMainBodyLines);
+}
+
+// --- Vulkan gate for integer Div and Pow ----------------------------------------------------------------
+
+TEST(IntegerBinaryFixes, VulkanGateKeepsInt64DivAndInt64BasePowOnTheCpuOp) {
+    // The CPU op computes int64 Div and int64-base Pow as integers (7 / 2 == 3, 2^-1 == 0); the GPU
+    // kernels compute them in float (3.5, 0.5), so the gate routes exactly those nodes to the CPU. A
+    // float base with an int64 exponent is a float power on both backends, and the other Binary ops
+    // yield the same integers, so they stay on the GPU.
+    struct GateCase {
+        const char *name;
+        OpType      type;
+        BinaryType  op;
+        DType       lhs, rhs;
+        const char *backend;
+        const char *reason;
+    };
+    const std::vector<GateCase> cases {
+        {"div_i64_i64", OpType::Binary, BinaryType::Div, DType::Int64, DType::Int64, "cpu", "Binary: integer Div on an int64 operand"},
+        {"div_f32_i64", OpType::Binary, BinaryType::Div, DType::Float32, DType::Int64, "cpu", "Binary: integer Div on an int64 operand"},
+        {"div_i64_f32", OpType::Binary, BinaryType::Div, DType::Int64, DType::Float32, "cpu", "Binary: integer Div on an int64 operand"},
+        {"pow_i64_i64", OpType::Binary, BinaryType::Pow, DType::Int64, DType::Int64, "cpu", "Binary: integer Pow on an int64 base"},
+        {"pow_i64_f32", OpType::Binary, BinaryType::Pow, DType::Int64, DType::Float32, "cpu", "Binary: integer Pow on an int64 base"},
+        {"pow_f32_i64", OpType::Binary, BinaryType::Pow, DType::Float32, DType::Int64, "vulkan", ""},
+        {"pow_f32_f32", OpType::Binary, BinaryType::Pow, DType::Float32, DType::Float32, "vulkan", ""},
+        {"div_f32_f32", OpType::Binary, BinaryType::Div, DType::Float32, DType::Float32, "vulkan", ""},
+        {"mul_i64_i64", OpType::Binary, BinaryType::Mul, DType::Int64, DType::Int64, "vulkan", ""},
+        {"sub_i64_i64", OpType::Binary, BinaryType::Sub, DType::Int64, DType::Int64, "vulkan", ""},
+        {"max_i64_i64", OpType::Binary, BinaryType::Max, DType::Int64, DType::Int64, "vulkan", ""},
+        {"add_i64_i64", OpType::Add, BinaryType::Add, DType::Int64, DType::Int64, "vulkan", ""},
+    };
+    Graph g;
+    for (const GateCase &c: cases)
+    {
+        TensorDesc lhs, rhs, out;
+        lhs.name  = std::string(c.name) + "_lhs";
+        lhs.shape = {4};
+        lhs.dtype = c.lhs;
+        rhs.name  = std::string(c.name) + "_rhs";
+        rhs.shape = {4};
+        rhs.dtype = c.rhs;
+        out.name  = std::string(c.name) + "_out";
+        out.shape = {4};
+        Node &n   = addNode(g, c.type, c.name, {g.addTensor(lhs), g.addTensor(rhs)}, {g.addTensor(out)});
+        n.subOp   = (int) c.op;
+    }
+    // A rank-0 int64 constant base is an int64 operand too.
+    TensorId scalarBase     = addInt64Constant(g, "scalar_base", {}, {2});
+    TensorId scalarExponent = addGraphInput(g, "scalar_exponent", {4}, DType::Float32);
+    TensorId scalarOut      = g.addTensor({"scalar_pow_out"});
+    addBinary(g, BinaryType::Pow, "pow_scalar_i64_f32", scalarBase, scalarExponent, scalarOut);
+
+    const std::vector<NodeSupport> rows = vkSupportSurvey(g);
+    ASSERT_EQ(rows.size(), cases.size() + 1);
+    for (size_t k = 0; k < cases.size(); ++k)
+    {
+        EXPECT_EQ(rows[k].node, cases[k].name);
+        EXPECT_EQ(rows[k].backend, cases[k].backend) << cases[k].name;
+        EXPECT_EQ(rows[k].reason, cases[k].reason) << cases[k].name;
+    }
+    EXPECT_EQ(rows.back().backend, "cpu");
+    EXPECT_EQ(rows.back().reason, "Binary: integer Pow on an int64 base");
 }
 
 // --- uploadInit element count ---------------------------------------------------------------------------

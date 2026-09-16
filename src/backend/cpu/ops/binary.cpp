@@ -1,5 +1,6 @@
 // Elementwise binary family (Mul/Sub/Div/Max/Min/Pow) with NumPy-style broadcasting. An int64 runtime
-// operand selects exact integer arithmetic; a float base with an int64 exponent stays a float power.
+// operand selects exact integer arithmetic; a float base with an int64 exponent stays a float power, and
+// an int64 base with a fractional float exponent takes the fp64 power truncated to int64.
 #include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
 #include "backend/cpu/int64_arithmetic.h"
@@ -132,7 +133,10 @@ namespace vknn {
                                 y[lin] = std::min(av, bv);
                                 break;
                             case BinaryType::Pow:
-                                y[lin] = cpu::powInt64(av, bv);
+                                // The base is int64 here (a float base returned above). An int64 exponent
+                                // is the exact integer power; an fp32 exponent keeps its fraction, which
+                                // the truncated `bv` has dropped (int64_arithmetic.h).
+                                y[lin] = B.dtype == DType::Int64 ? cpu::powInt64(av, bv) : cpu::powInt64Fp32Exponent(av, B.host.f32()[w.offset(1)]);
                                 break;
                             default:
                                 y[lin] = cpu::wrappingAddInt64(av, bv);

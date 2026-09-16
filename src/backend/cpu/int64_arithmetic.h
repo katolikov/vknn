@@ -1,7 +1,8 @@
 // Exact int64 arithmetic of the CPU Binary and Add int64 paths. Every function is defined for every
 // operand value: sums, differences and products wrap modulo 2^64 (two's complement), division guards
-// its two trapping cases, the integer power wraps like repeated multiplication, and an fp32-carried
-// operand converts to int64 without an out-of-range float-to-integer conversion.
+// its two trapping cases, the integer power wraps like repeated multiplication, a fractional exponent
+// on an int64 base takes the fp64 power, and an fp32-carried operand or fp64 result converts to int64
+// without an out-of-range float-to-integer conversion.
 #pragma once
 #include <cmath>
 #include <cstdint>
@@ -102,6 +103,45 @@ namespace vknn { namespace cpu {
             squaredBase *= squaredBase;
         }
         return int64FromWrappedBits(result);
+    }
+
+    /// 2^63 in fp64 (exactly representable): the first fp64 magnitude outside the int64 range.
+    inline constexpr double kInt64RangeEndFp64 = 9223372036854775808.0;
+
+    /// An fp64 power result stored in int64, truncated toward zero. NaN reads as 0 and a value outside
+    /// the int64 range (infinities included) saturates to INT64_MIN / INT64_MAX, so the conversion is
+    /// never undefined; every in-range value converts exactly like `(int64_t) value`.
+    inline int64_t int64FromFp64Result(double value) noexcept {
+        if (std::isnan(value))
+        {
+            return 0;
+        }
+        if (value >= kInt64RangeEndFp64)
+        {
+            return std::numeric_limits<int64_t>::max();
+        }
+        if (value <= -kInt64RangeEndFp64)
+        {
+            return std::numeric_limits<int64_t>::min(); // -2^63 is INT64_MIN exactly
+        }
+        return (int64_t) value;
+    }
+
+    /// An int64 base raised to an fp32-carried exponent (ONNX Pow types its result by the base). An
+    /// integral exponent inside the int64 range [-2^63, 2^63) is the exact integer power of powInt64,
+    /// the same value an int64 exponent of that magnitude yields. Every other exponent -- fractional,
+    /// infinite, NaN, or integral with a magnitude past the int64 range -- takes the fp64 power
+    /// std::pow((double) base, (double) exponent) converted by int64FromFp64Result: 4^0.5 == 2,
+    /// 64^-0.5 == 0, 3^2.9 == 24, 2^NaN == 0, 2^+inf == INT64_MAX.
+    inline int64_t powInt64Fp32Exponent(int64_t base, float exponent) noexcept {
+        // NaN fails the equality and both infinities fail the range test, so only a finite integral
+        // exponent takes the integer power.
+        const bool integralInRange = std::trunc(exponent) == exponent && exponent >= -kInt64RangeEndFp32 && exponent < kInt64RangeEndFp32;
+        if (integralInRange)
+        {
+            return powInt64(base, (int64_t) exponent);
+        }
+        return int64FromFp64Result(std::pow((double) base, (double) exponent));
     }
 
 }} // namespace vknn::cpu
