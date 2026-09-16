@@ -18,12 +18,12 @@
 // the canonical quiet NaN (kQuietNaNBits).
 // Geometry (outDim/dividendStride/divisorStride) rides a content-deduped SSBO at binding 3
 // (flat::uploadFlatGeom); the three rank-length arrays pack back-to-back as blocks: outDim =
-// g[0..rank), dividendStride = g[rank..2*rank), divisorStride = g[2*rank..3*rank).
+// geometry[0..rank), dividendStride = geometry[rank..2*rank), divisorStride = geometry[2*rank..3*rank).
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
-layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
-layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
-layout(std430, binding = 3) readonly  buffer G { int g[]; } geom;
+layout(std430, binding = 0) readonly  buffer Dividends { STORE dividends[]; };
+layout(std430, binding = 1) readonly  buffer Divisors { STORE divisors[]; };
+layout(std430, binding = 2) writeonly buffer Destination { STORE destination[]; };
+layout(std430, binding = 3) readonly  buffer Geometry { int geometry[]; };
 layout(push_constant) uniform PC { int rank, total, fmodMode, integerOperands; } pc;
 
 // ONNX Mod `fmod` value selecting the floor remainder (sign of the divisor); 1 is the C remainder.
@@ -116,10 +116,10 @@ void main() {
   if (gid >= uint(pc.total)) return;
   int remainingIndex = int(gid), dividendIndex = 0, divisorIndex = 0;
   for (int axis = pc.rank - 1; axis >= 0; --axis) {
-    int coordinate = remainingIndex % geom.g[axis];
-    remainingIndex /= geom.g[axis];
-    dividendIndex += coordinate * geom.g[kDividendStrideBlock * pc.rank + axis];
-    divisorIndex += coordinate * geom.g[kDivisorStrideBlock * pc.rank + axis];
+    int coordinate = remainingIndex % geometry[axis];
+    remainingIndex /= geometry[axis];
+    dividendIndex += coordinate * geometry[kDividendStrideBlock * pc.rank + axis];
+    divisorIndex += coordinate * geometry[kDivisorStrideBlock * pc.rank + axis];
   }
-  d[gid] = TO_STORE(modElement(float(a[dividendIndex]), float(b[divisorIndex]), pc.fmodMode, pc.integerOperands != 0));
+  destination[gid] = TO_STORE(modElement(float(dividends[dividendIndex]), float(divisors[divisorIndex]), pc.fmodMode, pc.integerOperands != 0));
 }

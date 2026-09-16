@@ -1025,16 +1025,16 @@ namespace glsl {
 
     // ---- transcription of shaders/bitshift.comp ----
 
-    float int64MaxShifted(int s, int directionLeft) {
-        if (s == 0)
+    float int64MaxShifted(int shiftBits, int directionLeft) {
+        if (shiftBits == 0)
         {
             return kTwoPow63;
         }
         if (directionLeft != 0)
         {
-            return -powerOfTwo(s);
+            return -powerOfTwo(shiftBits);
         }
-        float shifted = powerOfTwo(kInt64SignBit - s) - 1.0f;
+        float shifted = powerOfTwo(kInt64SignBit - shiftBits) - 1.0f;
         return shifted;
     }
 
@@ -1044,24 +1044,24 @@ namespace glsl {
         {
             return 0.0f;
         }
-        int   s       = int(shiftCount);
-        float integer = integerOperand(value);
+        int   shiftBits = int(shiftCount);
+        float integer   = integerOperand(value);
         if (intBits >= kInt64Bits && integer >= kTwoPow63)
         {
-            return int64MaxShifted(s, directionLeft);
+            return int64MaxShifted(shiftBits, directionLeft);
         }
         float operand = narrowWidthOperand(integer);
-        if (s == 0)
+        if (shiftBits == 0)
         {
             return wrapToWidth(operand, intBits);
         }
         if (directionLeft != 0)
         {
-            float shifted = operand * powerOfTwo(s);
+            float shifted = operand * powerOfTwo(shiftBits);
             return wrapToWidth(shifted, intBits);
         }
-        float quotient = floor(operand / powerOfTwo(s));
-        return residueModPowerOfTwo(quotient, intBits - s);
+        float quotient = floor(operand / powerOfTwo(shiftBits));
+        return residueModPowerOfTwo(quotient, intBits - shiftBits);
     }
 
 } // namespace glsl

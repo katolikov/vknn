@@ -614,7 +614,7 @@ TEST(IntegerPins, Nc4OperandBridgesInFrontOfItsLayoutConvert) {
     // BitwiseXor(bits, act): a flat integer graph input is pinned directly. The NC4HW4 Relu output
     // reaches the flat integer op through the ConvertLayout the layout pass splices in: that flat hop
     // is pinned, the fp16-only NC4 producer is not, and markFp32 bridges fp16 -> fp32 on the NC4 side,
-    // in front of the (now fp32) ConvertLayout.
+    // in front of the (pinned fp32) ConvertLayout.
     Graph    g;
     TensorId bits  = addInput(g, "bits", {1, 4, 2, 2});
     TensorId x     = addInput(g, "x", {1, 4, 2, 2});

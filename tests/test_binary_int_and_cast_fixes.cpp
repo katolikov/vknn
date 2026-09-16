@@ -1,4 +1,4 @@
-// Integer Binary arithmetic, dtype-preserving ConvertDtype, Cast to BOOL, and the flat initializer
+// Integer Binary arithmetic, int64-preserving ConvertDtype, Cast to BOOL, and the flat initializer
 // upload count.
 //
 // - Binary and Add on int64 operands (backend/cpu/int64_arithmetic.h): Pow is an exact integer power

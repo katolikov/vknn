@@ -6,54 +6,58 @@
 // intBits, from the node's int_bits attribute; directionLeft is 1 for LEFT, 0 for RIGHT). Power-of-two
 // float scaling reproduces the CPU oracle's bit arithmetic on the integer values (see bitShiftValue) and
 // stores the oracle's fp32 lane for every operand. The per-axis output dims and operand strides live in a
-// geometry SSBO (binding 3) packed back-to-back: outDim = g[0..rank), aStride = g[rank..2*rank),
-// bStride = g[2*rank..3*rank).
+// geometry SSBO (binding 3) packed back-to-back: outDim = geometry[0..rank), aStride =
+// geometry[rank..2*rank), bStride = geometry[2*rank..3*rank).
 #include "bitwise_int.glsl"
 layout(local_size_x = 256) in;
-layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
-layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
-layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
-layout(std430, binding = 3) readonly  buffer G { int g[]; } geom;
+layout(std430, binding = 0) readonly  buffer OperandA { STORE operandA[]; };
+layout(std430, binding = 1) readonly  buffer OperandB { STORE operandB[]; };
+layout(std430, binding = 2) writeonly buffer Destination { STORE destination[]; };
+layout(std430, binding = 3) readonly  buffer Geometry { int geometry[]; };
 layout(push_constant) uniform PC { int rank, total, directionLeft, intBits; } pc;
 
-// INT64_MAX (0x7FFF...F, the oracle's value of a lane saturated at +2^63) shifted by s at 64 bits: itself
-// (stored as 2^63) for s == 0; LEFT wraps to -2^s; RIGHT is 2^(63 - s) - 1.
-float int64MaxShifted(int s, int directionLeft) {
-  if (s == 0) return kTwoPow63;
-  if (directionLeft != 0) return -powerOfTwo(s);
-  precise float shifted = powerOfTwo(kInt64SignBit - s) - 1.0;
+// Index of operand B's stride array inside the geometry SSBO, in units of rank (operand A's strides
+// directly follow outDim, at index 1).
+const int kGeomBStrideArray = 2;
+
+// INT64_MAX (0x7FFF...F, the oracle's value of a lane saturated at +2^63) shifted by shiftBits at 64 bits:
+// itself (stored as 2^63) for shiftBits == 0; LEFT wraps to -2^shiftBits; RIGHT is 2^(63 - shiftBits) - 1.
+float int64MaxShifted(int shiftBits, int directionLeft) {
+  if (shiftBits == 0) return kTwoPow63;
+  if (directionLeft != 0) return -powerOfTwo(shiftBits);
+  precise float shifted = powerOfTwo(kInt64SignBit - shiftBits) - 1.0;
   return shifted;
 }
 
 // value shifted by shift at intBits width. A shift count outside [0, intBits) yields 0 (checked on the
 // float before any int conversion). A zero shift is value's own intBits-wide wrap (signed at 64 bits, like
-// the oracle's int64 view). LEFT: the low intBits bits of value * 2^s. RIGHT: the logical shift of value's
-// low intBits bits, which equals floor(value / 2^s) reduced modulo 2^(intBits - s).
+// the oracle's int64 view). LEFT: the low intBits bits of value * 2^shiftBits. RIGHT: the logical shift of
+// value's low intBits bits, which equals floor(value / 2^shiftBits) reduced modulo 2^(intBits - shiftBits).
 float bitShiftValue(float value, float shift, int directionLeft, int intBits) {
   float shiftCount = integerOperand(shift);
   if (shiftCount < 0.0 || shiftCount >= float(intBits)) return 0.0;
-  int s = int(shiftCount);
+  int shiftBits = int(shiftCount);
   float integer = integerOperand(value);
-  if (intBits >= kInt64Bits && integer >= kTwoPow63) return int64MaxShifted(s, directionLeft);
+  if (intBits >= kInt64Bits && integer >= kTwoPow63) return int64MaxShifted(shiftBits, directionLeft);
   float operand = narrowWidthOperand(integer);
-  if (s == 0) return wrapToWidth(operand, intBits);
+  if (shiftBits == 0) return wrapToWidth(operand, intBits);
   if (directionLeft != 0) {
-    precise float shifted = operand * powerOfTwo(s);
+    precise float shifted = operand * powerOfTwo(shiftBits);
     return wrapToWidth(shifted, intBits);
   }
-  precise float quotient = floor(operand / powerOfTwo(s));
-  return residueModPowerOfTwo(quotient, intBits - s);
+  precise float quotient = floor(operand / powerOfTwo(shiftBits));
+  return residueModPowerOfTwo(quotient, intBits - shiftBits);
 }
 
 void main() {
-  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-  if (gid >= uint(pc.total)) return;
-  int rem = int(gid), ai = 0, bi = 0;
-  for (int k = pc.rank - 1; k >= 0; --k) {
-    int c = rem % geom.g[k];
-    rem /= geom.g[k];
-    ai += c * geom.g[pc.rank + k];
-    bi += c * geom.g[2 * pc.rank + k];
+  uint elementIndex = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (elementIndex >= uint(pc.total)) return;
+  int remainingIndex = int(elementIndex), operandAIndex = 0, operandBIndex = 0;
+  for (int axis = pc.rank - 1; axis >= 0; --axis) {
+    int axisCoordinate = remainingIndex % geometry[axis];
+    remainingIndex /= geometry[axis];
+    operandAIndex += axisCoordinate * geometry[pc.rank + axis];
+    operandBIndex += axisCoordinate * geometry[kGeomBStrideArray * pc.rank + axis];
   }
-  d[gid] = TO_STORE(bitShiftValue(float(a[ai]), float(b[bi]), pc.directionLeft, pc.intBits));
+  destination[elementIndex] = TO_STORE(bitShiftValue(float(operandA[operandAIndex]), float(operandB[operandBIndex]), pc.directionLeft, pc.intBits));
 }
