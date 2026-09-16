@@ -1,6 +1,21 @@
+#include "nc4_packing.h"
 #include "passes_internal.h"
 
 namespace vknn {
+
+    namespace {
+        // Whether a layout-agnostic op's output shape reads its data input's NC4HW4 buffer element for
+        // element, so the op can run as an NC4HW4 byte copy (or index remap). Equal channel counts are
+        // not enough: [4,4] (N=4, C=4) and [1,4,4] (N=1, C=4, H=4) both hold 16 elements in 16 slots,
+        // but in transposed order. A node missing its data input or its output copies nothing.
+        bool agnosticKeepsNc4Packing(const Graph &g, const Node &n) {
+            if (n.inputs.empty() || n.inputs[0] == kNoTensor || n.outputs.empty() || n.outputs[0] == kNoTensor)
+            {
+                return true;
+            }
+            return nc4PackingIdentical(g.desc(n.inputs[0]).shape, g.desc(n.outputs[0]).shape);
+        }
+    } // namespace
 
     // Does this op run as a FLAT (row-major) GPU op rather than the NC4HW4 path? Mirrors the cases the
     // Vulkan supportsNode() can't do in NC4HW4: Transpose/Slice always; Softmax on a non-channel axis;
@@ -183,9 +198,14 @@ namespace vknn {
             case OpType::ChannelShuffle:
                 // Kernels exist in BOTH layouts (channel_shuffle_flat / channel_shuffle_nc4), so the
                 // node runs in whatever layout its input carries — globalLayoutAssign resolves it
-                // through the Agnostic arm (channel count is unchanged, so the output simply adopts
-                // the input's layout) and this predicate mirrors that assignment for direct callers.
-                return !n.inputs.empty() && n.inputs[0] != kNoTensor && g.desc(n.inputs[0]).gpuFlat;
+                // through the Agnostic arm (the output shape equals the input shape, so the output
+                // adopts the input's layout) and this predicate mirrors that assignment for direct
+                // callers.
+                if (n.inputs.empty() || n.inputs[0] == kNoTensor)
+                {
+                    return false;
+                }
+                return g.desc(n.inputs[0]).gpuFlat || !agnosticKeepsNc4Packing(g, n);
             default:
                 // A ShapeDependent descriptor with no arm here (a mis-registration): fall back to the
                 // NC4HW4 default, matching a plain Nc4 op.
@@ -203,10 +223,11 @@ namespace vknn {
         enum class LKind { FixedFlat, FixedNC4, Flexible, Agnostic };
 
         bool layoutAgnostic(const Node &n) {
-            // metadata reshape / no-op copy: input and output bytes are identical, so it keeps its
-            // layout. ChannelShuffle is not a byte copy but has a kernel in BOTH layouts (a pure
-            // index remap either way), so it equally adopts its input's layout — the channel count
-            // is unchanged, which keeps the NC4HW4 arm of the agnostic rule valid.
+            // metadata reshape / no-op copy: the output holds the input's elements in the same
+            // row-major order, so a flat input is a valid flat output, and an NC4HW4 input is a valid
+            // NC4HW4 output when the two shapes share the NC4HW4 packing (agnosticKeepsNc4Packing).
+            // ChannelShuffle is not a byte copy but has a kernel in BOTH layouts (a pure index remap
+            // either way) and keeps its input shape, so it equally adopts its input's layout.
             return n.type == OpType::Reshape || n.type == OpType::Flatten || n.type == OpType::Squeeze || n.type == OpType::Unsqueeze || n.type == OpType::Cast || n.type == OpType::ChannelShuffle;
         }
 
@@ -236,9 +257,10 @@ namespace vknn {
     // spliced in below.
     static void globalLayoutAssign(Graph &g) {
         // 1) seed fixed + agnostic layouts in topo order (producers precede consumers). A flat reshape is a
-        //    plain row-major copy (valid for any shape); the NC4HW4 byte-copy is only valid when the channel
-        //    count is unchanged (else the vec4 interleave shifts) — so an agnostic op is flat if its input
-        //    is flat OR it changes the channel count.
+        //    plain row-major copy (valid for any shape); the NC4HW4 byte-copy is only valid when the output
+        //    shape stores its elements at the input's NC4HW4 positions (nc4PackingIdentical) — so an
+        //    agnostic op is flat if its input is flat OR the reshape changes the NC4HW4 packing, and the
+        //    splicer below then converts its NC4HW4 input to flat in front of it.
         auto seedFromProducers = [&g]() {
             for (auto &nd: g.nodes)
             {
@@ -246,10 +268,7 @@ namespace vknn {
                 bool  f;
                 if (k == LKind::Agnostic && !nd.inputs.empty() && nd.inputs[0] != kNoTensor)
                 {
-                    bool    inFlat = g.desc(nd.inputs[0]).gpuFlat;
-                    int64_t cin    = NCHW::from(g.desc(nd.inputs[0]).shape).c;
-                    int64_t cout   = NCHW::from(g.desc(nd.outputs[0]).shape).c;
-                    f              = inFlat || cin != cout;
+                    f = g.desc(nd.inputs[0]).gpuFlat || !agnosticKeepsNc4Packing(g, nd);
                 } else if (k == LKind::FixedNC4)
                 {
                     f = false;
@@ -352,7 +371,15 @@ namespace vknn {
                                 const Node &R = g.nodes[rj];
                                 if (layoutAgnostic(R))
                                 {
-                                    continue; // adopts whatever this node chooses: no convert either way
+                                    // Reading its data operand, an agnostic op adopts this node's layout
+                                    // when its reshape keeps the NC4HW4 packing (no convert either way)
+                                    // and runs flat whatever this node chooses otherwise. A parameter
+                                    // read follows R's data operand, not this node.
+                                    if (R.inputs[0] == o && !agnosticKeepsNc4Packing(g, R))
+                                    {
+                                        voteEdge(o, true);
+                                    }
+                                    continue;
                                 }
                                 voteEdge(o, flexSet.count(rj) ? R.attr.geti("pw_flat", 0) != 0 : gpuFlatNode(g, R));
                             }
@@ -375,31 +402,7 @@ namespace vknn {
                     }
                     // Re-seed every tensor layout with the updated pw_flat facts so the next round's
                     // (and the convert splicer's) view of neighbor layouts is consistent.
-                    for (auto &nd: g.nodes)
-                    {
-                        LKind k = opLayoutKind(g, nd);
-                        bool  f;
-                        if (k == LKind::Agnostic && !nd.inputs.empty() && nd.inputs[0] != kNoTensor)
-                        {
-                            bool    inFlat = g.desc(nd.inputs[0]).gpuFlat;
-                            int64_t cin    = NCHW::from(g.desc(nd.inputs[0]).shape).c;
-                            int64_t cout   = NCHW::from(g.desc(nd.outputs[0]).shape).c;
-                            f              = inFlat || cin != cout;
-                        } else if (k == LKind::FixedNC4)
-                        {
-                            f = false;
-                        } else
-                        {
-                            f = gpuFlatNode(g, nd);
-                        }
-                        for (TensorId o: nd.outputs)
-                        {
-                            if (o != kNoTensor)
-                            {
-                                g.desc(o).gpuFlat = f;
-                            }
-                        }
-                    }
+                    seedFromProducers();
                 }
             }
         }
