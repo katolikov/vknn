@@ -1,3 +1,4 @@
+#include "import/mod_integer_operands.h"
 #include "passes_internal.h"
 
 namespace vknn {
@@ -532,16 +533,13 @@ namespace vknn {
                         enqueue(nd.inputs[0], Reach::Integer);
                     }
                     break;
-                case OpType::Mod: {
-                    bool integerTypedOperand = false;
-                    for (TensorId in: nd.inputs)
-                    {
-                        integerTypedOperand = integerTypedOperand || typedWideInteger(g, in);
-                    }
-                    integerResult   = nd.attr.geti("fmod", kModIntegerRemainder) == kModIntegerRemainder || integerTypedOperand;
+                case OpType::Mod:
+                    // fmod 0 is the integer remainder; fmod 1 is integer-valued on integer operands,
+                    // which modOperandsAreInteger resolves from dtypes and producers exactly as the
+                    // Mod kernels do.
+                    integerResult   = nd.attr.geti("fmod", kModIntegerRemainder) == kModIntegerRemainder || modOperandsAreInteger(g, nd, producer);
                     integerOperands = integerResult;
                     break;
-                }
                 case OpType::BitShift:
                 case OpType::BitwiseAnd:
                 case OpType::BitwiseOr:

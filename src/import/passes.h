@@ -315,7 +315,7 @@ namespace vknn {
 
     // Pin integer tensors to fp32 storage, where consecutive integers are exact up to 2^24 (fp16 is
     // exact only up to 2^11 and saturates at 65504). Seeds: the flat outputs of ArgMax, ArgMin, Mod
-    // with fmod == 0 or an Int32/Int64-typed operand, BitShift, BitwiseAnd, BitwiseOr, BitwiseXor and
+    // with fmod == 0 or integer operands (modOperandsAreInteger), BitShift, BitwiseAnd, BitwiseOr, BitwiseXor and
     // BitwiseNot; the runtime operands of those Mod and bitwise ops; and ArgMax/ArgMin data typed
     // Int32/Int64. From every seed the pin floods the value-preserving region around it: toward sources
     // through layout converts, Identity, metadata reshapes, Cast, movement and selection ops (so an

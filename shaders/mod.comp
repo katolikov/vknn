@@ -1,23 +1,30 @@
 #version 450
 #define VKNN_NO_RTE 1 // stores round via vknnRte16, the integer-exact store of the flat elementwise kernels
 #include "precision.glsl"
-// Flat broadcasting ONNX Mod: d = modRemainder(a, b, fmodMode), bit-identical to the CPU oracle
-// (src/backend/cpu/mod_remainder.h modRemainderFloat).
-//  - fmodMode 1 (C remainder): exact std::fmod, the sign of the dividend.
-//  - fmodMode 0 (floor remainder): a zero divisor yields +0; otherwise the exact fmod, and a nonzero
-//    remainder whose sign differs from the divisor's gains one divisor.
+// Flat broadcasting ONNX Mod: d = modElement(a, b, fmodMode, integerOperands), bit-identical to the
+// CPU oracle (src/backend/cpu/mod_remainder.h).
+//  - Float operands, fmodMode 1 (C remainder): exact std::fmod, the sign of the dividend
+//    (modRemainderFloat).
+//  - Float operands, fmodMode 0 (floor remainder): a zero divisor yields +0; otherwise the exact fmod,
+//    and a nonzero remainder whose sign differs from the divisor's gains one divisor.
+//  - Integer operands (pc.integerOperands, resolved at load by modOperandsAreInteger, the resolver the
+//    CPU kernel uses): each operand reads as the CPU int64 path reads it (modIntegerOperand: NaN reads
+//    as 0, the value truncates toward zero inside [-2^63, 2^63]), a zero divisor yields 0 in both modes,
+//    and a zero remainder is +0 (modRemainderInt). A lane holds the fp32 value of an int64, so results
+//    are exact for that value; a +inf operand reads as 2^63 where the CPU saturates at 2^63 - 1, which
+//    no fp32 value holds.
 // fmod is computed exactly by binary long division (no a - b * trunc(a / b), which rounds for large
-// quotients), so integer-valued operands stay exact up to the storage precision without any dtype
-// knowledge. Every NaN result is the canonical quiet NaN (kQuietNaNBits).
-// Geometry (outDim/aStride/bStride) rides a content-deduped SSBO at binding 3 (flat::uploadFlatGeom);
-// the three rank-length arrays pack back-to-back: outDim = g[0..rank), aStride = g[rank..2*rank),
-// bStride = g[2*rank..3*rank).
+// quotients), so integer-valued operands stay exact up to the storage precision. Every NaN result is
+// the canonical quiet NaN (kQuietNaNBits).
+// Geometry (outDim/dividendStride/divisorStride) rides a content-deduped SSBO at binding 3
+// (flat::uploadFlatGeom); the three rank-length arrays pack back-to-back as blocks: outDim =
+// g[0..rank), dividendStride = g[rank..2*rank), divisorStride = g[2*rank..3*rank).
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer A { STORE a[]; };
 layout(std430, binding = 1) readonly  buffer B { STORE b[]; };
 layout(std430, binding = 2) writeonly buffer D { STORE d[]; };
 layout(std430, binding = 3) readonly  buffer G { int g[]; } geom;
-layout(push_constant) uniform PC { int rank, total, fmodMode; } pc;
+layout(push_constant) uniform PC { int rank, total, fmodMode, integerOperands; } pc;
 
 // ONNX Mod `fmod` value selecting the floor remainder (sign of the divisor); 1 is the C remainder.
 const int kModFloorRemainder = 0;
@@ -28,24 +35,40 @@ const uint kQuietNaNBits = 0x7FC00000u;
 const uint kSignBit = 0x80000000u;
 // FLT_MAX / 2: the largest fp32 value whose doubling stays finite.
 const uint kFloatMaxHalfBits = 0x7EFFFFFFu;
+// 2^63 in fp32: the int64 range bound an integer operand clamps to. -2^63 is INT64_MIN exactly.
+const uint kInt64RangeEndBits = 0x5F000000u;
 // Upper bound on the doublings of the divisor magnitude. A nonzero finite fp32 magnitude lies in
 // [2^-149, 2^128) (smallest subnormal to largest finite), and a doubled step never exceeds the
 // dividend, so the step grows by at most 127 - (-149) = 276 powers of two. The halving loop then
 // runs at most one more step than the doublings.
 const int kMaxDivisorDoublings = 276;
+// Geometry SSBO blocks (each rank entries long): the dividend strides follow outDim, then the divisor
+// strides.
+const int kDividendStrideBlock = 1;
+const int kDivisorStrideBlock = 2;
+
+// An operand of an integer Mod as the CPU int64 path reads it (modOperandToInt64). Transcribed for host
+// testing in tests/test_mod_ops.cpp (transcribedModIntegerOperand); keep the two textually parallel.
+float modIntegerOperand(float value) {
+  if (isnan(value)) {
+    return 0.0;
+  }
+  float int64RangeEnd = uintBitsToFloat(kInt64RangeEndBits);
+  return trunc(clamp(value, -int64RangeEnd, int64RangeEnd));
+}
 
 // Exact ONNX Mod remainder of one element pair. Transcribed for host testing in
 // tests/test_mod_ops.cpp (transcribedModRemainder); keep the two textually parallel.
-float modRemainder(float dividend, float divisor, int fmodMode) {
+float modRemainder(float dividend, float divisor, int fmodMode, bool integerOperands) {
   bool floorRemainder = fmodMode == kModFloorRemainder;
   if (divisor == 0.0) {
-    return floorRemainder ? 0.0 : uintBitsToFloat(kQuietNaNBits);
+    return (floorRemainder || integerOperands) ? 0.0 : uintBitsToFloat(kQuietNaNBits);
   }
   if (isnan(dividend) || isnan(divisor) || isinf(dividend)) {
     return uintBitsToFloat(kQuietNaNBits);
   }
   if (dividend == 0.0) {
-    return dividend; // +-0 keeps its sign, and a zero remainder takes no fix-up
+    return integerOperands ? 0.0 : dividend; // a float +-0 keeps its sign; an integer zero is +0
   }
   precise float remainder = dividend; // an infinite divisor leaves a finite dividend unchanged
   if (!isinf(divisor)) {
@@ -72,18 +95,31 @@ float modRemainder(float dividend, float divisor, int fmodMode) {
   if (floorRemainder && remainder != 0.0 && ((remainder < 0.0) != (divisor < 0.0))) {
     remainder += divisor;
   }
+  if (integerOperands && remainder == 0.0) {
+    return 0.0; // an integer remainder has no negative zero
+  }
   return remainder;
+}
+
+// The Mod result of one dividend/divisor lane pair: integer operands first read as the CPU int64 path
+// reads them. Transcribed for host testing in tests/test_mod_ops.cpp (transcribedModElement); keep the
+// two textually parallel.
+float modElement(float dividend, float divisor, int fmodMode, bool integerOperands) {
+  if (integerOperands) {
+    return modRemainder(modIntegerOperand(dividend), modIntegerOperand(divisor), fmodMode, integerOperands);
+  }
+  return modRemainder(dividend, divisor, fmodMode, integerOperands);
 }
 
 void main() {
   uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   if (gid >= uint(pc.total)) return;
-  int rem = int(gid), ai = 0, bi = 0;
-  for (int k = pc.rank - 1; k >= 0; --k) {
-    int c = rem % geom.g[k];
-    rem /= geom.g[k];
-    ai += c * geom.g[pc.rank + k];
-    bi += c * geom.g[2 * pc.rank + k];
+  int remainingIndex = int(gid), dividendIndex = 0, divisorIndex = 0;
+  for (int axis = pc.rank - 1; axis >= 0; --axis) {
+    int coordinate = remainingIndex % geom.g[axis];
+    remainingIndex /= geom.g[axis];
+    dividendIndex += coordinate * geom.g[kDividendStrideBlock * pc.rank + axis];
+    divisorIndex += coordinate * geom.g[kDivisorStrideBlock * pc.rank + axis];
   }
-  d[gid] = TO_STORE(modRemainder(float(a[ai]), float(b[bi]), pc.fmodMode));
+  d[gid] = TO_STORE(modElement(float(a[dividendIndex]), float(b[divisorIndex]), pc.fmodMode, pc.integerOperands != 0));
 }
