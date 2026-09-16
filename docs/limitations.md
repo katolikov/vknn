@@ -99,6 +99,24 @@ information at the clamp. Such a model wants fp32 storage — `Precision::High`,
 with its tensors named in `Config::fp32Tensors` — for full accuracy; at `Low` it stays finite but
 approximate on the overflowing tensors.
 
+**Integer values on the GPU ride float lanes, exact only within ±2^24.** The GPU stores every tensor as
+fp16 or fp32 floats. An fp32 lane holds every integer within ±2^24 (fp16: ±2^11, saturating at 65504),
+so the load-time `pinIntegerResultsFp32` pass keeps integer regions at fp32 storage at every precision
+tier — ArgMax/ArgMin indices, BitShift / BitwiseAnd / BitwiseOr / BitwiseXor / BitwiseNot results and
+operands, Mod with `fmod` 0 or integer operands, and the value-preserving hops (layout converts,
+reshapes, integer Casts, movement ops) that connect them to graph inputs and outputs. Past ±2^24 a GPU
+integer result rounds, and the GPU BitwiseAnd/Or/Xor kernel also clamps its operands to the int32 range;
+the CPU op computes int64 values exactly. Two int64 forms are not computed in float at all: a Binary
+`Div` with an Int64-typed operand (the CPU truncates toward zero, 7 / 2 = 3) and a `Pow` with an
+Int64-typed base (an integer power, 2^−1 = 0) keep the CPU op on a GPU plan, listed in the support
+report as `Binary: integer Div on an int64 operand` / `Binary: integer Pow on an int64 base` — a CPU
+segment and its boundary round trip. These decisions read the recorded element type: an int64
+intermediate the importer did not type stays on the float kernel, and a Mod whose only integer evidence
+is an INT32 / INT16 / UINT16 initializer (imported as Float32) computes the float remainder (a zero
+divisor under `fmod` 1 is NaN rather than 0). Outside the integer regions, a data tensor that stays
+fp16 under `Low` / `Normal` changes ArgMax/ArgMin on near-ties and past 65504, as it changes any other
+consumer.
+
 ---
 
 ## 4. Conv kernels trail a years-tuned engine on the 3×3-heavy nets
@@ -229,10 +247,12 @@ a **fixed** op set (`opTypeFromOnnx` in `src/core/op.cpp`). Anything not in that
 `OpType::Unknown` and will not plan.
 
 The supported set is broad — it covers CNNs, detection, **and** transformer/attention models:
-convolution/pooling, the full elementwise unary/binary families, MatMul (batched N-D), Gemm,
-LayerNorm, Softmax (channel + last-axis), Einsum, RoPE, Gather/Scatter, generator ops
-(Range / ConstantOfShape / EyeLike, const-folded), and the shape/data-movement
-ops. The full table with per-op GPU/CPU coverage is in [op-coverage.md](op-coverage.md).
+convolution/pooling, the full elementwise unary/binary families (variadic Sum / Mean / Max / Min lower
+to 2-input chains at import), the boolean ops (And / Or / Xor / Not / IsNaN and the compare family), the
+integer ops (Mod, BitShift, BitwiseAnd / BitwiseOr / BitwiseXor / BitwiseNot), ArgMax / ArgMin / TopK,
+MatMul (batched N-D), Gemm, LayerNorm, Softmax (channel + last-axis), Einsum, RoPE, Gather/Scatter,
+generator ops (Range / ConstantOfShape / EyeLike, const-folded), and the shape/data-movement ops. The
+full table with per-op GPU/CPU coverage is in [op-coverage.md](op-coverage.md).
 
 **Not** supported: RNN/LSTM/GRU, data-dependent control flow (`Loop` / `If` / `Scan` /
 `NonMaxSuppression` — their output shapes are not known at plan time), training ops, sparse
@@ -271,6 +291,7 @@ with `Status::Unsupported`.
 | Batch / shapes | Resolved at plan time. Dynamic shapes supported via **declared plan buckets** (`--bucket` at compile, `Session::prepareShapes()` at run on ONNX sessions); fixed-shape path unchanged and zero-cost (one bucket). A dynamic non-batch axis with no declared shape is a hard error, not a silent `1x1` plan |
 | NPU / accelerator | None; Vulkan + CPU only (pluggable — see adding-a-backend.md) |
 | fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum |
+| Integer values | GPU float lanes, exact within ±2^24 (integer regions pinned to fp32 storage at load); int64 `Div` and int64-base `Pow` keep the exact CPU op |
 | Kernels | Beats MNN-Vulkan everywhere; trails MNN-OpenCL-tuned on ResNet-50 (~15%, CLBlast-autotuned GEMM); tiled-GEMM Winograd F(2,3) is the default; no coopmat path (extension absent on the target driver) |
 | Host overhead | NC4HW4 pack/unpack at the I/O boundary (1–3% of the run wall on the classifier CNNs; 9–15% on large-image I/O such as YOLOv8n); a whole-GPU plan converts 8-bit / rank-4 fp32 inputs on the GPU and downloads flat outputs at declared dtype |
 | Quantized models | Static QDQ / QLinear **and** the canonical dynamic-quant cluster run dequantized to float (static: clamps preserved, rounding dropped — not int-exact; dynamic: folded to float MatMul/Conv, no output clamp); a non-canonical dynamic-quant cluster fails at planning; no int8 compute tier |
