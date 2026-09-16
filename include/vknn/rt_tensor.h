@@ -31,7 +31,8 @@ namespace vknn {
         /// Zero-copy boundary: caller dma-buf fd to use directly as this tensor's GPU buffer, or -1 for none.
         int dmaBufFd = -1;
         /// Layout the caller declares the dma-buf holds. Matching the device-native boundary binds the
-        /// fd directly; otherwise the GPU converts between the fd and the boundary buffer.
+        /// fd directly; otherwise the GPU converts between the fd and the boundary buffer, and a declared
+        /// dtype with no conversion on the device fails the run (IOTensor::dmaBufDtype).
         TensorFormat dmaBufFormat = TensorFormat::NCHW;
         /// Element type the caller declares the dma-buf holds (paired with `dmaBufFormat`).
         DType dmaBufDtype = DType::Float32;

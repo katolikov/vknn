@@ -66,6 +66,12 @@ namespace vknn {
         std::vector<VkCommandBuffer> cmds_; // chunked submits (one entry unless the segment is split for the GPU watchdog; see Config::maxSubmitNodes)
         VkQueryPool                  queryPool_ = VK_NULL_HANDLE;
         bool                         recorded_  = false;
+        // True while the recorded command stream may not encode the segment's current state. A run sets
+        // it when a boundary binding, the boundary conversion set, the resident links, the argmax
+        // epilogue or the decode chain changes; only a completed record() clears it. A run that throws
+        // between a change and its re-record leaves it set, so the next run re-records even when its
+        // bindings equal the ones the failed run left behind (boundary_rebind_rule.h).
+        bool recordingStale_ = true;
         // Config::timingSummary state: the chunk-timestamp pool, how many chunks carry a query
         // pair, and the lifetime accumulators printed once by the destructor.
         static constexpr uint32_t kMaxTimedChunks = 64;

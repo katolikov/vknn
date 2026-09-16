@@ -21,11 +21,14 @@ namespace vknn {
         /// @name Device-native boundary (zero-copy)
         /// For zero-copy I/O (IOTensor::dmaBufFd): the size, layout and dtype of the device-native
         /// boundary buffer. Declaring this exact (deviceFormat, deviceDtype) on fromDmaBuf/toDmaBuf —
-        /// or Auto — binds the fd directly; any other declared format is GPU-converted to/from it.
+        /// or Auto — binds the fd directly; any other declaration is GPU-converted to/from it when its
+        /// dtype converts (see IOTensor::dmaBufDtype), and fails run() otherwise. deviceDtype is fp16
+        /// below Precision::High and fp32 at High; a boundary tensor pinned to fp32 storage reports
+        /// Float32 at every precision.
         /// @{
         int64_t      deviceBytes  = 0;                  ///< Byte size of the device-native buffer (includes NC4HW4 channel padding).
         TensorFormat deviceFormat = TensorFormat::NCHW; ///< Layout of the device-native buffer (NCHW for flat boundaries, else NC4HW4).
-        DType        deviceDtype  = DType::Float32;     ///< Element type of the device-native buffer (fp16 at the compute precision, else fp32).
+        DType        deviceDtype  = DType::Float32;     ///< Element type of the device-native buffer (fp16 or fp32, see above).
         /// @}
     };
 

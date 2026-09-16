@@ -535,7 +535,10 @@ The Vulkan import primitive `vk::Buffer::importDmaBufFd`
 writes the dma-buf directly. A `layout`/`dtype` declared on `fromDmaBuf`/`toDmaBuf` that matches
 the device-native boundary (or `TensorFormat::Auto`) binds the fd directly as the boundary
 buffer; any other declaration keeps the pooled boundary buffer and a recorded `boundary_convert`
-dispatch converts on the GPU. `Session::inputInfo()`/`outputInfo()` report the exact
+dispatch converts on the GPU. A conversion reads or writes fp32 or fp16, or uint8 or int8 on a device
+with 8-bit storage buffers; any other declared dtype (int32, int64, 8-bit without that storage) fails
+the run. A boundary tensor pinned to fp32 storage reports `deviceDtype` fp32 at every precision.
+`Session::inputInfo()`/`outputInfo()` report the exact
 device-native block to allocate (`deviceBytes`/`deviceFormat`/`deviceDtype`). A failed import
 warns loudly (zero-copy unavailable) rather than reading undefined memory. Because the platform is UMA (all memory types are
 `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`) there are no staging copies, and the path is

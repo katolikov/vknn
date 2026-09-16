@@ -1,5 +1,6 @@
 #include "vk_segment.h"
 #include "backend/cpu/parallel.h" // cpu::threadCount (host boundary pack/unpack partitioning)
+#include "boundary_rebind_rule.h" // two-pass boundary rebind + the recording-stale flag rule
 #include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
 #include "core/dispatch_tally.h"  // recorded-dispatch counter + per-node attribution
 #include "core/kv_quant.h"        // int8 KV-cache scheme: eligibility rule + host codec (Hint::KvCacheQuant)
@@ -1889,6 +1890,7 @@ namespace vknn {
         timedChunks_     = timedChunk;
         recorded_        = true;
         recordedConvert_ = convert_;
+        recordingStale_  = false; // the stream encodes the current bindings, conversions, links, epilogue and chain
         // Snapshot the tally into the segment: the tally belongs to the device context, so the next
         // segment (or plan bucket) to record on it restarts the run and overwrites the table. The
         // profile the run reports must be THIS segment's recording.
@@ -1917,15 +1919,47 @@ namespace vknn {
         //     reads/writes it directly. Re-record the command buffer when the bound-buffer set changes;
         //     the imported buffer is cached by fd, so a reused dma-buf re-records once. Import failure
         //     keeps the pooled buffer (the copy path). Boundary I/O buffers are dedicated (not
-        //     pool-aliased), so swapping them is safe.
+        //     pool-aliased), so swapping them is safe. Every declaration is checked before any binding
+        //     changes, and a change marks recordingStale_ until a recording completes
+        //     (boundary_rebind_rule.h), so the run after one that throws midway re-records against its
+        //     own bindings.
         {
-            bool reRecord = false;
             convert_.clear();
+            // The dma-buf fd a boundary tensor binds this run, or -1 for none.
+            auto boundDmaBufFd = [&](TensorId tid) {
+                // An int8 KV cache cannot bind a caller dma-buf: the fd holds fp16 rows, the resident
+                // buffer int8 codes + side scales. The host seed path quantizes instead.
+                return kvqCaches_.count(tid) ? -1 : ctx.t(tid).dmaBufFd;
+            };
+            auto deviceNativeFormat = [&](TensorId tid) {
+                return g_.desc(tid).gpuFlat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
+            };
+            auto deviceNativeDtype = [&](TensorId tid) {
+                return boundaryDeviceDtype(useFp16_, g_.tensors[tid].storeFp32);
+            };
+            // A declared dtype the GPU cannot convert (no boundary_convert variant for the pair, or an
+            // 8-bit variant on a device without 8-bit storage) is refused by name before anything is
+            // imported or rebound: the fd has no host copy to fall back to.
+            auto refuseUnconvertibleDmaBuf = [&](TensorId tid, bool isInput) {
+                if (buffers_.find(tid) == buffers_.end() || boundDmaBufFd(tid) < 0)
+                {
+                    return;
+                }
+                const RtTensor   &rt         = ctx.t(tid);
+                const auto       &deviceCaps = be_->ctx().caps();
+                const std::string reason     = dmaBufRefusalReason(isInput, rt.dmaBufFormat, rt.dmaBufDtype, deviceNativeFormat(tid), deviceNativeDtype(tid),
+                                                                   deviceCaps.storage8bit, deviceCaps.shaderInt8);
+                if (!reason.empty())
+                {
+                    throw Error(Status::Unsupported, "dma-buf " + std::string(isInput ? "input" : "output") + " '" + g_.tensors[tid].name + "': " + reason);
+                }
+            };
+            // Binds the tensor's buffer for this run; true when the bound buffer changed.
             auto rebind = [&](TensorId tid, bool isInput) {
                 auto bit = buffers_.find(tid);
                 if (bit == buffers_.end())
                 {
-                    return;
+                    return false;
                 }
                 if (!origBoundary_.count(tid))
                 {
@@ -1933,35 +1967,15 @@ namespace vknn {
                 }
                 std::shared_ptr<vk::Buffer> want = origBoundary_[tid];
                 RtTensor                   &rt   = ctx.t(tid);
-                int                         fd   = rt.dmaBufFd;
-                if (fd >= 0 && kvqCaches_.count(tid))
-                {
-                    // An int8 KV cache cannot bind a caller dma-buf: the fd holds fp16 rows, the
-                    // resident buffer int8 codes + side scales. The host seed path quantizes instead.
-                    fd = -1;
-                }
+                const int                   fd   = boundDmaBufFd(tid);
                 if (fd >= 0)
                 {
-                    bool         flat    = g_.desc(tid).gpuFlat;
-                    TensorFormat devFmt  = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
-                    DType        devDt   = boundaryDeviceDtype(useFp16_, g_.tensors[tid].storeFp32);
+                    TensorFormat devFmt  = deviceNativeFormat(tid);
+                    DType        devDt   = deviceNativeDtype(tid);
                     TensorFormat declFmt = rt.dmaBufFormat;
                     DType        declDt  = rt.dmaBufDtype;
-                    bool         direct  = declFmt == TensorFormat::Auto || (declFmt == devFmt && declDt == devDt);
+                    bool         direct  = dmaBufBindsDirectly(declFmt, declDt, devFmt, devDt);
                     NCHW         x       = NCHW::from(rt.shape.empty() ? g_.tensors[tid].shape : rt.shape);
-                    if (!direct)
-                    {
-                        // A declared dtype the GPU cannot convert (no boundary_convert variant for the
-                        // pair, or an 8-bit variant on a device without 8-bit storage) is refused by name
-                        // before anything is imported: the fd has no host copy to fall back to.
-                        const DType convertSource      = isInput ? declDt : devDt;
-                        const DType convertDestination = isInput ? devDt : declDt;
-                        const auto &deviceCaps         = be_->ctx().caps();
-                        if (!boundaryConvertDeviceSupports(convertSource, convertDestination, deviceCaps.storage8bit, deviceCaps.shaderInt8))
-                        {
-                            throw Error(Status::Unsupported, "dma-buf " + std::string(isInput ? "input" : "output") + " '" + g_.tensors[tid].name + "': no GPU conversion from " + dtypeStr(convertSource) + " to " + dtypeStr(convertDestination) + (boundaryConvertHasVariant(convertSource, convertDestination) ? " on a device without 8-bit storage" : ""));
-                        }
-                    }
                     // Import sized for what the dma-buf actually holds: the device-native bytes for a
                     // direct bind, the declared-format bytes for a convert. Re-import when this
                     // tensor's fd or size changes.
@@ -2005,20 +2019,14 @@ namespace vknn {
                         }
                     }
                 }
-                if (bit->second != want)
+                if (bit->second == want)
                 {
-                    bit->second = want;
-                    reRecord    = true;
+                    return false;
                 }
+                bit->second = want;
+                return true;
             };
-            for (TensorId tid: boundaryInputs)
-            {
-                rebind(tid, true);
-            }
-            for (TensorId tid: boundaryOutputs)
-            {
-                rebind(tid, false);
-            }
+            rebindBoundaryTensors(boundaryInputs, boundaryOutputs, refuseUnconvertibleDmaBuf, rebind, recordingStale_);
             // Default-path GPU image conversion: for each 8-bit graph input NOT bound to a dma-buf this
             // run (and not already handled by the dma-buf rebind), stand up a persistent staging buffer
             // and a boundary_convert(staging[declared] -> boundary[device-native]) so the raw caller
@@ -2102,29 +2110,29 @@ namespace vknn {
             }
             if (!sameConvert(convert_, recordedConvert_))
             {
-                reRecord = true;
+                recordingStale_ = true;
             }
             if (linksChanged_)
             {
                 // The resident-link set (or a ranges buffer's identity) changed since the last
                 // recording; the command stream must pick up the new link_copy dispatches.
-                linksChanged_ = false;
-                reRecord      = true;
+                linksChanged_   = false;
+                recordingStale_ = true;
             }
             if (argMaxChanged_)
             {
                 // The registered reduction set changed; the recording must append its epilogue.
-                argMaxChanged_ = false;
-                reRecord       = true;
+                argMaxChanged_  = false;
+                recordingStale_ = true;
             }
             if (chainChanged_)
             {
                 // The decode-chain configuration changed; the recording must carry the chained
                 // iteration sequence (or drop back to the single-iteration stream).
-                chainChanged_ = false;
-                reRecord      = true;
+                chainChanged_   = false;
+                recordingStale_ = true;
             }
-            if (reRecord)
+            if (recordingStale_)
             {
                 if (!cmds_.empty())
                 {

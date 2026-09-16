@@ -25,7 +25,8 @@ namespace vknn {
         /// input this feeds (optional for single-input). `layout`/`dtype` declare the fd's bytes: when
         /// they match the model's device-native boundary (see IOInfo::deviceFormat/deviceDtype) the fd is
         /// bound directly, otherwise the GPU converts on read. TensorFormat::Auto means "already
-        /// device-native — bind directly".
+        /// device-native — bind directly". A conversion reads Float32 or Float16, or UInt8 or Int8 on a
+        /// device with 8-bit storage buffers; any other declared dtype fails run() (IOTensor::dmaBufDtype).
         /// @param fd     Caller-owned DMA-BUF file descriptor; the caller retains ownership.
         /// @param shape  Logical NCHW shape of the tensor the fd holds.
         /// @param name   Target model input; may be empty for a single-input model.
@@ -37,7 +38,8 @@ namespace vknn {
         /// output straight into the caller's DMA-BUF fd, no host output buffer. `name` selects which
         /// model output (required when the model has several). `layout`/`dtype` declare the fd's bytes;
         /// the GPU converts the device-native result into them, or writes directly when they match
-        /// (or layout is Auto).
+        /// (or layout is Auto). A conversion writes Float32 or Float16, or UInt8 or Int8 on a device with
+        /// 8-bit storage buffers; any other declared dtype fails run() (IOTensor::dmaBufDtype).
         /// @param fd     Caller-owned DMA-BUF file descriptor; the caller retains ownership.
         /// @param shape  Logical NCHW shape to write into the fd.
         /// @param name   Target model output; required when the model has several outputs.

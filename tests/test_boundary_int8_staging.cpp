@@ -15,8 +15,8 @@
 //   transcribed below; a source check pins the shader's lines and constants to the transcription. The
 //   int8 source arm is compared with the CPU Session's bindInput decode over all 256 bytes, the int8
 //   destination arm with the Session's readbackOutput narrowing over every finite fp16 value and an
-//   fp32 grid, and the host lane decode (bindInput and the Vulkan host upload) with bindInput for every
-//   dtype.
+//   fp32 grid. The host lane decode (bindInput and the Vulkan host upload) is checked against the value
+//   the test states for each dtype's lanes, and int64 lanes also against a CPU Session run.
 #include "core/boundary_convert_rule.h"
 #include "vknn/graph.h"
 #include "vknn/session.h"
@@ -514,7 +514,8 @@ TEST(BoundaryConvertShaderSource, TranscribedInt8ArmsAndConstantsMatchBoundaryCo
     // compile a variant through the generic arm.
     const std::vector<std::string> cmakeLines = sourceLines(kCMakeRelativePath, "#");
     ASSERT_FALSE(cmakeLines.empty()) << "cannot read " << sourceTreePath(kCMakeRelativePath);
-    const std::string     definePrefix = "-DINT_";
+    const std::string     defineFlag   = "-D";
+    const std::string     definePrefix = defineFlag + "INT_";
     std::set<std::string> passed;
     for (const std::string &line: cmakeLines)
     {
@@ -524,11 +525,12 @@ TEST(BoundaryConvertShaderSource, TranscribedInt8ArmsAndConstantsMatchBoundaryCo
         }
         for (size_t at = line.find(definePrefix); at != std::string::npos; at = line.find(definePrefix, at + 1))
         {
-            const size_t nameStart = at + 2; // past "-D"
+            const size_t nameStart = at + defineFlag.size();
             passed.insert(line.substr(nameStart, line.find('=', nameStart) - nameStart));
         }
     }
-    const std::string     testedPrefix = "defined(INT_";
+    const std::string     definedCall  = "defined(";
+    const std::string     testedPrefix = definedCall + "INT_";
     std::set<std::string> tested;
     for (const std::string &line: lines)
     {
@@ -538,7 +540,7 @@ TEST(BoundaryConvertShaderSource, TranscribedInt8ArmsAndConstantsMatchBoundaryCo
         }
         for (size_t at = line.find(testedPrefix); at != std::string::npos; at = line.find(testedPrefix, at + 1))
         {
-            const size_t nameStart = at + std::string("defined(").size();
+            const size_t nameStart = at + definedCall.size();
             tested.insert(line.substr(nameStart, line.find(')', nameStart) - nameStart));
         }
     }
@@ -613,56 +615,113 @@ TEST(BoundaryInt8Staging, SignedByteDestinationMatchesReadbackNarrowing) {
     }
 }
 
-TEST(BoundaryInt8Staging, HostLaneDecodeMatchesCpuBindInputForEveryDtype) {
+TEST(BoundaryInt8Staging, HostLaneDecodeGivesEachDtypeItsValue) {
     // The Vulkan host upload decodes a non-fp32 host tensor (int64/int32 lanes, or raw 8-bit bytes the
-    // staging conversion did not take) with decodeHostLanesToFloat32; bindInput decodes caller bytes with
-    // it too. Each recognized dtype is checked against a CPU Session run.
-    struct DtypePayload {
+    // staging conversion did not take) with decodeHostLanesToFloat32, and bindInput decodes caller bytes
+    // with it, so a CPU Session cannot serve as the reference: each lane is checked against the value the
+    // test states for it. Int64 lanes are also checked against a CPU Session run, whose bindInput keeps
+    // them undecoded and whose readback widens them on its own path.
+    struct DecodeCase {
         DType                dtype;
         std::vector<uint8_t> bytes;
+        std::vector<float>   expected;
     };
     auto lanes = [](const auto &values) {
         std::vector<uint8_t> bytes(values.size() * sizeof(values[0]));
         std::memcpy(bytes.data(), values.data(), bytes.size());
         return bytes;
     };
-    const std::vector<float>   floats {0.0f, -0.0f, 1.5f, -3.25f, 65504.0f, 1e-30f, -7.0e20f};
-    const std::vector<fp16_t>  halves {0x0000, 0x8000, 0x3C00, 0xBC00, 0x7BFF, 0x0001, 0x8400};
+    auto integerValues = [](const auto &values) {
+        std::vector<float> expected;
+        for (const auto value: values)
+        {
+            expected.push_back((float) value);
+        }
+        return expected;
+    };
+    // fp32 lanes copy bit for bit, a NaN payload and a subnormal included.
+    const std::vector<uint32_t> float32Patterns {0x00000000u, 0x80000000u, 0x3FC00000u, 0xC0500000u, 0x7F800000u, 0x7FC00001u, 0x00000001u};
+    const std::vector<uint8_t>  float32Bytes = lanes(float32Patterns);
+    std::vector<float>          float32Values(float32Patterns.size());
+    std::memcpy(float32Values.data(), float32Patterns.data(), float32Patterns.size() * sizeof(uint32_t));
+    // fp16 lanes widen to the value each bit pattern encodes.
+    struct HalfLane {
+        fp16_t pattern;
+        float  value;
+    };
+    const std::vector<HalfLane> halfLanes {
+        {0x0000, 0.0f},                   // +0
+        {0x8000, -0.0f},                  // -0
+        {0x3C00, 1.0f},                   // exponent bias, mantissa 0
+        {0xBC00, -1.0f},                  // sign bit set
+        {0x3555, 0.333251953125f},        // (1 + 341/1024) * 2^-2
+        {0x7BFF, 65504.0f},               // largest finite
+        {0x0001, std::ldexp(1.0f, -24)},  // smallest subnormal: 2^-14 / 2^10
+        {0x8400, -std::ldexp(1.0f, -14)}, // smallest normal, negative
+        {0x7C00, std::numeric_limits<float>::infinity()},
+        {0xFC00, -std::numeric_limits<float>::infinity()},
+    };
+    std::vector<fp16_t> halfPatterns;
+    std::vector<float>  halfValues;
+    for (const HalfLane &lane: halfLanes)
+    {
+        halfPatterns.push_back(lane.pattern);
+        halfValues.push_back(lane.value);
+    }
     const std::vector<uint8_t> unsignedBytes {0, 1, 127, 128, 200, 254, 255};
     const std::vector<int8_t>  signedBytes {0, 1, -1, 127, -128, 100, -5};
     const std::vector<int32_t> ints32 {0, -1, 16777216, -16777217, std::numeric_limits<int32_t>::max(), std::numeric_limits<int32_t>::min(), 123456};
     const std::vector<int64_t> ints64 {0, -1, int64_t(1) << 40, -(int64_t(1) << 24), std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::min(),
                                        99};
-    const std::vector<DtypePayload> payloads {
-        {DType::Float32, lanes(floats)},   {DType::Float16, lanes(halves)}, {DType::UInt8, lanes(unsignedBytes)},
-        {DType::Int8, lanes(signedBytes)}, {DType::Int32, lanes(ints32)},   {DType::Int64, lanes(ints64)},
+    const std::vector<uint8_t>    int64Bytes = lanes(ints64);
+    const std::vector<DecodeCase> cases {
+        {DType::Float32, float32Bytes, float32Values},
+        {DType::Float16, lanes(halfPatterns), halfValues},
+        {DType::UInt8, lanes(unsignedBytes), integerValues(unsignedBytes)},
+        {DType::Int8, lanes(signedBytes), integerValues(signedBytes)},
+        {DType::Int32, lanes(ints32), integerValues(ints32)},
+        {DType::Int64, int64Bytes, integerValues(ints64)},
     };
-    // A recognized dtype missing from the table would fall through to the fp32 copy unchecked.
+    // A recognized dtype missing from the table would fall through to the fp32 copy unchecked; an
+    // unrecognized value decodes as fp32 lanes.
     for (DType dtype: everyDtypeValue())
     {
         if (!isRecognizedDtype(dtype))
         {
-            EXPECT_EQ(boundaryHostLaneBytes(dtype), sizeof(float)) << "an unrecognized dtype value decodes as fp32 lanes";
+            EXPECT_EQ(boundaryHostLaneBytes(dtype), sizeof(float)) << "dtype value " << (int) dtype;
+            std::vector<float> decoded(float32Values.size());
+            decodeHostLanesToFloat32(dtype, float32Bytes.data(), (int64_t) decoded.size(), decoded.data());
+            for (size_t k = 0; k < decoded.size(); ++k)
+            {
+                EXPECT_TRUE(sameBits(decoded[k], float32Values[k])) << "dtype value " << (int) dtype << " element " << k;
+            }
             continue;
         }
-        const bool covered = std::any_of(payloads.begin(), payloads.end(), [&](const DtypePayload &p) {
-            return p.dtype == dtype;
+        const bool covered = std::any_of(cases.begin(), cases.end(), [&](const DecodeCase &c) {
+            return c.dtype == dtype;
         });
         EXPECT_TRUE(covered) << dtypeStr(dtype) << " has no decode check";
         EXPECT_EQ(boundaryHostLaneBytes(dtype), dtypeSize(dtype)) << dtypeStr(dtype);
     }
-    for (const DtypePayload &payload: payloads)
+    for (const DecodeCase &c: cases)
     {
-        const int64_t               count = (int64_t) (payload.bytes.size() / dtypeSize(payload.dtype));
-        const std::vector<IOTensor> outs  = runIdentityOnCpu(payload.dtype, DType::Float32, count, payload.bytes);
-        ASSERT_EQ(outs.size(), 1u) << dtypeStr(payload.dtype);
-        const std::vector<float> bound = float32Payload(outs[0]);
-        ASSERT_EQ((int64_t) bound.size(), count) << dtypeStr(payload.dtype);
+        const int64_t count = (int64_t) (c.bytes.size() / dtypeSize(c.dtype));
+        ASSERT_EQ((size_t) count, c.expected.size()) << dtypeStr(c.dtype);
         std::vector<float> decoded((size_t) count);
-        decodeHostLanesToFloat32(payload.dtype, payload.bytes.data(), count, decoded.data());
-        for (int64_t k = 0; k < count; ++k)
+        decodeHostLanesToFloat32(c.dtype, c.bytes.data(), count, decoded.data());
+        for (size_t k = 0; k < decoded.size(); ++k)
         {
-            EXPECT_TRUE(sameBits(decoded[(size_t) k], bound[(size_t) k])) << dtypeStr(payload.dtype) << " element " << k << ": decode " << decoded[(size_t) k] << ", bindInput " << bound[(size_t) k];
+            EXPECT_TRUE(sameBits(decoded[k], c.expected[k])) << dtypeStr(c.dtype) << " element " << k << ": decode " << decoded[k] << ", expected " << c.expected[k];
         }
+    }
+    const std::vector<IOTensor> outs = runIdentityOnCpu(DType::Int64, DType::Float32, (int64_t) ints64.size(), int64Bytes);
+    ASSERT_EQ(outs.size(), 1u);
+    const std::vector<float> bound = float32Payload(outs[0]);
+    ASSERT_EQ(bound.size(), ints64.size());
+    std::vector<float> decoded(ints64.size());
+    decodeHostLanesToFloat32(DType::Int64, int64Bytes.data(), (int64_t) decoded.size(), decoded.data());
+    for (size_t k = 0; k < decoded.size(); ++k)
+    {
+        EXPECT_TRUE(sameBits(decoded[k], bound[k])) << "i64 element " << k << ": decode " << decoded[k] << ", bindInput + readback " << bound[k];
     }
 }
