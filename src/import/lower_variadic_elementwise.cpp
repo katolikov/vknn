@@ -28,13 +28,14 @@ namespace vknn {
         constexpr size_t kKernelOperandCount = 2;
 
         // True for a node this pass rewrites: every Mean, and a Sum (Add) or Max/Min (Binary) whose
-        // operand count is not the kernels' two.
+        // operand count is not the kernels' two. Operands appended past pwCoreInputs by pointwise fusion
+        // are not operands of the op itself.
         bool isVariadicElementwise(const Node &nd) {
             if (nd.type == OpType::Mean)
             {
                 return true;
             }
-            if (nd.inputs.size() == kKernelOperandCount)
+            if (pwCoreInputs(nd) == kKernelOperandCount)
             {
                 return false;
             }
@@ -76,6 +77,16 @@ namespace vknn {
             }
         }
     } // namespace
+
+    void requireLoweredVariadicElementwise(const Graph &g) {
+        for (const Node &nd: g.nodes)
+        {
+            if (isVariadicElementwise(nd))
+            {
+                throw Error(Status::InvalidArgument, std::string(variadicOnnxName(nd)) + " '" + nd.name + "': " + std::to_string(pwCoreInputs(nd)) + " operands; recompile the .vxm (variadic Sum/Mean/Max/Min are lowered to 2-input nodes at compile time)");
+            }
+        }
+    }
 
     void lowerVariadicElementwise(Graph &g) {
         int               lowered = 0;

@@ -12,6 +12,8 @@
 //               checks still run per node).
 // pwEpilogue -> op types whose kernel family has an _epi store variant that can host a fused unit.
 #include "vknn/op_descriptor.h"
+#include "vknn/error.h"
+#include <string>
 
 namespace vknn {
 
@@ -25,6 +27,12 @@ namespace vknn {
             OpDescriptor d[kMaxOp + 1];
             Table() {
                 auto set = [&](OpType t, L layout, bool pwMember, bool pwEpilogue) {
+                    // A row past kMaxOp would write outside the table; it fails the table's construction
+                    // (and so every opDescriptor lookup) by name instead.
+                    if ((int) t < 0 || (int) t > kMaxOp)
+                    {
+                        throw Error(Status::RuntimeError, std::string("opDescriptor: the row for ") + opTypeName(t) + " is past kMaxOp; raise kMaxOp to the last OpType enumerator");
+                    }
                     OpDescriptor &e = d[(int) t];
                     e.layout        = layout;
                     e.pwMember      = pwMember;

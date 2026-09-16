@@ -1,5 +1,5 @@
 #include "passes_internal.h"
-#include <cstring>
+#include <map>
 
 namespace vknn {
 
@@ -44,31 +44,102 @@ namespace vknn {
 
         // An INT8/UINT8 initializer keeps its native 1-byte lanes in the graph (materializeInitializers),
         // but the CPU kernels read every non-int64 operand through host.f32(), which on a 1-byte payload
-        // reads past the buffer. Widen such an operand to integer-valued fp32 host bytes -- the values
-        // the session's CPU pool loads -- right before a node that reads it folds. The pool entry is
-        // relabeled Float32 along with its bytes (the session keeps the int8/uint8 label, but on the
-        // fold path a label-preserving kernel such as Reshape sizes its copy from the label, and a
-        // Float32 label keeps the folded initializer's bytes and dtype consistent). Widening is lazy
-        // and per operand, so a packed int4/uint8 weight no foldable node reads never quadruples in
-        // host memory.
-        auto widenByteInitializerOperands = [&](const Node &nd) {
+        // reads past the buffer. Widen such an operand's pool entry to integer-valued fp32 host bytes --
+        // the values the session's CPU pool loads -- right before a node that reads its values folds.
+        // The pool entry is relabeled Float32 so label-sized copies (cpu::copyAs) stay consistent with
+        // the widened bytes; `byteLabelOf` keeps the original label, which restoreMovedByteLabels puts
+        // back on the result of a node that only moves data. Widening is lazy and per operand, so a
+        // packed int4/uint8 weight no value-reading foldable node reads never quadruples in host memory.
+        std::map<TensorId, DType> byteLabelOf;
+        auto                      widenByteInitializerOperands = [&](const Node &nd) {
             for (TensorId in: nd.inputs)
             {
                 if (in == kNoTensor || !pool[in].hostValid || (pool[in].dtype != DType::Int8 && pool[in].dtype != DType::UInt8))
                 {
                     continue;
                 }
-                const bool         isSigned  = pool[in].dtype == DType::Int8;
-                const size_t       laneCount = pool[in].host.bytes.size(); // one byte per element
-                const uint8_t     *lanes     = pool[in].host.bytes.data();
-                std::vector<float> values(laneCount);
+                const DType    label     = pool[in].dtype;
+                const size_t   laneCount = pool[in].host.bytes.size(); // one byte per element
+                const uint8_t *lanes     = pool[in].host.bytes.data();
+                HostBuffer     widened;
+                widened.resizeElems((int64_t) laneCount, DType::Float32);
+                float *values = widened.f32();
                 for (size_t k = 0; k < laneCount; ++k)
                 {
-                    values[k] = isSigned ? (float) (int8_t) lanes[k] : (float) lanes[k];
+                    values[k] = label == DType::Int8 ? (float) (int8_t) lanes[k] : (float) lanes[k];
                 }
-                pool[in].host.resizeElems((int64_t) laneCount, DType::Float32);
-                std::memcpy(pool[in].host.bytes.data(), values.data(), laneCount * sizeof(float));
-                pool[in].dtype = DType::Float32;
+                pool[in].host   = std::move(widened);
+                pool[in].dtype  = DType::Float32;
+                byteLabelOf[in] = label;
+            }
+        };
+        // The input slots whose element values a data-movement node copies into its outputs unchanged
+        // (the other inputs are shape/index/axis parameters), as [first, end). Empty for a node that
+        // computes new values: its result keeps the dtype its kernel writes.
+        auto movedDataSlots = [&](const Node &nd) -> std::pair<size_t, size_t> {
+            static constexpr size_t kSingleDataOperand = 1; // movement ops reading their values from operand 0 alone
+            switch (nd.type)
+            {
+                case OpType::Reshape:
+                case OpType::Squeeze:
+                case OpType::Unsqueeze:
+                case OpType::Slice:
+                case OpType::Transpose:
+                case OpType::Expand:
+                case OpType::Tile:
+                case OpType::Gather:
+                    return {0, std::min(kSingleDataOperand, nd.inputs.size())};
+                case OpType::Concat:
+                    return {0, pwCoreInputs(nd)};
+                default:
+                    return {0, 0};
+            }
+        };
+        // A data-movement node whose every data operand was a widened INT8/UINT8 initializer of ONE label
+        // stores exactly those integer values, so its fp32 result narrows back to 1-byte lanes under that
+        // label: the fold yields what the graph declares (QuantizeLinear takes its output type and
+        // saturation range from a zero_point's label) at the native 1-byte footprint.
+        auto restoreMovedByteLabels = [&](const Node &nd) {
+            const auto [firstSlot, endSlot] = movedDataSlots(nd);
+            bool  sawData                   = false;
+            DType label                     = DType::Float32;
+            for (size_t slot = firstSlot; slot < endSlot; ++slot)
+            {
+                TensorId in = nd.inputs[slot];
+                if (in == kNoTensor)
+                {
+                    continue;
+                }
+                auto it = byteLabelOf.find(in);
+                if (it == byteLabelOf.end() || (sawData && it->second != label))
+                {
+                    return; // a non-byte or mixed-label operand: the result keeps its kernel dtype
+                }
+                label   = it->second;
+                sawData = true;
+            }
+            if (!sawData)
+            {
+                return;
+            }
+            for (TensorId o: nd.outputs)
+            {
+                if (o == kNoTensor || pool[o].dtype != DType::Float32)
+                {
+                    continue;
+                }
+                RtTensor    &result = pool[o];
+                const size_t count  = result.host.bytes.size() / sizeof(float);
+                const float *values = result.host.f32();
+                HostBuffer   narrowed;
+                narrowed.resizeElems((int64_t) count, label);
+                uint8_t *lanes = narrowed.bytes.data();
+                for (size_t k = 0; k < count; ++k)
+                {
+                    lanes[k] = label == DType::Int8 ? (uint8_t) (int8_t) values[k] : (uint8_t) values[k];
+                }
+                result.host  = std::move(narrowed);
+                result.dtype = label;
             }
         };
 
@@ -276,15 +347,19 @@ namespace vknn {
             {
                 pool[nd.inputs[0]].shape = g.desc(nd.inputs[0]).shape;
             }
-            widenByteInitializerOperands(nd);
             auto op = CpuOpRegistry::instance().create(nd.type);
             if (!op)
             {
                 continue;
             }
+            if (nd.type != OpType::Shape)
+            {
+                widenByteInitializerOperands(nd); // Shape reads only the operand's shape, never its payload
+            }
             try
             { op->run(nd, ctx); } catch (...)
             { continue; }
+            restoreMovedByteLabels(nd);
             // The CPU ops normalize a rank-0 result to [1] (a zero-byte runtime buffer would be the
             // alternative), but on the fold path the TRUE ONNX rank is part of the value: a scalar
             // Gather-of-Shape that keeps the [1] turns the following Unsqueeze into rank 2, a Concat

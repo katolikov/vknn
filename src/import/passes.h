@@ -98,6 +98,11 @@ namespace vknn {
     // Runs before the first inferShapes, which reads exactly two operands on Add/Binary.
     // @throws Error{InvalidArgument} for a node with no operands or a missing operand/output.
     void lowerVariadicElementwise(Graph &g);
+    // Reject a graph that still carries a node lowerVariadicElementwise rewrites (a .vxm compiled
+    // before the lowering existed): the Add/Binary kernels read only inputs[0] and inputs[1], so such
+    // a node would silently drop its later operands. Run on graphs whose passes are already applied.
+    // @throws Error{InvalidArgument} naming the node and its operand count.
+    void requireLoweredVariadicElementwise(const Graph &g);
     // Remove nodes whose outputs are unused (keeps graph outputs alive).
     void eliminateDeadNodes(Graph &g);
     // Drop initializer payloads no node/output references (folded-chain intermediates, Cast-copied
@@ -308,15 +313,28 @@ namespace vknn {
     // insertLayoutConverts, before markFp32.
     void pinGridSampleGridFp32(Graph &g);
 
-    // Pin integer results to fp32 storage, where consecutive integers are exact up to 2^24 (fp16 is
-    // exact only up to 2^11 and saturates at 65504): the flat outputs of ArgMax, ArgMin, Mod with
-    // fmod == 0, BitShift, BitwiseAnd, BitwiseOr, BitwiseXor and BitwiseNot. For the integer-valued
-    // elementwise ops (not ArgMax/ArgMin, whose data input is float) every runtime operand is also
-    // walked upstream through ConvertLayout hops while the hop is flat, pinning each hop so an integer
-    // graph input packs at fp32 instead of saturating at fp16; a hop that is a secondary output of a
-    // multi-output producer also pins that producer's flat outputs[0], since markFp32 aligns every
-    // output of a node to outputs[0]. Runs at load, after insertLayoutConverts, before markFp32.
+    // Pin integer tensors to fp32 storage, where consecutive integers are exact up to 2^24 (fp16 is
+    // exact only up to 2^11 and saturates at 65504). Seeds: the flat outputs of ArgMax, ArgMin, Mod
+    // with fmod == 0 or an Int32/Int64-typed operand, BitShift, BitwiseAnd, BitwiseOr, BitwiseXor and
+    // BitwiseNot; the runtime operands of those Mod and bitwise ops; and ArgMax/ArgMin data typed
+    // Int32/Int64. From every seed the pin floods the value-preserving region around it: toward sources
+    // through layout converts, Identity, metadata reshapes, Cast, movement and selection ops (so an
+    // integer graph input packs at fp32), and toward consumers through the same ops (a Cast only to an
+    // integer type), so an integer result reaches a graph output or the next integer op without an fp16
+    // narrowing. A Cast's operand is followed toward its source only. A tensor is pinned while it can
+    // take fp32 storage: flat, or NC4HW4 written by no fp16-only kernel (a graph input, a layout
+    // convert, a metadata reshape or a Cast); the region stops at an NC4HW4 conv-family output, which
+    // markFp32 bridges. A hop that is a secondary output of a multi-output producer also pins that
+    // producer's outputs[0], since markFp32 aligns every output of a node to outputs[0]. Runs at load,
+    // after insertLayoutConverts, before markFp32.
     void pinIntegerResultsFp32(Graph &g);
+
+    // The Vulkan flat-layout load sequence, in its load-bearing order: insertLayoutConverts assigns
+    // every tensor's layout, the pins (pinGatherIndexFp32, pinGridSampleGridFp32,
+    // pinIntegerResultsFp32) read those layouts to choose fp32 storage, and markFp32 then applies the
+    // `fp32Marks` substring marks and bridges every fp16/fp32 frontier the pins created. Ends
+    // topo-sorted. `matchedPatterns` is markFp32's zero-match accounting (null to skip it).
+    void planFlatLayoutAndStorage(Graph &g, const std::string &fp32Marks, std::set<std::string> *matchedPatterns);
 
     // Fold chains of movement ops — a Transpose or Slice fed by another Transpose or Slice — into
     // ONE strided gather: the consumer reads the chain's source through the composed per-axis map

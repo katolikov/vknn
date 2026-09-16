@@ -773,8 +773,10 @@ TEST(OpDescriptor, LayoutClassAgreesWithGpuFlatNode) {
     Graph    g;
     TensorId a = tensor(g, "a", {1, 4, 4, 4});
     TensorId b = tensor(g, "b", {1, 4, 4, 4});
-    // Every OpType through the last enumerator: a descriptor row past the table bound would silently
-    // read the default {Nc4} row, so the loop must reach the newest op.
+    // Every OpType through the last enumerator. This checks descriptor/gpuFlatNode agreement only:
+    // gpuFlatNode reads the same table, so it cannot detect a short table bound. That bound is guarded
+    // by the table setter (a row past kMaxOp fails the table's construction) and by the explicit
+    // per-op OpDescriptor layout assertions.
     for (int i = 1; i <= (int) OpType::Mean; ++i)
     {
         OpType              t = (OpType) i;

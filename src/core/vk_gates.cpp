@@ -299,9 +299,10 @@ namespace vknn {
         }
         if (nd.type == OpType::Mod || nd.type == OpType::BitwiseAnd || nd.type == OpType::BitwiseOr || nd.type == OpType::BitwiseXor || nd.type == OpType::BitwiseNot)
         {
-            // Flat elementwise kernels with integer semantics (broadcasting, any output rank). An integer
-            // result is pinned to fp32 storage at load (pinIntegerResultsFp32), so no attribute or shape
-            // limits them.
+            // Flat elementwise kernels (broadcasting, any output rank); no attribute or shape limits them.
+            // The bitwise ops, Mod with fmod 0, and Mod with an Int32/Int64-typed operand compute integers,
+            // which pinIntegerResultsFp32 keeps in fp32 storage at load together with their runtime
+            // operands. Mod with fmod 1 on float operands is the C fmod at the node's normal precision.
             return true;
         }
         if (nd.type == OpType::BitShift)

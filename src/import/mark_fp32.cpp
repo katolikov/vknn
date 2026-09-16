@@ -362,16 +362,77 @@ namespace vknn {
         }
     }
 
-    void pinIntegerResultsFp32(Graph &g) {
+    namespace {
         // ONNX Mod `fmod` value (also the attribute's default) selecting the integer remainder whose sign
-        // follows the divisor; fmod == 1 is the float C fmod and keeps the node's normal precision.
-        static constexpr int64_t kModIntegerRemainder = 0;
-        // Upper bound on the passthrough hops followed from one operand (the ConvertLayout chains the
-        // layout pass splices are one or two hops; the cap only guards a malformed graph).
-        static constexpr int kMaxPassthroughHops = 64;
+        // follows the divisor; fmod == 1 is the C fmod, integer-valued only on integer operands.
+        constexpr int64_t kModIntegerRemainder = 0;
 
-        // Last writer of each tensor, so an operand can be traced back toward its source.
-        std::vector<int> producer(g.tensors.size(), -1);
+        // ONNX TensorProto.DataType codes: FLOAT (the Cast `to` default) and the integer element types.
+        constexpr int64_t kOnnxFloat  = 1;
+        constexpr int64_t kOnnxUInt8  = 2;
+        constexpr int64_t kOnnxInt8   = 3;
+        constexpr int64_t kOnnxUInt16 = 4;
+        constexpr int64_t kOnnxInt16  = 5;
+        constexpr int64_t kOnnxInt32  = 6;
+        constexpr int64_t kOnnxInt64  = 7;
+        constexpr int64_t kOnnxUInt32 = 12;
+        constexpr int64_t kOnnxUInt64 = 13;
+
+        bool castTargetsInteger(const Node &nd) {
+            const int64_t to = nd.attr.geti("to", kOnnxFloat);
+            return to == kOnnxUInt8 || to == kOnnxInt8 || to == kOnnxUInt16 || to == kOnnxInt16 || to == kOnnxInt32 || to == kOnnxInt64 || to == kOnnxUInt32 || to == kOnnxUInt64;
+        }
+
+        // A graph-declared wide integer dtype (graph inputs and initializers carry theirs; a runtime
+        // intermediate is typed only where an import rule stamps it). 8-bit values are exact in fp16.
+        bool typedWideInteger(const Graph &g, TensorId t) {
+            return t != kNoTensor && (g.desc(t).dtype == DType::Int64 || g.desc(t).dtype == DType::Int32);
+        }
+
+        // Operand count of a movement op that reads its values from operand 0 alone.
+        constexpr size_t kSingleDataOperand = 1;
+
+        // The value-preserving ops an integer region extends through, as the data operand slots
+        // [first, end): every output holds element values copied from those operands (the other inputs
+        // are shape/index/axis parameters), so integer data makes an integer result and an integer result
+        // has integer data. Layout converts, Identity, metadata reshapes, Cast (its input may be float, so
+        // the walk treats it one-way; see pinIntegerResultsFp32), movement and selection. Empty for every
+        // other op, and for a movement op hosting a fused pointwise chain, which computes new values.
+        std::pair<size_t, size_t> integerPassthroughDataSlots(const Node &nd) {
+            if (nd.attr.has("pw_steps"))
+            {
+                return {0, 0};
+            }
+            const size_t coreInputs = pwCoreInputs(nd);
+            switch (nd.type)
+            {
+                case OpType::ConvertLayout:
+                case OpType::Identity:
+                case OpType::Reshape:
+                case OpType::Flatten:
+                case OpType::Squeeze:
+                case OpType::Unsqueeze:
+                case OpType::Cast:
+                case OpType::Slice:
+                case OpType::Transpose:
+                case OpType::Expand:
+                case OpType::Tile:
+                case OpType::Split:
+                case OpType::Gather: // data operand 0; the index (operand 1) is pinned by pinGatherIndexFp32
+                    return {0, std::min(kSingleDataOperand, coreInputs)};
+                case OpType::Concat:
+                    return {0, coreInputs};
+                default:
+                    return {0, 0};
+            }
+        }
+    } // namespace
+
+    void pinIntegerResultsFp32(Graph &g) {
+        // Last writer of each tensor and every (node, input slot) reading it, so the region can be
+        // followed toward sources and toward consumers.
+        std::vector<int>                                 producer(g.tensors.size(), -1);
+        std::vector<std::vector<std::pair<int, size_t>>> readers(g.tensors.size());
         for (int ni = 0; ni < (int) g.nodes.size(); ++ni)
         {
             for (TensorId o: g.nodes[ni].outputs)
@@ -381,87 +442,198 @@ namespace vknn {
                     producer[(size_t) o] = ni;
                 }
             }
+            for (size_t slot = 0; slot < g.nodes[ni].inputs.size(); ++slot)
+            {
+                if (g.nodes[ni].inputs[slot] != kNoTensor)
+                {
+                    readers[(size_t) g.nodes[ni].inputs[slot]].push_back({ni, slot});
+                }
+            }
         }
-        int  pinned  = 0;
-        auto pinFlat = [&](TensorId t) {
-            if (t == kNoTensor || g.isInitializer(t) || !g.desc(t).gpuFlat || g.desc(t).storeFp32)
+        // Whether a tensor may take fp32 storage: a runtime tensor that is flat (every flat kernel has an
+        // fp32 variant), or an NC4HW4 tensor no fp16-only kernel writes -- a graph input (the boundary
+        // packs it at its storage precision) or the output of a layout convert, a metadata reshape (a
+        // buffer copy) or a Cast (cast.comp has an fp32 variant). The layout pass keeps an agnostic
+        // chain rooted at a graph input NC4HW4 until a reader changes the channel count, so an integer
+        // input often reaches its flat integer op through such hops. The NC4HW4 conv family is
+        // hand-written fp16-only, so its outputs are never pinned; markFp32 bridges them instead.
+        auto storageCanPin = [&](TensorId t) {
+            if (t == kNoTensor || g.isInitializer(t))
+            {
+                return false;
+            }
+            if (g.desc(t).gpuFlat)
+            {
+                return true;
+            }
+            const int p = producer[(size_t) t];
+            if (p < 0)
+            {
+                return true;
+            }
+            const Node &pn = g.nodes[(size_t) p];
+            if (pn.attr.has("pw_steps"))
+            {
+                return false;
+            }
+            switch (pn.type)
+            {
+                case OpType::ConvertLayout:
+                case OpType::Reshape:
+                case OpType::Flatten:
+                case OpType::Squeeze:
+                case OpType::Unsqueeze:
+                case OpType::Cast:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+        int  pinned = 0;
+        auto pin    = [&](TensorId t) {
+            if (!storageCanPin(t) || g.desc(t).storeFp32)
             {
                 return;
             }
             g.desc(t).storeFp32 = true;
             ++pinned;
         };
+
+        // How far the walk follows a tensor: an Integer tensor extends the region toward its sources and
+        // its consumers; an Upstream tensor (a Cast's operand, which may hold float values) is followed
+        // only toward its source, so fp32 never spreads into the float readers beside it. Ordered so a
+        // tensor reached both ways is walked at the wider reach.
+        enum class Reach : uint8_t { None, Upstream, Integer };
+        std::vector<Reach>                      reach(g.tensors.size(), Reach::None);
+        std::vector<std::pair<TensorId, Reach>> pending;
+        auto                                    enqueue = [&](TensorId t, Reach r) {
+            if (t != kNoTensor)
+            {
+                pending.push_back({t, r});
+            }
+        };
+
+        // Seeds: integer results, and the operands of the ops whose operands are integers too. A constant
+        // operand is uploaded by the op itself at the node's (pinned) precision, so only runtime tensors
+        // are pinned.
         for (const Node &nd: g.nodes)
         {
-            bool pinsResult    = false; // the output holds integers
-            bool walksOperands = false; // the operands hold integers too
+            bool integerResult   = false;
+            bool integerOperands = false;
             switch (nd.type)
             {
                 case OpType::ArgMax:
                 case OpType::ArgMin:
-                    pinsResult = true; // int64 indices over float data: only the result is integer
+                    // int64 indices; the data is integer only where its dtype says so (a float scan
+                    // needs no extra precision, so markFp32 leaves it at its own storage precision).
+                    integerResult = true;
+                    if (!nd.inputs.empty() && typedWideInteger(g, nd.inputs[0]))
+                    {
+                        enqueue(nd.inputs[0], Reach::Integer);
+                    }
                     break;
-                case OpType::Mod:
-                    pinsResult    = nd.attr.geti("fmod", kModIntegerRemainder) == kModIntegerRemainder;
-                    walksOperands = pinsResult;
+                case OpType::Mod: {
+                    bool integerTypedOperand = false;
+                    for (TensorId in: nd.inputs)
+                    {
+                        integerTypedOperand = integerTypedOperand || typedWideInteger(g, in);
+                    }
+                    integerResult   = nd.attr.geti("fmod", kModIntegerRemainder) == kModIntegerRemainder || integerTypedOperand;
+                    integerOperands = integerResult;
                     break;
+                }
                 case OpType::BitShift:
                 case OpType::BitwiseAnd:
                 case OpType::BitwiseOr:
                 case OpType::BitwiseXor:
                 case OpType::BitwiseNot:
-                    pinsResult    = true;
-                    walksOperands = true;
+                    integerResult   = true;
+                    integerOperands = true;
                     break;
                 default:
                     break;
             }
-            if (!pinsResult)
+            if (integerResult)
             {
-                continue;
-            }
-            for (TensorId o: nd.outputs)
-            {
-                pinFlat(o);
-            }
-            if (!walksOperands)
-            {
-                continue;
-            }
-            // A constant operand is uploaded by the op itself at the node's (now fp32) precision, so only
-            // a runtime operand needs pinning. Walk it up through pure passthrough producers (the
-            // ConvertLayout the flat pass splices in) while the hop is FLAT, pinning every hop: the
-            // NC4HW4 conv family is fp16-only, so a non-flat hop is left to markFp32's frontier convert.
-            for (TensorId operand: nd.inputs)
-            {
-                TensorId t = operand;
-                for (int hop = 0; t != kNoTensor && !g.isInitializer(t) && g.desc(t).gpuFlat && hop < kMaxPassthroughHops; ++hop)
+                for (TensorId o: nd.outputs)
                 {
-                    const bool alreadyPinned = g.desc(t).storeFp32;
-                    pinFlat(t);
-                    int p = producer[(size_t) t];
-                    if (p < 0)
+                    enqueue(o, Reach::Integer);
+                }
+            }
+            if (integerOperands)
+            {
+                for (TensorId in: nd.inputs)
+                {
+                    enqueue(in, Reach::Integer);
+                }
+            }
+        }
+
+        // Flood the region. Every tensor is walked at most once per reach, so the walk terminates. The
+        // region stops at a tensor that cannot take fp32 storage (an initializer, or an output of the
+        // fp16-only NC4HW4 conv family: markFp32's frontier convert bridges it), at a producer that
+        // computes new values (its pinned output runs fp32 via nodeFp32), and at a reader whose result
+        // is float (a Cast to a float type, or any computing op), in front of which markFp32 places the
+        // fp32->fp16 bridge.
+        while (!pending.empty())
+        {
+            const auto [t, r] = pending.back();
+            pending.pop_back();
+            if (!storageCanPin(t) || reach[(size_t) t] >= r)
+            {
+                continue;
+            }
+            reach[(size_t) t] = r;
+            pin(t);
+
+            const int p = producer[(size_t) t];
+            if (p >= 0)
+            {
+                const Node &pn = g.nodes[(size_t) p];
+                // markFp32 gives every output of a node outputs[0]'s precision, so a pin on a secondary
+                // output survives only if the producer's primary output is pinned too.
+                if (pn.outputs.size() > 1 && pn.outputs[0] != t)
+                {
+                    pin(pn.outputs[0]);
+                }
+                const auto [firstSlot, endSlot] = integerPassthroughDataSlots(pn);
+                const bool viaCast              = pn.type == OpType::Cast;
+                for (size_t slot = firstSlot; slot < endSlot; ++slot)
+                {
+                    enqueue(pn.inputs[slot], viaCast ? Reach::Upstream : r);
+                }
+                if (r == Reach::Integer && !viaCast && firstSlot < endSlot)
+                {
+                    for (TensorId sibling: pn.outputs)
                     {
-                        break; // graph-input boundary: pinned, nothing upstream to follow
+                        enqueue(sibling, Reach::Integer); // the other parts of a Split
                     }
-                    const Node &pn = g.nodes[(size_t) p];
-                    // markFp32 gives every output of a node outputs[0]'s precision, so a pin on a
-                    // secondary output survives only if the producer's primary output is pinned too.
-                    if (pn.outputs.size() > 1 && pn.outputs[0] != t)
-                    {
-                        pinFlat(pn.outputs[0]);
-                    }
-                    if (alreadyPinned)
-                    {
-                        break; // a shared operand, or a prior walk: its upstream is already handled
-                    }
-                    if (pn.type == OpType::ConvertLayout && pn.inputs.size() == 1)
-                    {
-                        t = pn.inputs[0]; // same values, different layout -- keep pinning toward the source
-                    } else
-                    {
-                        break; // a real op computes the operand; its (now-pinned) output runs fp32 via nodeFp32
-                    }
+                }
+            }
+            if (r != Reach::Integer)
+            {
+                continue;
+            }
+            for (const auto &[readerIndex, slot]: readers[(size_t) t])
+            {
+                const Node &rn                  = g.nodes[(size_t) readerIndex];
+                const auto [firstSlot, endSlot] = integerPassthroughDataSlots(rn);
+                if (slot < firstSlot || slot >= endSlot)
+                {
+                    continue; // not a value-preserving read (a parameter slot, or a computing op)
+                }
+                const bool viaCast = rn.type == OpType::Cast;
+                if (viaCast && !castTargetsInteger(rn))
+                {
+                    continue; // a float result leaves the integer region
+                }
+                for (TensorId o: rn.outputs)
+                {
+                    enqueue(o, Reach::Integer);
+                }
+                for (size_t sibling = firstSlot; sibling < endSlot && !viaCast; ++sibling)
+                {
+                    enqueue(rn.inputs[sibling], Reach::Integer); // the other parts of a Concat
                 }
             }
         }
@@ -469,6 +641,24 @@ namespace vknn {
         {
             VKNN_INFO << "pinIntegerResultsFp32: pinned " << pinned << " integer tensor(s) to fp32";
         }
+    }
+
+    void planFlatLayoutAndStorage(Graph &g, const std::string &fp32Marks, std::set<std::string> *matchedPatterns) {
+        insertLayoutConverts(g);
+        // Integer index tensors (token ids / positions) must survive to the GPU without an fp16 store
+        // that would overflow a value above 65504 to +inf. Pin the Gather index chains to fp32 before
+        // markFp32 so the buffer planner sizes them 4-byte and their producers run in fp32.
+        pinGatherIndexFp32(g);
+        // GridSample grids hold normalized sampling coordinates whose fp16 storage quantization drifts
+        // the sample point (~0.5 px at 1920-wide inputs). Pin runtime grid chains to fp32 the same way;
+        // the GridSample shader decodes the grid at its storage precision.
+        pinGridSampleGridFp32(g);
+        // Integer results (ArgMax/ArgMin indices, integer Mod, bit shifts and bitwise ops), their
+        // integer operands, and the value-preserving region around them are exact only up to 2^11 in
+        // fp16 storage; pin them to fp32 the same way before markFp32 bridges the frontier.
+        pinIntegerResultsFp32(g);
+        markFp32(g, fp32Marks, matchedPatterns);
+        g.topoSort();
     }
 
 } // namespace vknn

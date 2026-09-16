@@ -581,3 +581,208 @@ TEST(VariadicElementwise, MeanLowersToAddChainAndOneRankZeroScale) {
     inferShapes(g, 1);
     EXPECT_EQ(g.desc(out).shape, (Shape {1, 2, 2, 2}));
 }
+
+TEST(VariadicElementwise, OneOperandOutputsKeepTheirNamesAndBuffers) {
+    // A one-operand Sum/Max/Min/Mean becomes an Identity. Every declared output keeps its own name and
+    // readback buffer, whether the operand is a graph input (y1..y3 all read x) or an internal tensor
+    // (z1, z2 both read relu), across consecutive runs.
+    static constexpr int kRuns = 2;
+    Graph                g;
+    TensorDesc           xd;
+    xd.name    = "x";
+    xd.shape   = kShapeX;
+    xd.isInput = true;
+    TensorId x = g.addTensor(xd);
+    g.inputs   = {x};
+    TensorDesc rd;
+    rd.name            = "relu";
+    TensorId relu      = g.addTensor(rd);
+    auto     addOutput = [&](const char *name) {
+        TensorDesc od;
+        od.name     = name;
+        od.isOutput = true;
+        TensorId o  = g.addTensor(od);
+        g.outputs.push_back(o);
+        return o;
+    };
+    auto addNode = [&](OpType type, int subOp, const char *name, TensorId input, TensorId output) {
+        Node n;
+        n.type    = type;
+        n.subOp   = subOp;
+        n.name    = name;
+        n.inputs  = {input};
+        n.outputs = {output};
+        g.nodes.push_back(n);
+    };
+    const char *names[] = {"y1", "y2", "y3", "z1", "z2"};
+    TensorId    y1 = addOutput(names[0]), y2 = addOutput(names[1]), y3 = addOutput(names[2]);
+    TensorId    z1 = addOutput(names[3]), z2 = addOutput(names[4]);
+    addNode(OpType::Relu, 0, "rectify", x, relu);
+    addNode(OpType::Add, 0, "sum_x", x, y1);
+    addNode(OpType::Binary, (int) BinaryType::Max, "max_x", x, y2);
+    addNode(OpType::Mean, 0, "mean_x", x, y3);
+    addNode(OpType::Add, 0, "sum_relu", relu, z1);
+    addNode(OpType::Binary, (int) BinaryType::Min, "min_relu", relu, z2);
+
+    Config cfg;
+    cfg.backend  = BackendKind::Cpu;
+    auto session = Session::create(std::move(g), cfg);
+    ASSERT_TRUE(session);
+    for (int run = 0; run < kRuns; ++run)
+    {
+        std::vector<float> values = kInputX;
+        for (float &v: values)
+        {
+            v = v * (float) (run + 1) - (float) run;
+        }
+        std::vector<float> rectified = values;
+        for (float &v: rectified)
+        {
+            v = std::max(v, 0.0f);
+        }
+        IOTensor in;
+        in.name  = "x";
+        in.shape = kShapeX;
+        in.dtype = DType::Float32;
+        in.data.resize(values.size() * sizeof(float));
+        std::memcpy(in.data.data(), values.data(), in.data.size());
+        std::vector<IOTensor> outs;
+        ASSERT_EQ(session->run({in}, outs), Status::Ok) << "run " << run;
+        ASSERT_EQ(outs.size(), std::size(names));
+        for (size_t k = 0; k < outs.size(); ++k)
+        {
+            EXPECT_EQ(outs[k].name, names[k]) << "run " << run;
+            EXPECT_EQ(outs[k].shape, kShapeX) << names[k] << " run " << run;
+            ASSERT_EQ(outs[k].data.size(), values.size() * sizeof(float)) << names[k] << " run " << run;
+            const float *got = outs[k].f32();
+            expectBitIdentical(std::vector<float>(got, got + values.size()), k < 3 ? values : rectified);
+        }
+    }
+}
+
+TEST(VariadicElementwise, IdentityEliminationKeepsDeclaredOutputTensors) {
+    // Relu -> Identity -> y: the Relu writes the declared output directly. x -> Identity -> w (a graph
+    // input source) and y -> Identity -> v (another graph output) keep their Identity copies. Relu ->
+    // Identity -> hidden -> Tanh: the internal result is rewired to the Relu output and removed.
+    Graph      g;
+    TensorDesc xd;
+    xd.name    = "x";
+    xd.shape   = {4};
+    xd.isInput = true;
+    TensorId x = g.addTensor(xd);
+    g.inputs   = {x};
+    auto add   = [&](const char *name, bool output) {
+        TensorDesc d;
+        d.name     = name;
+        d.shape    = {4};
+        d.isOutput = output;
+        TensorId t = g.addTensor(d);
+        if (output)
+        {
+            g.outputs.push_back(t);
+        }
+        return t;
+    };
+    TensorId activated = add("activated", false);
+    TensorId y         = add("y", true);
+    TensorId w         = add("w", true);
+    TensorId v         = add("v", true);
+    TensorId hidden    = add("hidden", false);
+    TensorId squashed  = add("squashed", true);
+    auto     addNode   = [&](OpType type, const char *name, TensorId input, TensorId output) {
+        Node n;
+        n.type    = type;
+        n.name    = name;
+        n.inputs  = {input};
+        n.outputs = {output};
+        g.nodes.push_back(n);
+    };
+    addNode(OpType::Relu, "relu", x, activated);
+    addNode(OpType::Identity, "to_y", activated, y);
+    addNode(OpType::Identity, "to_w", x, w);
+    addNode(OpType::Identity, "to_v", y, v);
+    addNode(OpType::Identity, "to_hidden", activated, hidden);
+    addNode(OpType::Relu, "squash", hidden, squashed);
+
+    eliminateIdentity(g);
+    EXPECT_EQ(g.outputs, (std::vector<TensorId> {y, w, v, squashed}));
+    const Node *relu = nullptr, *toW = nullptr, *toV = nullptr, *squash = nullptr;
+    int         identities = 0;
+    for (const Node &n: g.nodes)
+    {
+        identities += n.type == OpType::Identity ? 1 : 0;
+        relu   = n.name == "relu" ? &n : relu;
+        toW    = n.name == "to_w" ? &n : toW;
+        toV    = n.name == "to_v" ? &n : toV;
+        squash = n.name == "squash" ? &n : squash;
+    }
+    EXPECT_EQ(identities, 2);
+    ASSERT_NE(relu, nullptr);
+    ASSERT_NE(toW, nullptr);
+    ASSERT_NE(toV, nullptr);
+    ASSERT_NE(squash, nullptr);
+    EXPECT_EQ(relu->outputs[0], y) << "the producer writes the declared output";
+    EXPECT_EQ(toW->inputs[0], x);
+    EXPECT_EQ(toV->inputs[0], y);
+    EXPECT_EQ(squash->inputs[0], y) << "every other reader of the producer's result follows it";
+}
+
+TEST(VariadicElementwise, UnloweredVxmIsRejectedAtLoad) {
+    // A .vxm whose graph still carries a 3-operand Max (compiled before the lowering existed) skips the
+    // import passes at load; the Binary kernel would read two operands and drop the third, so the load
+    // fails by name instead.
+    Graph      g;
+    TensorDesc xd;
+    xd.name             = "x";
+    xd.shape            = {3};
+    xd.isInput          = true;
+    TensorId x          = g.addTensor(xd);
+    g.inputs            = {x};
+    auto addInitializer = [&](const char *name, const std::vector<float> &values) {
+        TensorDesc d;
+        d.name          = name;
+        d.shape         = {3};
+        d.isInitializer = true;
+        TensorId   id   = g.addTensor(d);
+        HostBuffer hb;
+        hb.resizeElems((int64_t) values.size(), DType::Float32);
+        std::memcpy(hb.bytes.data(), values.data(), values.size() * sizeof(float));
+        g.initializers[id] = hb;
+        return id;
+    };
+    TensorId   a = addInitializer("a", {1, 2, 3});
+    TensorId   b = addInitializer("b", {9, 9, 9});
+    TensorDesc yd;
+    yd.name     = "y";
+    yd.shape    = {3};
+    yd.isOutput = true;
+    TensorId y  = g.addTensor(yd);
+    Node     n;
+    n.type    = OpType::Binary;
+    n.subOp   = (int) BinaryType::Max;
+    n.name    = "max3";
+    n.inputs  = {x, a, b};
+    n.outputs = {y};
+    g.nodes   = {n};
+    g.outputs = {y};
+
+    EXPECT_THROW(requireLoweredVariadicElementwise(g), Error);
+    const std::string path = testing::TempDir() + "variadic_unlowered.vxm";
+    ASSERT_TRUE(saveGraphBin(g, path));
+    Config cfg;
+    cfg.backend = BackendKind::Cpu;
+    try
+    {
+        auto session = Session::createFromVxm(path, cfg);
+        ADD_FAILURE() << "an unlowered 3-operand Max must not load";
+    } catch (const Error &e)
+    {
+        EXPECT_EQ(e.status(), Status::InvalidArgument);
+        EXPECT_NE(std::string(e.what()).find("max3"), std::string::npos) << e.what();
+        EXPECT_NE(std::string(e.what()).find("recompile the .vxm"), std::string::npos) << e.what();
+    }
+    std::remove(path.c_str());
+
+    lowerVariadicElementwise(g);
+    EXPECT_NO_THROW(requireLoweredVariadicElementwise(g)) << "the lowered graph loads";
+}
