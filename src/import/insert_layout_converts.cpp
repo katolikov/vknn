@@ -240,6 +240,13 @@ namespace vknn {
             return (n.type == OpType::GridSample && inputIndex == 1 && !n.attr.has("warp")) ? true : needFlat;
         }
 
+        /// Whether a node runs in its data operand's layout whichever layout that is: a layout-agnostic
+        /// op whose output keeps the operand's NC4HW4 packing runs NC4HW4 on an NC4HW4 operand and flat
+        /// on a flat one, so its own reads decide nothing and the reads of its output decide for it.
+        bool passesLayoutThrough(const Graph &g, const Node &n) {
+            return layoutAgnostic(n) && !n.inputs.empty() && n.inputs[0] != kNoTensor && !n.outputs.empty() && n.outputs[0] != kNoTensor && agnosticKeepsNc4Packing(g, n);
+        }
+
         LKind opLayoutKind(const Graph &g, const Node &n) {
             if (layoutAgnostic(n))
             {
@@ -415,13 +422,29 @@ namespace vknn {
         //    same-dtype reorder, so the result is byte-identical either way, and the rule is a pure
         //    function of the graph (adoption only ever flips NC4HW4 -> flat, so the loop below is
         //    monotone and its fixed point is unique).
+        //    A reader that passes the layout through (passesLayoutThrough: a reshape keeping the NC4HW4
+        //    packing, a Cast, a ChannelShuffle) reads flat exactly when every read of its output does,
+        //    followed through further such readers, so an input reaching only flat readers through
+        //    those hops is packed flat too. A pass-through reader whose output is also a graph output
+        //    leaves the input at the NC4HW4 default.
         {
-            constexpr int kInputLayoutMaxRounds = 8; // monotone; this only caps pathological churn
+            constexpr int    kInputLayoutMaxRounds = 8; // monotone; this only caps pathological churn
+            constexpr size_t kDataOperand          = 0;
+            // One read of a tensor: an input slot of a node, or a fused residual/bias edge (read in the
+            // node's own layout).
+            struct TensorRead {
+                size_t node      = 0;
+                size_t slot      = 0;
+                bool   fusedEdge = false;
+            };
+            const std::set<TensorId> graphOutputs(g.outputs.begin(), g.outputs.end());
             for (int round = 0; round < kInputLayoutMaxRounds; ++round)
             {
-                std::set<TensorId> produced;
-                for (const Node &nd: g.nodes)
+                std::set<TensorId>                   produced;
+                std::vector<std::vector<TensorRead>> reads(g.tensors.size());
+                for (size_t nodeIndex = 0; nodeIndex < g.nodes.size(); ++nodeIndex)
                 {
+                    const Node &nd = g.nodes[nodeIndex];
                     for (TensorId o: nd.outputs)
                     {
                         if (o != kNoTensor)
@@ -429,38 +452,63 @@ namespace vknn {
                             produced.insert(o);
                         }
                     }
-                }
-                std::map<TensorId, bool> allReadersFlat; // absent => no reader seen yet
-                for (const Node &nd: g.nodes)
-                {
                     for (size_t inIdx = 0; inIdx < nd.inputs.size(); ++inIdx)
                     {
-                        TensorId in = nd.inputs[inIdx];
-                        if (in == kNoTensor || g.isInitializer(in) || produced.count(in))
+                        const TensorId in = nd.inputs[inIdx];
+                        if (in != kNoTensor && in < (TensorId) reads.size())
                         {
-                            continue;
+                            reads[(size_t) in].push_back({nodeIndex, inIdx, false});
                         }
-                        bool &all = allReadersFlat.emplace(in, true).first->second;
-                        all       = all && readerWantsFlat(g, nd, inIdx);
                     }
                     for (TensorId edge: {nd.fusedResidual, nd.fusedBias})
                     {
-                        if (edge == kNoTensor || g.isInitializer(edge) || produced.count(edge))
+                        if (edge != kNoTensor && edge < (TensorId) reads.size())
                         {
-                            continue;
+                            reads[(size_t) edge].push_back({nodeIndex, 0, true});
                         }
-                        bool &all = allReadersFlat.emplace(edge, true).first->second;
-                        all       = all && (!nd.outputs.empty() && nd.outputs[0] != kNoTensor && g.desc(nd.outputs[0]).gpuFlat);
+                    }
+                }
+                // Whether every read of a pass-through reader's output runs flat. Nodes are in
+                // topological order (the seed relies on the same), so walking them backwards resolves
+                // each reader before the node whose output it reads; an entry never resolved stays
+                // false, the NC4HW4 default.
+                std::vector<bool> passThroughOutputReadsFlat(g.tensors.size(), false);
+                auto              readRunsFlat = [&](const TensorRead &read) -> bool {
+                    const Node &reader = g.nodes[read.node];
+                    if (read.fusedEdge)
+                    {
+                        return !reader.outputs.empty() && reader.outputs[0] != kNoTensor && g.desc(reader.outputs[0]).gpuFlat;
+                    }
+                    if (read.slot == kDataOperand && passesLayoutThrough(g, reader))
+                    {
+                        return passThroughOutputReadsFlat[(size_t) reader.outputs[0]];
+                    }
+                    return readerWantsFlat(g, reader, read.slot);
+                };
+                auto allReadsRunFlat = [&](TensorId t) {
+                    const std::vector<TensorRead> &tensorReads = reads[(size_t) t];
+                    return !tensorReads.empty() && std::all_of(tensorReads.begin(), tensorReads.end(), readRunsFlat);
+                };
+                for (size_t nodeIndex = g.nodes.size(); nodeIndex-- > 0;)
+                {
+                    const Node &nd = g.nodes[nodeIndex];
+                    if (passesLayoutThrough(g, nd) && nd.outputs[0] < (TensorId) reads.size() && !graphOutputs.count(nd.outputs[0]))
+                    {
+                        passThroughOutputReadsFlat[(size_t) nd.outputs[0]] = allReadsRunFlat(nd.outputs[0]);
                     }
                 }
                 bool changed = false;
-                for (const auto &entry: allReadersFlat)
+                for (size_t t = 0; t < reads.size(); ++t)
                 {
-                    TensorDesc &d = g.desc(entry.first);
-                    if (entry.second && !d.gpuFlat)
+                    const TensorId input = (TensorId) t;
+                    if (g.isInitializer(input) || produced.count(input) || g.desc(input).gpuFlat)
                     {
-                        d.gpuFlat = true;
-                        changed   = true;
+                        continue;
+                    }
+                    if (allReadsRunFlat(input))
+                    {
+                        g.desc(input).gpuFlat = true;
+                        changed               = true;
                     }
                 }
                 if (!changed)

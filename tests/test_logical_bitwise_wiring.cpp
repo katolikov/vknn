@@ -509,9 +509,10 @@ TEST(IntegerPins, Int64GraphInputPinsThroughUnsqueeze) {
 }
 
 TEST(IntegerPins, Int64GraphInputPinsThroughIntegerCastIntoMod) {
-    // ids -> Cast(INT32) -> Mod(fmod 0): the Cast's operand is followed to the graph input. The Cast
-    // keeps the channel count, so the layout pass leaves ids and the Cast NC4HW4 and converts to flat in
-    // front of Mod; those NC4HW4 hops are written by no fp16-only kernel and are pinned too.
+    // ids -> Cast(INT32) -> {Mod(fmod 0), graph output}: the Cast's operand is followed to the graph
+    // input. The Cast keeps the NC4HW4 packing and its output is also a graph output, so the layout pass
+    // leaves ids and the Cast NC4HW4 and converts to flat in front of Mod; those NC4HW4 hops are written
+    // by no fp16-only kernel and are pinned too.
     Graph    g;
     TensorId ids        = addInput(g, "ids", {1, 8}, DType::Int64);
     TensorId narrow     = addTensor(g, "ids_int32", {1, 8});
@@ -521,8 +522,10 @@ TEST(IntegerPins, Int64GraphInputPinsThroughIntegerCastIntoMod) {
     cast.attr.map["to"] = intAttr(kOnnxInt32);
     addNode(g, OpType::Mod, "mod", {narrow, divisor}, {rem});
     addOutput(g, rem);
+    addOutput(g, narrow);
 
     planFlatLayoutAndStorage(g, "", nullptr);
+    EXPECT_FALSE(g.desc(ids).gpuFlat) << "the case exercises NC4HW4 hops";
     EXPECT_FALSE(g.desc(narrow).gpuFlat) << "the case exercises NC4HW4 hops";
     EXPECT_TRUE(g.desc(ids).storeFp32) << "the integer graph input packs at fp32";
     EXPECT_TRUE(g.desc(narrow).storeFp32);

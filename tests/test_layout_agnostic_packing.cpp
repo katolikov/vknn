@@ -8,13 +8,18 @@
 // shapes with equal element counts: it keeps NC4HW4 exactly when the maps and footprints agree. The
 // graph tests run the session's Vulkan load sequence (planFlatLayoutAndStorage) and the layout pass
 // on graphs where a square matrix gains or loses a leading axis, the shape class whose NC4HW4 byte
-// copy transposes the data while the channel count stays equal.
+// copy transposes the data while the channel count stays equal. The placement tests pin the two
+// decisions an agnostic op that keeps the packing leaves to its neighbors: a graph input read only
+// through such ops by flat readers is packed flat, and such an op abstains from a flexible pointwise
+// unit's layout vote.
 #include "import/nc4_packing.h"
 #include "import/passes.h"
 #include "vknn/graph.h"
 #include "vknn/nchw.h"
 #include <gtest/gtest.h>
+#include <iterator>
 #include <map>
+#include <string>
 #include <vector>
 
 using namespace vknn;
@@ -134,6 +139,13 @@ namespace {
         Attr a;
         a.kind = Attr::Int;
         a.i    = value;
+        return a;
+    }
+
+    Attr intsAttr(std::vector<int64_t> values) {
+        Attr a;
+        a.kind = Attr::Ints;
+        a.ints = std::move(values);
         return a;
     }
 
@@ -515,4 +527,186 @@ TEST(LayoutAgnosticPacking, FlexibleUnitCountsPackingChangingReaderAsFlat) {
     ASSERT_NE(toNc4, nullptr);
     EXPECT_EQ(toNc4->type, OpType::ConvertLayout);
     EXPECT_EQ(countNodes(g, OpType::ConvertLayout), 2) << "the MaxPool input convert and the MaxPool output readback convert";
+}
+
+TEST(LayoutAgnosticPacking, FlexibleUnitLetsPackingPreservingReadersAbstain) {
+    // A flexible fused pointwise unit on [1,4,2,2] between a flat producer (DepthToSpace) and four
+    // readers: two MaxPools (NC4HW4) and two Reshapes to [1,4,4,1] and [1,4,1,4], which keep the
+    // NC4HW4 packing of [1,4,2,2] and each feed a MaxPool. The Reshapes run in whatever layout the unit
+    // picks, so they cast no vote: the two NC4HW4 readers outweigh the flat input and the unit runs
+    // NC4HW4, with the Reshapes and their MaxPools reading it with no convert. Counted as flat readers
+    // the Reshapes would tip the vote to flat and add a convert in front of every MaxPool.
+    Graph             g;
+    TensorId          x          = addInput(g, "x", {1, 16, 1, 1});
+    TensorId          spread     = addTensor(g, "spread", {1, 4, 2, 2});
+    TensorId          rect       = addTensor(g, "rect", {1, 4, 2, 2});
+    TensorId          rect2      = addTensor(g, "rect2", {1, 4, 2, 2});
+    constexpr int64_t kBlockSize = 2;
+    Node             &d2s        = addNode(g, OpType::DepthToSpace, "depth_to_space", {x}, {spread});
+    d2s.attr.map["blocksize"]    = intAttr(kBlockSize);
+    addNode(g, OpType::Relu, "relu_a", {spread}, {rect});
+    addNode(g, OpType::Relu, "relu_b", {rect}, {rect2});
+    for (const char *name: {"pool_a", "pool_b"})
+    {
+        TensorId pooled = addTensor(g, std::string(name) + "_out", {1, 4, 2, 2});
+        addNode(g, OpType::MaxPool, name, {rect2}, {pooled});
+        addOutput(g, pooled);
+    }
+    const Shape           reshapeTargets[] = {{1, 4, 4, 1}, {1, 4, 1, 4}};
+    std::vector<TensorId> reshapedTensors;
+    for (size_t k = 0; k < std::size(reshapeTargets); ++k)
+    {
+        const Shape      &to       = reshapeTargets[k];
+        const std::string suffix   = std::to_string(k);
+        TensorId          target   = addInt64Initializer(g, "target" + suffix, {(int64_t) to.size()}, to);
+        TensorId          reshaped = addTensor(g, "reshaped" + suffix, to);
+        TensorId          pooled   = addTensor(g, "reshaped_pool" + suffix, to);
+        addNode(g, OpType::Reshape, "reshape" + suffix, {rect2, target}, {reshaped});
+        addNode(g, OpType::MaxPool, "reshaped_pool" + suffix, {reshaped}, {pooled});
+        addOutput(g, pooled);
+        reshapedTensors.push_back(reshaped);
+    }
+    fusePointwiseChains(g, true);
+    const Node *unit = producerOf(g, rect2);
+    ASSERT_NE(unit, nullptr);
+    ASSERT_EQ(unit->type, OpType::FusedPointwise) << "the Relu pair fuses into one standalone unit";
+    ASSERT_TRUE(unit->attr.has("pw_steps"));
+
+    insertLayoutConverts(g);
+    expectAgnosticNodesKeepElementPositions(g);
+    unit = producerOf(g, rect2);
+    ASSERT_NE(unit, nullptr);
+    EXPECT_EQ(unit->attr.geti("pw_flat", -1), 0) << "the unit runs NC4HW4";
+    EXPECT_FALSE(g.desc(rect2).gpuFlat);
+    for (TensorId reshaped: reshapedTensors)
+    {
+        EXPECT_FALSE(g.desc(reshaped).gpuFlat) << g.desc(reshaped).name << " adopts the unit's NC4HW4 layout";
+    }
+    for (const char *name: {"pool_a", "pool_b", "reshaped_pool0", "reshaped_pool1"})
+    {
+        const Node *pool = findNode(g, name);
+        ASSERT_NE(pool, nullptr) << name;
+        const Node *source = producerOf(g, pool->inputs[0]);
+        ASSERT_NE(source, nullptr) << name;
+        EXPECT_NE(source->type, OpType::ConvertLayout) << name << " reads its NC4HW4 source directly";
+    }
+    EXPECT_EQ(countNodes(g, OpType::ConvertLayout), 5) << "the flat DepthToSpace output into the unit and the four MaxPool output readback converts";
+}
+
+TEST(LayoutAgnosticPacking, GraphInputReadFlatThroughPackingPreservingOpsPacksFlat) {
+    // A graph input whose only readers are agnostic ops that keep the NC4HW4 packing, followed by flat
+    // readers, is packed flat: the agnostic ops then run flat and no convert is needed anywhere.
+    // [2,4,3,3] -> [1,8,3,3] joins batches of whole channel blocks; [1,4,3,3] -> [1,4,9] -> [1,4,9,1]
+    // keeps N, C and the plane through two hops.
+    struct Case {
+        Shape              input;
+        std::vector<Shape> hops;
+    };
+    const Case cases[] = {
+        {{2, 4, 3, 3}, {{1, 8, 3, 3}}},
+        {{1, 4, 3, 3}, {{1, 4, 9}, {1, 4, 9, 1}}},
+    };
+    for (const Case &c: cases)
+    {
+        Graph    g;
+        TensorId x       = addInput(g, "x", c.input);
+        TensorId current = x;
+        for (size_t k = 0; k < c.hops.size(); ++k)
+        {
+            const Shape      &to     = c.hops[k];
+            const std::string suffix = std::to_string(k);
+            TensorId          target = addInt64Initializer(g, "target" + suffix, {(int64_t) to.size()}, to);
+            TensorId          next   = addTensor(g, "hop" + suffix, to);
+            addNode(g, OpType::Reshape, "reshape" + suffix, {current, target}, {next});
+            current = next;
+        }
+        Shape                permuted(g.desc(current).shape.rbegin(), g.desc(current).shape.rend());
+        std::vector<int64_t> perm;
+        for (size_t axis = permuted.size(); axis-- > 0;)
+        {
+            perm.push_back((int64_t) axis);
+        }
+        TensorId y                 = addTensor(g, "y", permuted);
+        Node    &transpose         = addNode(g, OpType::Transpose, "transpose", {current}, {y});
+        transpose.attr.map["perm"] = intsAttr(perm);
+        addOutput(g, y);
+
+        planFlatLayoutAndStorage(g, "", nullptr);
+        expectAgnosticNodesKeepElementPositions(g);
+        EXPECT_TRUE(g.desc(x).gpuFlat) << shapeStr(c.input) << ": every read of the input ends in a flat reader";
+        EXPECT_TRUE(g.desc(current).gpuFlat) << shapeStr(c.input);
+        EXPECT_EQ(countNodes(g, OpType::ConvertLayout), 0) << shapeStr(c.input);
+    }
+}
+
+TEST(LayoutAgnosticPacking, IntegerGraphInputsReshapedIntoFlatIntegerOpsPackFlat) {
+    // int64 ids [2,128] -> Reshape [256] -> Gather index, and int32 bits [2,8] -> Reshape [16] ->
+    // BitwiseAnd: both reshapes keep the NC4HW4 packing (one channel; whole channel blocks), and both
+    // readers run flat, so each input is packed flat with no convert.
+    {
+        constexpr int64_t kVocabulary = 1000, kEmbeddingWidth = 16;
+        Graph             g;
+        TensorId          ids     = addInput(g, "ids", {2, 128}, DType::Int64);
+        TensorId          target  = addInt64Initializer(g, "target", {1}, {256});
+        TensorId          flatIds = addTensor(g, "flat_ids", {256}, DType::Int64);
+        TensorId          table   = addFloatInitializer(g, "table", {kVocabulary, kEmbeddingWidth}, std::vector<float>(kVocabulary * kEmbeddingWidth, 0.25f));
+        TensorId          y       = addTensor(g, "y", {256, kEmbeddingWidth});
+        addNode(g, OpType::Reshape, "reshape", {ids, target}, {flatIds});
+        Node &gather            = addNode(g, OpType::Gather, "gather", {table, flatIds}, {y});
+        gather.attr.map["axis"] = intAttr(0);
+        addOutput(g, y);
+
+        planFlatLayoutAndStorage(g, "", nullptr);
+        expectAgnosticNodesKeepElementPositions(g);
+        EXPECT_TRUE(g.desc(ids).gpuFlat);
+        EXPECT_TRUE(g.desc(flatIds).gpuFlat);
+        EXPECT_EQ(countNodes(g, OpType::ConvertLayout), 0);
+    }
+    {
+        Graph    g;
+        TensorId bits     = addInput(g, "bits", {2, 8}, DType::Int32);
+        TensorId target   = addInt64Initializer(g, "target", {1}, {16});
+        TensorId flatBits = addTensor(g, "flat_bits", {16}, DType::Int32);
+        TensorId mask     = addInt64Initializer(g, "mask", {1}, {0xFFFF0});
+        TensorId y        = addTensor(g, "y", {16}, DType::Int32);
+        addNode(g, OpType::Reshape, "reshape", {bits, target}, {flatBits});
+        addNode(g, OpType::BitwiseAnd, "bitwise_and", {flatBits, mask}, {y});
+        addOutput(g, y);
+
+        planFlatLayoutAndStorage(g, "", nullptr);
+        expectAgnosticNodesKeepElementPositions(g);
+        EXPECT_TRUE(g.desc(bits).gpuFlat);
+        EXPECT_TRUE(g.desc(flatBits).gpuFlat);
+        EXPECT_TRUE(g.desc(bits).storeFp32);
+        EXPECT_EQ(countNodes(g, OpType::ConvertLayout), 0);
+    }
+}
+
+TEST(LayoutAgnosticPacking, GraphInputWithMixedReadersThroughReshapeKeepsNc4) {
+    // x [2,4,3,3] -> Reshape [1,8,3,3] -> {Transpose (flat), Relu (NC4HW4)}: the reads beyond the
+    // Reshape mix layouts, so the input keeps its NC4HW4 packing (packing it flat would only move the
+    // convert in front of Relu) and the Transpose reads through the one interior convert.
+    Graph    g;
+    TensorId x        = addInput(g, "x", {2, 4, 3, 3});
+    TensorId target   = addInt64Initializer(g, "target", {4}, {1, 8, 3, 3});
+    TensorId joined   = addTensor(g, "joined", {1, 8, 3, 3});
+    TensorId permuted = addTensor(g, "permuted", {1, 3, 3, 8});
+    TensorId rect     = addTensor(g, "rect", {1, 8, 3, 3});
+    addNode(g, OpType::Reshape, "reshape", {x, target}, {joined});
+    Node &transpose            = addNode(g, OpType::Transpose, "transpose", {joined}, {permuted});
+    transpose.attr.map["perm"] = intsAttr({0, 2, 3, 1});
+    addNode(g, OpType::Relu, "relu", {joined}, {rect});
+    addOutput(g, permuted);
+    addOutput(g, rect);
+
+    planFlatLayoutAndStorage(g, "", nullptr);
+    expectAgnosticNodesKeepElementPositions(g);
+    EXPECT_FALSE(g.desc(x).gpuFlat);
+    EXPECT_FALSE(g.desc(joined).gpuFlat);
+    const Node *transposeNode = findNode(g, "transpose");
+    ASSERT_NE(transposeNode, nullptr);
+    const Node *toFlat = producerOf(g, transposeNode->inputs[0]);
+    ASSERT_NE(toFlat, nullptr);
+    EXPECT_EQ(toFlat->type, OpType::ConvertLayout);
+    EXPECT_EQ(countNodes(g, OpType::ConvertLayout), 2) << "the Transpose input convert and the Relu output readback convert";
 }
