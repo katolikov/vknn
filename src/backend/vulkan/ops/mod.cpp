@@ -1,6 +1,7 @@
 // Flat (row-major) ONNX Mod on the GPU with N-D broadcasting at any rank: d = the exact remainder of
 // shaders/mod.comp (fmod 1: std::fmod; fmod 0: the remainder whose sign follows the divisor, 0 for a
-// zero divisor), bit-identical to the CPU oracle. Always runs on the flat path (descriptor row L::Flat).
+// zero divisor), bit-identical to the CPU oracle for operands that are not subnormal (the GPU reads a
+// subnormal operand as zero). Always runs on the flat path (descriptor row L::Flat).
 // Integer operands (modOperandsAreInteger, the resolver the CPU kernel uses) select the kernel's integer
 // mode: operands read as the CPU int64 path reads them and a zero divisor yields 0 in both modes.
 // pinIntegerResultsFp32 pins the output of an integer Mod (fmod 0, or integer operands per the same

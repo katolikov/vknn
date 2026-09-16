@@ -2,7 +2,8 @@
 #define VKNN_NO_RTE 1 // stores round via vknnRte16, the integer-exact store of the flat elementwise kernels
 #include "precision.glsl"
 // Flat broadcasting ONNX Mod: d = modElement(a, b, fmodMode, integerOperands), bit-identical to the
-// CPU oracle (src/backend/cpu/mod_remainder.h).
+// CPU oracle (src/backend/cpu/mod_remainder.h) for operands that are not subnormal; the GPU reads a
+// subnormal operand as zero, so a subnormal dividend or divisor can give another remainder than the CPU.
 //  - Float operands, fmodMode 1 (C remainder): exact std::fmod, the sign of the dividend
 //    (modRemainderFloat).
 //  - Float operands, fmodMode 0 (floor remainder): a zero divisor yields +0; otherwise the exact fmod,

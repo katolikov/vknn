@@ -99,6 +99,14 @@ information at the clamp. Such a model wants fp32 storage — `Precision::High`,
 with its tensors named in `Config::fp32Tensors` — for full accuracy; at `Low` it stays finite but
 approximate on the overflowing tensors.
 
+**The GPU reads a subnormal operand as zero.** A float whose magnitude is below the smallest normal fp32
+value (about 1.18e-38) acts as zero in the GPU kernels at every precision tier, while the CPU oracle
+computes with its exact value. An op whose answer depends on such an operand can differ from the CPU:
+Mod with `fmod` 0 over a = −8.344e-39 and b = 6780.2427 is −0 on the GPU and 6780.2427 on the CPU (the
+floor remainder of a tiny negative dividend), `fmod` 1 over a = 1e-40 and b = 3e-41 is NaN on the GPU (a
+zero divisor) and 9.998e-42 on the CPU, and an Add or Relu drops a subnormal value to zero. The logical
+ops and Cast to BOOL test the bit pattern instead, so a subnormal stays true there.
+
 **Integer values on the GPU ride float lanes, exact only within ±2^24.** The GPU stores every tensor as
 fp16 or fp32 floats. An fp32 lane holds every integer within ±2^24 (fp16: ±2^11, saturating at 65504),
 so the load-time `pinIntegerResultsFp32` pass keeps integer regions at fp32 storage at every precision
@@ -301,7 +309,7 @@ with `Status::Unsupported`.
 |------|--------|
 | Batch / shapes | Resolved at plan time. Dynamic shapes supported via **declared plan buckets** (`--bucket` at compile, `Session::prepareShapes()` at run on ONNX sessions); fixed-shape path unchanged and zero-cost (one bucket). A dynamic non-batch axis with no declared shape is a hard error, not a silent `1x1` plan |
 | NPU / accelerator | None; Vulkan + CPU only (pluggable — see adding-a-backend.md) |
-| fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum |
+| fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum; subnormal operands read as zero on the GPU |
 | Integer values | GPU float lanes, exact within ±2^24 (integer regions pinned to fp32 storage at load); int64 `Div` and int64-base `Pow` keep the exact CPU op |
 | Kernels | Beats MNN-Vulkan everywhere; trails MNN-OpenCL-tuned on ResNet-50 (~15%, CLBlast-autotuned GEMM); tiled-GEMM Winograd F(2,3) is the default; no coopmat path (extension absent on the target driver) |
 | Host overhead | NC4HW4 pack/unpack at the I/O boundary (1–3% of the run wall on the classifier CNNs; 9–15% on large-image I/O such as YOLOv8n); a whole-GPU plan converts 8-bit / rank-4 fp32 inputs on the GPU and downloads flat outputs at declared dtype |
