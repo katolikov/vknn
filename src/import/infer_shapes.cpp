@@ -308,6 +308,7 @@ namespace vknn {
                 case OpType::ScatterND:      // same shape as data (input[0])
                 case OpType::ChannelShuffle: // channel permutation: same shape as input
                 case OpType::FusedPointwise: // per-element chain: same shape/dtype as the primary input
+                case OpType::BitwiseNot:     // elementwise complement: same shape and integer dtype as input
                     SH(o)           = SH(nd.inputs[0]);
                     g.desc(o).dtype = g.desc(nd.inputs[0]).dtype;
                     break;
@@ -324,13 +325,88 @@ namespace vknn {
                     }
                     break;
                 }
+                case OpType::Not: {
+                    // Elementwise boolean NOT: same shape as the input. The dtype is deliberately NOT
+                    // copied: a bool graph input is UInt8, and the fp32 1.0/0.0 result must stay a float
+                    // tensor so downstream pointwise fusion still accepts it.
+                    if (nd.inputs.empty() || nd.inputs[0] == kNoTensor)
+                    {
+                        break;
+                    }
+                    SH(o) = SH(nd.inputs[0]);
+                    break;
+                }
+                case OpType::ArgMax:
+                case OpType::ArgMin: {
+                    // The input shape with `axis` set to 1 (keepdims, the default) or removed; an empty
+                    // result becomes {1} (the IR has no rank-0 activations, Reduce/Det convention). The
+                    // indices are int64 regardless of the data dtype (TopK convention): the session
+                    // readback and both dtype lattices key off this stamp. `axis` is a scalar attribute
+                    // in every opset. A rank-0 input or an out-of-range axis leaves the output
+                    // unresolved; the kernels report both as InvalidArgument.
+                    static constexpr int64_t kOnnxDefaultAxis     = 0;
+                    static constexpr int64_t kOnnxDefaultKeepDims = 1;
+                    if (nd.inputs.empty() || nd.inputs[0] == kNoTensor)
+                    {
+                        break;
+                    }
+                    const Shape &a = SH(nd.inputs[0]);
+                    if (a.empty())
+                    {
+                        break;
+                    }
+                    const int64_t rank = (int64_t) a.size();
+                    int64_t       axis = nd.attr.geti("axis", kOnnxDefaultAxis);
+                    if (axis < -rank || axis >= rank)
+                    {
+                        break;
+                    }
+                    if (axis < 0)
+                    {
+                        axis += rank;
+                    }
+                    const bool keepDims = nd.attr.geti("keepdims", kOnnxDefaultKeepDims) != 0;
+                    Shape      out;
+                    for (int64_t d = 0; d < rank; ++d)
+                    {
+                        if (d != axis)
+                        {
+                            out.push_back(a[(size_t) d]);
+                            continue;
+                        }
+                        if (keepDims)
+                        {
+                            out.push_back(1);
+                        }
+                    }
+                    if (out.empty())
+                    {
+                        out.push_back(1);
+                    }
+                    SH(o)           = out;
+                    g.desc(o).dtype = DType::Int64;
+                    break;
+                }
                 case OpType::Equal:
                 case OpType::Greater:
                 case OpType::GreaterEqual:
                 case OpType::Less:
                 case OpType::LessEqual:
-                case OpType::And: {
+                case OpType::And:
+                case OpType::Or:
+                case OpType::Xor:
+                case OpType::Mod:
+                case OpType::BitShift:
+                case OpType::BitwiseAnd:
+                case OpType::BitwiseOr:
+                case OpType::BitwiseXor: {
+                    // Two-operand NumPy broadcast that leaves the output dtype untouched (a bool result
+                    // is fp32 1.0/0.0; an integer result's storage is decided by the runtime operands).
                     // Same empty-shape discrimination as Binary/Add: scalar only if initializer.
+                    if (nd.inputs.size() < 2)
+                    {
+                        break;
+                    }
                     const Shape &a = SH(nd.inputs[0]);
                     const Shape &b = SH(nd.inputs[1]);
                     if ((a.empty() && !g.isInitializer(nd.inputs[0])) || (b.empty() && !g.isInitializer(nd.inputs[1])))
@@ -896,7 +972,12 @@ namespace vknn {
                     // ([2,224,224,1]*[3]->[2,224,224,3]). An empty shape is a rank-0 scalar only on an
                     // initializer; on a produced tensor it means "not resolved yet" and the output must
                     // stay unresolved (adopting the constant operand's shape here poisons every rank
-                    // downstream of a transformer's MatMul-bias Adds).
+                    // downstream of a transformer's MatMul-bias Adds). A node with other than two operands
+                    // (a variadic Sum/Max/Min lowerVariadicElementwise has not rewritten) stays unresolved.
+                    if (nd.inputs.size() != 2)
+                    {
+                        break;
+                    }
                     const Shape &a = SH(nd.inputs[0]);
                     const Shape &b = SH(nd.inputs[1]);
                     if ((a.empty() && !g.isInitializer(nd.inputs[0])) || (b.empty() && !g.isInitializer(nd.inputs[1])))

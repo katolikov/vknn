@@ -25,6 +25,16 @@ optional GPU kernel. The convention is **one operator per file**. Full writeup:
 5. **`src/backend/vulkan/ops/foo.cpp`** + **`shaders/foo.comp`** — optional GPU kernel, gated by
    `supportsNode`.
 
+A GPU kernel also touches the shared tables: a `vkNodeGate` refusal in `src/core/vk_gates.cpp` for every
+shape or attribute the kernel cannot take (refuse by name there — a `prepare()` throw fails the whole
+session load instead of falling back); an OpDescriptor row in `src/core/op_descriptor.cpp` for a non-NC4HW4
+layout, with `kMaxOp` raised to the new last enumerator (a row past it throws when the table is built)
+and the `OpDescriptor.LayoutClassAgreesWithGpuFlatNode` loop bound in `tests/test_support_report.cpp`
+moved with it; and, for an op whose GPU result holds integers, a seed in `pinIntegerResultsFp32`
+(`src/import/mark_fp32.cpp`) so the integer region stores fp32 (exact within ±2^24; fp16 only within
+±2^11). An op the importer lowers away has no kernel: list it in `CPU_KERNEL_EXEMPT`
+(`tools/check_support_consistency.py`) and in `vkKernelDeclared`'s false list (`Mean`, `InstanceNorm`).
+
 ## CPU op pattern
 
 `src/backend/cpu/ops/foo.cpp` — one struct, one registration:
@@ -104,7 +114,16 @@ synthetic op, build a tiny ONNX + golden with `scripts/yonosplat/op_test.py` and
 Cross-check the shape rule against `onnx.shape_inference` and the values against onnxruntime across the
 op's **attribute matrix** (strides, kernels, `auto_pad`, `output_shape`, `output_padding`, dilation,
 group), not a single config — a one-config test passes even when a variant is unhandled. Add a
-self-contained CPU case to `tests/test_ops.cpp` (build a graph, run, assert against a reference).
+self-contained CPU case under `tests/` (build a graph, run, assert against a reference; every
+`tests/*.cpp` is globbed into `vknn_tests`).
+
+GLSL never runs in the host tests. When the shader's arithmetic is not the CPU op's line for line, keep a
+C++ transcription of the shader functions in the test file, sweep it against the CPU oracle, and add a
+source test that reads `shaders/foo.comp` through `__FILE__` and requires the transcription (and the
+push constants, bindings, spec-constant ids, named constants) to match — skipping only when the sources
+are unreadable. Precedents: `ModOps.ShaderTranscriptionMatchesCompSource`,
+`ArgExtremeShader.SourceMatchesTranscriptionAndInterface`. A pin or layout test calls
+`planFlatLayoutAndStorage` (the session's load order) rather than one pass alone.
 
 `scripts/yonosplat/op_validate.py` automates the per-op ORT-vs-VKNN-CPU compare.
 `tools/check_support_consistency.py` (run by `scripts/ci_host.sh`) fails when an OpType mapped in

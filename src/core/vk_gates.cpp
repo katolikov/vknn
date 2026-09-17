@@ -5,8 +5,12 @@
 // fallback diagnostics and the support report state WHY a node left the GPU.
 #include "core/vk_gates.h"
 #include "backend/cpu/cpu_backend.h"
+#include "core/arg_extreme_limits.h"
+#include "core/bitwise_attrs.h"
 #include "core/fused_attention.h"
 #include "core/fused_dwpw.h"
+#include "import/integer_elements.h"
+#include "vknn/binary_type.h"
 #include "vknn/dtype.h"
 #include "vknn/node.h"
 
@@ -36,6 +40,7 @@ namespace vknn {
             // Erased/lowered at import; a survivor has no kernel in either backend.
             case OpType::Dropout:
             case OpType::InstanceNorm:
+            case OpType::Mean:
             // ONNX quantized family that still has no direct kernel: recognized at import for precise
             // reporting; execution goes through the import-time dequantize lowering. (Quantize/
             // DequantizeLinear DO have flat kernels — the graph-boundary dequant a genuine int input
@@ -291,9 +296,77 @@ namespace vknn {
             }
             return true;
         }
-        if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual || nd.type == OpType::Less || nd.type == OpType::LessEqual || nd.type == OpType::And)
+        if (nd.type == OpType::Where || nd.type == OpType::Equal || nd.type == OpType::Greater || nd.type == OpType::GreaterEqual || nd.type == OpType::Less || nd.type == OpType::LessEqual || nd.type == OpType::And || nd.type == OpType::Or || nd.type == OpType::Xor || nd.type == OpType::Not)
         {
             // flat broadcasting kernels decode any output rank (geometry in a plan SSBO).
+            return true;
+        }
+        if (nd.type == OpType::Mod || nd.type == OpType::BitwiseAnd || nd.type == OpType::BitwiseOr || nd.type == OpType::BitwiseXor)
+        {
+            // Flat elementwise kernels (broadcasting, any output rank); no attribute or shape limits them.
+            // The bitwise ops, Mod with fmod 0, and Mod with an Int32/Int64-typed operand compute integers,
+            // which pinIntegerResultsFp32 keeps in fp32 storage at load together with their runtime
+            // operands. Mod with fmod 1 on float operands is the C fmod at the node's normal precision.
+            return true;
+        }
+        if (nd.type == OpType::BitShift || nd.type == OpType::BitwiseNot)
+        {
+            // BitShift's direction and both ops' integer width (int_bits / int_signed, absent: 64-bit
+            // signed) select the kernel's arithmetic. ONNX spells the direction exactly "LEFT" or "RIGHT"
+            // (case-sensitive). A node with any other direction or an invalid width stays on the CPU op,
+            // which reports it as InvalidArgument at run.
+            if (nd.type == OpType::BitShift)
+            {
+                if (!bitwise::shiftDirectionValid(nd))
+                {
+                    return refuse(whyNot, std::string("BitShift: ") + bitwise::kDirectionRequirement);
+                }
+            }
+            const char *requirement = nullptr;
+            if (!bitwise::integerWidthValid(nd, &requirement))
+            {
+                return refuse(whyNot, std::string(opTypeName(nd.type)) + ": " + requirement);
+            }
+            return true;
+        }
+        if (nd.type == OpType::ArgMax || nd.type == OpType::ArgMin)
+        {
+            // Per-slice index selection along `axis` (flat row-major). The static plan sizes the output
+            // from the resolved input shape and the kernel scans a non-empty axis, so an unresolved
+            // shape, a rank-0 input, an out-of-range axis or a zero-extent axis stays on the CPU op
+            // (which reports the three invalid forms as InvalidArgument). The kernel addresses its
+            // buffers in int32 and stores fp32 indices, so a geometry past either limit
+            // (core/arg_extreme_limits.h, the same rule the kernel's plan enforces) stays on the CPU op,
+            // which addresses and indexes in int64.
+            const std::string op = opTypeName(nd.type);
+            if (nd.inputs.empty() || nd.inputs[0] == kNoTensor)
+            {
+                return refuse(whyNot, op + ": missing data input");
+            }
+            const Shape &in = g.desc(nd.inputs[0]).shape;
+            if (in.empty())
+            {
+                // An empty shape is a rank-0 value only on an initializer; on an activation it is unresolved.
+                return refuse(whyNot, op + (g.isInitializer(nd.inputs[0]) ? ": rank-0 input" : ": unresolved input shape"));
+            }
+            const int64_t rank = (int64_t) in.size();
+            int64_t       axis = nd.attr.geti("axis", 0);
+            if (axis < -rank || axis >= rank)
+            {
+                return refuse(whyNot, op + ": axis out of range");
+            }
+            if (axis < 0)
+            {
+                axis += rank;
+            }
+            if (in[(size_t) axis] == 0)
+            {
+                return refuse(whyNot, op + ": zero-extent axis");
+            }
+            if (const char *limit = argExtremeGpuGeometryRefusal(argExtremeGeometry(in, axis)))
+            {
+                return refuse(whyNot, op + ": " + limit);
+            }
             return true;
         }
         if (nd.type == OpType::FusedAttention)
@@ -389,8 +462,9 @@ namespace vknn {
             // int64 -> FLOAT/FLOAT16/DOUBLE, INT32, INT64: the shape-arithmetic targets, exact in the
             // compute float. int64 -> INT8 (3) / UINT8 (2): cast.comp narrows to match the CPU Cast op
             // followed by the readback narrowing bit-for-bit (INT8 modulo-wrap, UINT8 saturate); the
-            // narrowed value is small and exact in fp16/fp32. int64 -> BOOL (9): cast.comp truncates and
-            // clamps to [0,1], bit-identical to the CPU op for the {0,1} mask tensors this targets.
+            // narrowed value is small and exact in fp16/fp32. int64 -> BOOL (9): cast.comp's BOOL mode
+            // stores 1 for any nonzero value and 0 for zero, bit-identical to the CPU op for every int64
+            // input (a nonzero int64 packs to a nonzero fp32/fp16 lane: its magnitude is at least 1).
             if (to == 1 || to == 10 || to == 11 || to == 6 || to == 7 || to == 2 || to == 3 || to == 9)
             {
                 return true;
@@ -537,11 +611,34 @@ namespace vknn {
         // flat kernel (chosen by the layout pass) does everything else incl. constant operands.
         if (nd.type == OpType::Add || nd.type == OpType::Binary)
         {
-            if (nd.inputs.size() == 2)
+            if (nd.inputs.size() != 2)
             {
-                return true;
+                return refuse(whyNot, std::string(opTypeName(nd.type)) + ": input count != 2");
             }
-            return refuse(whyNot, std::string(opTypeName(nd.type)) + ": input count != 2");
+            // An int64 operand makes the CPU op compute exact integer Div and Pow (int64_arithmetic.h): a
+            // quotient truncated toward zero, and a power typed by its int64 base (2^-1 == 0). The GPU
+            // kernels divide and raise in float (7 / 2 == 3.5, 2^-1 == 0.5), so those nodes keep the CPU
+            // op. Whether an operand is int64 is the CPU's runtime storage choice, which a dtype label
+            // records only on graph inputs, initializers and stamped intermediates, so it is resolved
+            // from the producers (ElementFact::Int64Storage: a Shape, a Cast to an integer type, an int64
+            // Add or bitwise result, carried through the movement ops). A float base raised to an int64
+            // exponent is a float power on both backends and stays on the GPU; Add/Sub/Mul/Max/Min yield
+            // the integer result whenever the operands and the result fit the float lane exactly.
+            if (nd.type == OpType::Binary && ((BinaryType) nd.subOp == BinaryType::Div || (BinaryType) nd.subOp == BinaryType::Pow))
+            {
+                ElementFactResolver int64Storage(g, ElementFact::Int64Storage);
+                const BinaryType    op       = (BinaryType) nd.subOp;
+                const bool          lhsInt64 = int64Storage.holds(nd.inputs[0]);
+                if (op == BinaryType::Div && (lhsInt64 || int64Storage.holds(nd.inputs[1])))
+                {
+                    return refuse(whyNot, "Binary: integer Div on an int64 operand");
+                }
+                if (op == BinaryType::Pow && lhsInt64)
+                {
+                    return refuse(whyNot, "Binary: integer Pow on an int64 base");
+                }
+            }
+            return true;
         }
         // Conv: the GPU kernels cover group == 1 (dense) and pure depthwise (group == Cin == Cout).
         // A general grouped conv (1 < group < Cin, e.g. ResNeXt cardinality, and the channel-multiplier

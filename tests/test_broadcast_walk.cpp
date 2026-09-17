@@ -2,11 +2,19 @@
 // index unravel the CPU elementwise ops are specified against: for output axis d with row-major
 // stride `prod(out[d+1..])`, the operand offset is sum_d ((lin / stride_d) % out[d]) * ostr[d].
 // Any drift here silently changes which element an op reads, so the equivalence is pinned here on
-// broadcast patterns of every rank the ops see.
+// broadcast patterns of every rank the ops see. broadcastOutputShape, the output-shape rule of the same
+// ops, is pinned too, and every registered two-operand elementwise kernel (and Where) refuses operand shapes
+// that do not broadcast instead of walking past the smaller operand.
 #include "backend/cpu/broadcast.h"
+#include "backend/cpu/cpu_backend.h"
+#include "core/bitwise_attrs.h"
+#include "vknn/binary_type.h"
+#include "vknn/graph.h"
 #include "vknn/shape.h"
 #include <cstdint>
+#include <cstring>
 #include <gtest/gtest.h>
+#include <string>
 #include <vector>
 
 using namespace vknn;
@@ -106,5 +114,149 @@ TEST(BroadcastWalk, SeekMatchesSequentialAdvance) {
         }
         ASSERT_EQ(seeked.offset(0), swept.offset(0)) << "start=" << start;
         ASSERT_EQ(seeked.offset(1), swept.offset(1)) << "start=" << start;
+    }
+}
+
+namespace {
+
+    Node broadcastNode(OpType type, const std::string &name, size_t operandCount) {
+        Node node;
+        node.type = type;
+        node.name = name;
+        for (size_t operand = 0; operand < operandCount; ++operand)
+        {
+            node.inputs.push_back((TensorId) operand);
+        }
+        node.outputs = {(TensorId) operandCount};
+        return node;
+    }
+
+    RtTensor floatOperand(const Shape &shape) {
+        RtTensor tensor;
+        tensor.shape = shape;
+        tensor.dtype = DType::Float32;
+        tensor.host.resizeElems(numElements(shape), DType::Float32);
+        return tensor;
+    }
+
+    RtTensor int64Operand(const Shape &shape) {
+        RtTensor tensor;
+        tensor.shape = shape;
+        tensor.dtype = DType::Int64;
+        tensor.host.resizeElems(numElements(shape), DType::Int64);
+        return tensor;
+    }
+
+    // Run the registered CPU kernel of `node` over `operands` (bound to tensors 0..n-1, the output after
+    // them) and return the InvalidArgument message it throws, or an empty string when it does not throw
+    // one.
+    std::string invalidArgumentMessage(const Node &node, std::vector<RtTensor> operands) {
+        operands.emplace_back();
+        Graph       g;
+        Config      cfg;
+        ExecContext ctx;
+        ctx.pool   = &operands;
+        ctx.graph  = &g;
+        ctx.config = &cfg;
+        auto op    = CpuOpRegistry::instance().create(node.type);
+        if (!op)
+        {
+            ADD_FAILURE() << "no CPU kernel for " << opTypeName(node.type);
+            return {};
+        }
+        try
+        { op->run(node, ctx); } catch (const Error &error)
+        {
+            if (error.status() == Status::InvalidArgument)
+            {
+                return error.what();
+            }
+            ADD_FAILURE() << opTypeName(node.type) << " threw " << error.what();
+        }
+        return {};
+    }
+
+} // namespace
+
+TEST(BroadcastOutputShape, RightAlignsStretchesUnitAxesAndKeepsZeroExtents) {
+    const Node node = broadcastNode(OpType::Add, "add", 2);
+    EXPECT_EQ(cpu::broadcastOutputShape(node, {2, 3}, {3}), (Shape {2, 3}));
+    EXPECT_EQ(cpu::broadcastOutputShape(node, {2, 1, 4}, {3, 1}), (Shape {2, 3, 4}));
+    EXPECT_EQ(cpu::broadcastOutputShape(node, {}, {5}), (Shape {5}));
+    EXPECT_EQ(cpu::broadcastOutputShape(node, {}, {}), (Shape {}));
+    EXPECT_EQ(cpu::broadcastOutputShape(node, {0, 3}, {1, 3}), (Shape {0, 3}));
+    EXPECT_EQ(cpu::broadcastOutputShape(node, {1}, {0}), (Shape {0}));
+}
+
+TEST(BroadcastOutputShape, ShapesThatDoNotBroadcastThrowNamingTheNodeAndAxis) {
+    const Node node = broadcastNode(OpType::BitwiseAnd, "mask", 2);
+    for (const auto &[shapeA, shapeB]: std::vector<std::pair<Shape, Shape>> {{{3}, {4}}, {{2, 3}, {2}}, {{0}, {3}}})
+    {
+        try
+        {
+            cpu::broadcastOutputShape(node, shapeA, shapeB);
+            ADD_FAILURE() << shapeStr(shapeA) << " and " << shapeStr(shapeB) << " must not broadcast";
+        } catch (const Error &error)
+        {
+            EXPECT_EQ(error.status(), Status::InvalidArgument);
+            EXPECT_NE(std::string(error.what()).find("BitwiseAnd 'mask'"), std::string::npos) << error.what();
+            EXPECT_NE(std::string(error.what()).find("do not broadcast (axis"), std::string::npos) << error.what();
+        }
+    }
+}
+
+TEST(BroadcastOutputShape, EveryBroadcastingKernelRefusesShapesThatDoNotBroadcast) {
+    // [3] against [4]: a stride walk over the output [4] would read x[3], past the 3-element operand.
+    struct KernelCase {
+        OpType type;
+        int    subOp;
+        bool   int64Operands;
+    };
+    const std::vector<KernelCase> cases {
+        {OpType::Add, 0, false},
+        {OpType::Add, 0, true},
+        {OpType::Binary, (int) BinaryType::Mul, false},
+        {OpType::Binary, (int) BinaryType::Div, true},
+        {OpType::Equal, 0, false},
+        {OpType::Greater, 0, false},
+        {OpType::GreaterEqual, 0, false},
+        {OpType::Less, 0, false},
+        {OpType::LessEqual, 0, false},
+        {OpType::And, 0, false},
+        {OpType::Or, 0, false},
+        {OpType::Xor, 0, false},
+        {OpType::Mod, 0, true},
+        {OpType::BitwiseAnd, 0, true},
+        {OpType::BitwiseOr, 0, true},
+        {OpType::BitwiseXor, 0, true},
+        {OpType::BitShift, 0, true},
+        {OpType::BitShift, 0, false},
+    };
+    const Shape smaller {3}, larger {4};
+    for (const KernelCase &kernelCase: cases)
+    {
+        Node node  = broadcastNode(kernelCase.type, "op", 2);
+        node.subOp = kernelCase.subOp;
+        if (kernelCase.type == OpType::BitShift)
+        {
+            Attr direction;
+            direction.kind                         = Attr::String;
+            direction.str                          = bitwise::kDirectionLeft;
+            node.attr.map[bitwise::kDirectionAttr] = direction;
+        }
+        auto operand = [&](const Shape &shape) {
+            return kernelCase.int64Operands ? int64Operand(shape) : floatOperand(shape);
+        };
+        const std::string message = invalidArgumentMessage(node, {operand(smaller), operand(larger)});
+        EXPECT_NE(message.find("do not broadcast"), std::string::npos) << opTypeName(kernelCase.type) << " int64=" << kernelCase.int64Operands << ": " << message;
+    }
+    for (bool int64Values: {false, true})
+    {
+        const Node where = broadcastNode(OpType::Where, "select", 3);
+        auto       value = [&](const Shape &shape) {
+            return int64Values ? int64Operand(shape) : floatOperand(shape);
+        };
+        const std::string message = invalidArgumentMessage(where, {floatOperand({1}), value(smaller), value(larger)});
+        EXPECT_NE(message.find("do not broadcast"), std::string::npos) << "Where int64=" << int64Values << ": " << message;
     }
 }

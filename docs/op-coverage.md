@@ -15,8 +15,9 @@ engine does **not** run are data-dependent control flow — `Loop`, `If`, `NonMa
 ops that the import passes const-fold away before planning (`Shape`, `Constant`, `EyeLike`), so no
 runtime kernel is dispatched at all. A small number of ops have a GPU kernel but fall back to the CPU
 oracle on a specific input class the kernel cannot represent (an int64→narrow-integer `Cast`, a
-runtime-`k` `TopK`, an unresolved-shape `ConstantOfShape` / `Range`); these are called out per row
-below.
+runtime-`k` `TopK`, an unresolved-shape `ConstantOfShape` / `Range`, an int64 `Div` or int64-base
+`Pow`, an `ArgMax` / `ArgMin` past the kernel's addressing or exact-index range); these are called out
+per row below.
 
 To generate the exact per-node backend assignment for a given model — the ground truth this table
 summarizes — run `vknn_compile model.onnx out.vxm --support-report report.json` (the report comes
@@ -41,11 +42,60 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 |---|---|---|---|
 | Unary family | ✅ | ✅ | Sigmoid, Tanh, HardSwish, HardSigmoid, LeakyRelu, Elu, Abs, Neg, Exp, Log, Sqrt, Floor, Ceil, Relu, SiLU, Erf, Cos, Sin, Reciprocal, Softplus, Round, Sign, and an internal Trunc (created only by the float→int→float Cast fold `foldIntRoundtripCast`, not parsed from ONNX) |
 | Det | ✅ | ✅ | Batched square-matrix determinant `[..., n, n] → [...]`; GPU covers n ≤ 4 by fixed-order cofactor expansion (bitwise-equal to the CPU oracle in fp32) and 5 ≤ n ≤ 8 by in-register partial-pivot LU (deterministic fixed order, incl. the permutation sign); only n > 8 — no known real model — takes the CPU double-precision LU via a named gate |
-| Binary family | ✅ | ✅ | Mul, Sub, Div, Max, Min, Pow, Add — same-shape, channel-broadcast (SE), and general NumPy broadcast on the flat path |
+| Binary family | ✅ | ✅ | Mul, Sub, Div, Max, Min, Pow, Add — same-shape, channel-broadcast (SE), and general NumPy broadcast on the flat path. On int64 operands the CPU op is exact two's-complement arithmetic: Add/Sub/Mul wrap modulo 2^64, Div truncates toward zero (x / 0 = 0, INT64_MIN / −1 = INT64_MIN), Pow on an int64 base is an integer power (a negative exponent gives 1 for base 1, ±1 for base −1, else 0; a fractional float exponent takes the fp64 power truncated to int64). The GPU kernels divide and raise in float, so a Div with an Int64-typed operand and a Pow with an Int64-typed base keep the CPU op (see [Integer values](#integer-values)); a float base raised to an int64 exponent stays on the GPU |
+| Sum / Mean / variadic Max, Min | lowered | lowered | `Sum` imports as Add and `Max` / `Min` as Binary; one of them with an operand count other than 2, and every `Mean`, is rewritten at import by `lowerVariadicElementwise` (before shape inference): 1 operand → Identity, N ≥ 2 → a left fold `op(op(x0, x1), x2)…` of 2-input nodes whose last step writes the original output (pairwise NumPy broadcasting). `Mean` is the Add fold followed by one Mul by a rank-0 fp32 initializer holding `1.0f / N` — ONNX Runtime's CPU Mean, bit-identical to it. 0 operands is an import error. `OpType::Mean` has no kernel; a `.vxm` whose graph still carries an unlowered variadic node fails to load with a recompile message |
 | Relu / Relu6 / Clip | ✅ | ✅ | standalone, and fused into the producing Conv/Gemm |
 | PRelu | ✅ | ✅ | per-channel slope |
 | Where / Equal / Greater / GreaterEqual / Less / LessOrEqual | ✅ | ✅ | flat broadcast (fp32 + int64) |
-| And / IsNaN | ✅ | ✅ | boolean AND with NumPy broadcast / elementwise NaN test — bool results as 1.0/0.0, own flat kernels (not pointwise-fusion members) |
+| And / Or / Xor / Not / IsNaN | ✅ | ✅ | boolean AND / OR / XOR with NumPy broadcast (a 0 extent broadcasts to 0), elementwise NOT and NaN test — an operand is true iff it is nonzero (NaN, ±inf and subnormals are true, +0 and −0 false, int64 read exactly); bool results as 1.0/0.0 at the node's normal precision, own flat kernels (not pointwise-fusion members). The Or/Xor/Not shaders test the IEEE bit pattern rather than a float compare, so NaN reads true on every driver. A nonzero value too small for fp16 storage is already 0 in an fp16 tensor and reads false there; `Precision::High` keeps it |
+| Mod | ✅ | ✅ | NumPy broadcast. `fmod` 0 (default) is the floor remainder (the divisor's sign), `fmod` 1 the C `fmod` (the dividend's sign). Float operands: the GPU computes `std::fmod` exactly by binary long division (bit-identical to the CPU for operands that are not subnormal, never `a − b·trunc(a/b)`; the GPU reads a subnormal operand as zero, see limitations.md); a NaN operand or an infinite dividend gives the canonical quiet NaN, under `fmod` 1 a finite dividend over an infinite divisor is the dividend, a zero divisor gives NaN under `fmod` 1 and +0 under `fmod` 0. Integer operands — resolved from the graph by `modOperandsAreInteger`: an Int64/Int32/Int8/UInt8-typed operand or result, or an operand written by a Cast to an integer type, Shape, ArgMax/ArgMin, TopK indices, an integer ConstantOfShape or a bitwise op, through value-preserving hops — take the exact int64 remainder on both backends: x mod 0 = 0 in both modes, INT64_MIN mod −1 = 0. `fmod` 0 and integer Mods run on fp32-pinned storage; `fmod` 1 on floats runs at the node's precision |
+| BitShift | ✅ | ✅ | NumPy broadcast; `direction` is exactly `LEFT` or `RIGHT` (any other spelling keeps the CPU op, whose run fails with InvalidArgument). At the operand width `int_bits`: a shift count outside [0, `int_bits`) gives 0; the operand's low `int_bits` bits shift logically, LEFT keeping the low `int_bits` bits (uint8 200 << 1 = 144). Integer semantics per [Integer values](#integer-values) |
+| BitwiseAnd / BitwiseOr / BitwiseXor | ✅ | ✅ | NumPy broadcast; two's-complement int64 `&` / `\|` / `^` on the CPU. The GPU kernel applies the operator in int32 (operands clamped to the int32 range, NaN reads 0), equal to the CPU result for operands in the int32 range |
+| BitwiseNot | ✅ | ✅ | same shape; a signed type (`int_signed` 1) or a 64-bit width is `~v`, an unsigned type narrower than 64 bits keeps the low `int_bits` bits of `~v` (uint8 `~0` = 255) |
+
+### Integer values
+
+The CPU oracle carries INT64 tensors — and UINT32 / UINT64 initializers, a UINT64 at or above 2^63
+keeping its bit pattern — as int64 host storage and computes the integer ops above exactly in int64.
+Every other integer type rides fp32 lanes on the CPU too: INT32 / INT16 / UINT16 / BOOL initializers
+materialize as fp32, INT8 / UINT8 initializers keep 1-byte lanes that the session pool widens to fp32,
+and INT32 / INT8 / UINT8 graph inputs bind as fp32. An op with an Int64 operand stores an int64 result;
+an fp32 lane read as an integer truncates toward zero, NaN reading 0 and out-of-range values saturating
+to the int64 range.
+
+The GPU stores every tensor as fp16 or fp32 float lanes, so an integer value is exact only where the lane
+holds it: every integer within **±2^24** at fp32 (±2^11 at fp16, which saturates at 65504). The load-time
+pass `pinIntegerResultsFp32` pins integer regions to fp32 storage at every precision tier: the outputs of
+ArgMax, ArgMin, BitShift, BitwiseAnd/Or/Xor/Not and a Mod with `fmod` 0 or integer operands, the runtime
+operands of those Mod and bitwise nodes, integer ArgMax/ArgMin/TopK data, every integer arithmetic node
+with its operands (Add, Binary Add/Sub/Mul/Div/Max/Min, Pow of an integer base with its exponent,
+ReduceSum/Max/Min/Prod, Range, Clip, Neg, Abs), the operands and 0/1 result of an Equal / Greater /
+GreaterEqual / Less / LessEqual comparing integers, and the value-preserving region around each (layout
+converts, Identity, metadata reshapes, Cast to an integer type, Where's values, and the movement and
+selection ops Slice, Transpose, Expand, Tile, Split, Gather, Pad, DepthToSpace, ChannelShuffle,
+ScatterND, TopK's values and Concat), so an integer graph input packs at fp32 and an integer result
+reaches a graph output or the next integer op without an fp16 narrowing; a graph output holding integers
+seeds the region too, so a value only movement ops carry to it stays exact. A node reading a constant
+operand through the segment's fp16-filled activation buffer (an NC4HW4 channel Concat with a constant
+part) stays at the segment's precision, and so does every runtime part it reads. Past ±2^24 a GPU result
+rounds while the CPU op stays exact. Two int64 forms keep the CPU op on a GPU plan instead of computing in
+float: a Binary `Div` with an int64 operand and a `Pow` with an int64 base (support-report reasons
+`Binary: integer Div on an int64 operand` / `Binary: integer Pow on an int64 base`). An IR dtype label
+types only graph inputs, graph outputs, initializers and a few stamped intermediates, so whether a tensor
+holds integers, and whether the CPU stores it as int64, is resolved from its producers
+(`import/integer_elements.h`: a Cast to an integer type, Shape, an int64 Add or bitwise result, carried
+through the movement ops); both refusals, the Mod integer mode and pointwise fusion (which never fuses an
+op reading or writing integer values) read that resolution.
+
+BitShift and BitwiseNot results depend on the ONNX element width, which the IR dtype does not record, so
+the ONNX importer stamps two VKNN attributes on those nodes: `int_bits` (8 / 16 / 32 / 64) and
+`int_signed` (0 / 1). They come from the element type of input 0 (BitShift falls back to input 1): a
+declared type (graph input or output, `value_info`, initializer, Constant) wins; otherwise the producer
+decides (Cast → `to`; Shape / Size / ArgMax / ArgMin / NonZero / TopK indices → INT64; the comparison and
+boolean ops → BOOL, read as 8-bit unsigned; any other op → the type of its type-carrying input). An
+unresolved type leaves both absent — 64-bit signed — and logs one warning naming the node. The Vulkan
+gate refuses an invalid width by name (`BitwiseNot: int_bits must be 8, 16, 32 or 64`); the CPU op
+fails the run with InvalidArgument.
 
 ## Transformer / attention
 
@@ -76,13 +126,14 @@ Every operator lives in its own file under `src/backend/{cpu,vulkan}/ops/` (one 
 | Resize / Upsample | ✅ | ✅ | nearest + bilinear, 4 coord modes |
 | GridSample | ✅ | ✅ | bilinear/nearest/cubic; constant or runtime grid (optical-flow warps); under fp16 the grid coordinates are fp16-stored, which bounds sampling accuracy near discontinuities |
 | Reduce (Mean/Sum/Max/Min/Prod/L2) | ✅ | ✅ | arbitrary axes |
-| Cast | ✅ | ✅ | float ↔ float, int → float, and an int64 input to float/INT32/INT64/INT8/UINT8/BOOL on the GPU (the INT8/UINT8/BOOL narrowing matches the CPU op bit-for-bit); an int64 input to INT16/UINT16 or a 32/64-bit unsigned target keeps the exact CPU op |
+| Cast | ✅ | ✅ | float ↔ float, int → float, and an int64 input to float/INT32/INT64/INT8/UINT8/BOOL on the GPU (the INT8/UINT8/BOOL narrowing matches the CPU op bit-for-bit); an int64 input to INT16/UINT16 or a 32/64-bit unsigned target keeps the exact CPU op. Cast to BOOL is a truth test on both backends, not a truncation: 1 for any nonzero value (negative, fractional, ±inf, NaN, subnormal), 0 for +0 and −0 |
 | Pad | ✅ | ✅ | constant / edge / reflect; GPU = flat row-major, static pads (a runtime pad *value* runs on the GPU; a runtime pads *geometry* falls back to CPU) |
 | Shape / Constant / EyeLike | const-fold / ✅ | ✅ | resolved at compile time (const-folded away on the GPU path) |
 | ConstantOfShape | ✅ | ✅ | resolved output size fills on the GPU (int fill carried in compute float, repacked to the declared dtype on readback); an unresolved (data-dependent) output size keeps the CPU op |
 | Range | ✅ | ✅ | resolved output size generates on the GPU (start/limit/delta may be runtime scalars; int ramps carried in compute float, repacked on readback); an unresolved-size range keeps the CPU op |
-| Identity | — | ✅ | rewired to its producer at import (no runtime kernel needed) |
+| Identity | — | ✅ | rewired to its producer at import (no runtime kernel needed); an Identity that copies a graph input, an initializer or another graph output onto a graph output stays as that output's copy and runs on the CPU op |
 | TopK | ✅ | ✅ | k largest/smallest along an axis; values + int64 indices, ties break to the lower index; GPU flat path when k is a const int64 input (or the opset-9 `k` attribute) and the input shape resolves; a runtime k keeps the CPU op |
+| ArgMax / ArgMin | ✅ | ✅ | int64 index of the largest / smallest element along `axis` (default 0; negative counts from the end), `keepdims` (default 1; a rank-1 input with `keepdims` 0 yields `{1}`), `select_last_index` (default 0: a tie keeps the first index; 1: the last). A sequential scan with ONNX Runtime's NaN behaviour: a NaN at index 0 is selected, a NaN anywhere else is never taken (an all-NaN slice yields 0); −0.0 and +0.0 tie; int64 data compares exactly on the CPU. GPU: one flat kernel (`arg_extreme.comp`, op and tie policy as specialization constants) writing fp32-pinned indices and reading the data at its own storage precision — under fp16 storage, values distinct in fp32 can tie and values past 65504 saturate (`Precision::High` keeps the fp32 answer); Int32/Int64-typed data is pinned fp32 and compares exactly within ±2^24. The gate keeps the CPU op for an unresolved or rank-0 input, an out-of-range axis, a zero-extent axis, more than INT32_MAX data elements, or an axis longer than 2^24 + 1 (indices past the exact fp32 range) |
 | Dropout | eliminated | eliminated | inference-mode identity (training_mode absent or constant false, mask output absent or unconsumed) removed at import, consumers rewired to the producer; a consumed mask or a non-constant training_mode is unsupported |
 | InstanceNormalization | lowered | lowered | decomposed at import into spatial ReduceMean + Sub/Mul/Add/Sqrt/Div and a per-channel scale/bias Mul+Add, so it runs wherever those ops run (no dedicated kernel); needs fp32-initializer scale/B of length C and input rank ≥ 3, else the node stays opaque and unsupported |
 
@@ -202,5 +253,5 @@ an ONNX name in `src/core/op.cpp` (`opTypeName` + `opTypeFromOnnx`), a shape rul
 `src/backend/cpu/ops/`. A GPU kernel additionally needs a Vulkan op + GLSL shader in
 `src/backend/vulkan/ops/` + `shaders/`, a capability gate row in `src/core/vk_gates.cpp`
 (`vkKernelDeclared` + `vkNodeGate` — the shape/attribute gate the device and `--support-report`
-share), and a row in the OpDescriptor table (`src/core/op_descriptor.cpp`: `LayoutClass` Flat/Nc4/ShapeDependent plus the `pwMember`/`pwEpilogue` fusion flags) so the layout pass marks it flat; a shape-dependent layout additionally needs a case in `gpuFlatNode` (`src/import/insert_layout_converts.cpp`). See [adding-an-operator.md](adding-an-operator.md) and
+share), and a row in the OpDescriptor table (`src/core/op_descriptor.cpp`: `LayoutClass` Flat/Nc4/ShapeDependent plus the `pwMember`/`pwEpilogue` fusion flags, with `kMaxOp` raised to the new last enumerator) so the layout pass marks it flat; a shape-dependent layout additionally needs a case in `gpuFlatNode` (`src/import/insert_layout_converts.cpp`). An op whose GPU result holds integers that must stay exact seeds `pinIntegerResultsFp32` (`src/import/mark_fp32.cpp`). See [adding-an-operator.md](adding-an-operator.md) and
 [../skills/add-an-operator.md](../skills/add-an-operator.md).

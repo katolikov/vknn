@@ -1,6 +1,9 @@
-// Elementwise binary family (Mul/Sub/Div/Max/Min/Pow) with NumPy-style broadcasting.
+// Elementwise binary family (Mul/Sub/Div/Max/Min/Pow) with NumPy-style broadcasting. An int64 runtime
+// operand selects exact integer arithmetic; a float base with an int64 exponent stays a float power, and
+// an int64 base with a fractional float exponent takes the fp64 power truncated to int64.
 #include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
+#include "backend/cpu/int64_arithmetic.h"
 #include "backend/cpu/parallel.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -48,11 +51,8 @@ namespace vknn {
                     size_t off = rank - s.size();
                     return i < off ? 1 : s[i - off];
                 };
-                for (size_t i = 0; i < rank; ++i)
-                {
-                    int64_t da = dimOf(sa, i), db = dimOf(sb, i);
-                    out[i] = (da == 0 || db == 0) ? 0 : std::max(da, db); // a 0 dim broadcasts to 0 (NumPy), never to 1
-                }
+                // A 0 extent broadcasts to 0; operand shapes that do not broadcast throw.
+                out       = cpu::broadcastOutputShape(node, sa, sb);
                 int64_t n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                 // Per-operand broadcast strides (row-major, built back-to-front). A stride of 0 on a
                 // broadcast axis (operand extent 1 where the output extent is larger) makes every output
@@ -68,19 +68,40 @@ namespace vknn {
                         sB *= dimOf(sb, i);
                     }
                 };
+                // Pow types its result by the BASE (ONNX T), independent of the exponent type (T1): a float
+                // base raised to an int64 exponent is a float power. The exponent converts to fp32, the
+                // value the GPU's float lane carries, and the base is never truncated.
+                if ((BinaryType) node.subOp == BinaryType::Pow && A.dtype != DType::Int64 && B.dtype == DType::Int64)
+                {
+                    float               *y        = cpu::allocOut(Y, out);
+                    const float         *base     = A.host.f32();
+                    const int64_t       *exponent = B.host.i64();
+                    std::vector<int64_t> oa(rank), ob(rank);
+                    strides(oa, ob);
+                    cpu::parallelFor(cpu::threadCount(ctx.config), 0, n, cpu::minChunkForWork(1), [&](int64_t lo, int64_t hi) {
+                        cpu::BroadcastWalk w(out, {oa.data(), ob.data()});
+                        w.seek(lo);
+                        for (int64_t lin = lo; lin < hi; ++lin, w.next())
+                        {
+                            y[lin] = binary(base[w.offset(0)], (float) exponent[w.offset(1)], BinaryType::Pow);
+                        }
+                    });
+                    return;
+                }
                 // Shape arithmetic is int64 (Shape/Gather feed Add/Div/Mul to compute slice/reshape bounds).
                 // Compute it in int64 so const-folding stays exact — reading those bytes as float corrupts
-                // them.
+                // them. Every operation is defined for every operand value (int64_arithmetic.h).
                 if (A.dtype == DType::Int64 || B.dtype == DType::Int64)
                 {
                     int64_t             *y = cpu::allocOutI64(Y, out);
                     std::vector<int64_t> oa(rank), ob(rank);
                     strides(oa, ob);
                     // Read either operand as int64: a genuine Int64 tensor directly, a float tensor
-                    // truncated toward zero. This lets an int64 shape operand mix with a float sibling
-                    // while keeping the result in the exact integer domain.
+                    // truncated toward zero (NaN reads 0, out-of-range values saturate). This lets an int64
+                    // shape operand mix with a float sibling while keeping the result in the exact integer
+                    // domain.
                     auto val = [](const RtTensor &T, int64_t i) {
-                        return T.dtype == DType::Int64 ? T.host.i64()[i] : (int64_t) T.host.f32()[i];
+                        return T.dtype == DType::Int64 ? T.host.i64()[i] : cpu::int64FromFp32Operand(T.host.f32()[i]);
                     };
                     // Walk the output in row-major order, carrying each operand's broadcast source
                     // offset by an odometer carry instead of re-unravelling `lin` per element.
@@ -92,15 +113,15 @@ namespace vknn {
                         switch ((BinaryType) node.subOp)
                         {
                             case BinaryType::Mul:
-                                y[lin] = av * bv;
+                                y[lin] = cpu::wrappingMulInt64(av, bv);
                                 break;
                             case BinaryType::Sub:
-                                y[lin] = av - bv;
+                                y[lin] = cpu::wrappingSubInt64(av, bv);
                                 break;
                             case BinaryType::Div:
-                                // Integer division: guard the divisor so a zero yields 0 rather than a
-                                // hardware trap (the float path relies on IEEE inf/NaN instead).
-                                y[lin] = bv ? av / bv : 0;
+                                // Integer division: a zero divisor yields 0 and INT64_MIN / -1 wraps, never
+                                // a hardware trap (the float path relies on IEEE inf/NaN instead).
+                                y[lin] = cpu::divideInt64(av, bv);
                                 break;
                             case BinaryType::Max:
                                 y[lin] = std::max(av, bv);
@@ -108,8 +129,14 @@ namespace vknn {
                             case BinaryType::Min:
                                 y[lin] = std::min(av, bv);
                                 break;
+                            case BinaryType::Pow:
+                                // The base is int64 here (a float base returned above). An int64 exponent
+                                // is the exact integer power; an fp32 exponent keeps its fraction, which
+                                // the truncated `bv` has dropped (int64_arithmetic.h).
+                                y[lin] = B.dtype == DType::Int64 ? cpu::powInt64(av, bv) : cpu::powInt64Fp32Exponent(av, B.host.f32()[w.offset(1)]);
+                                break;
                             default:
-                                y[lin] = av + bv;
+                                y[lin] = cpu::wrappingAddInt64(av, bv);
                                 break;
                         }
                     }

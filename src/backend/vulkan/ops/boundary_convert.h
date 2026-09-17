@@ -1,11 +1,13 @@
 // GPU conversion between a caller's declared layout/dtype and the device-native boundary buffer, for
 // both declared-format dma-buf zero-copy and the default host-buffer I/O path. One shader source
-// compiled to cross-dtype SPIR-V (the fp32/fp16 pairs plus uint8 source/destination variants); the
-// layout pair is a push constant. The segment owns one instance and records a dispatch per converted
-// boundary tensor (input: staging/imported -> pooled boundary; output: pooled boundary -> staging/imported).
+// compiled to cross-dtype SPIR-V (the fp32/fp16 pairs plus uint8 and int8 source/destination variants,
+// listed in core/boundary_convert_rule.h); the layout pair is a push constant. The segment owns one
+// instance and records a dispatch per converted boundary tensor (input: staging/imported -> pooled
+// boundary; output: pooled boundary -> staging/imported).
 #pragma once
 #include "backend/vulkan/vk_buffer.h"
 #include "backend/vulkan/vk_pipeline.h"
+#include "core/boundary_convert_rule.h"
 #include "vknn/dtype.h"
 #include "vknn/tensor_format.h"
 #include <map>
@@ -18,6 +20,7 @@ namespace vknn {
       public:
         // Record a dispatch reading `src` (srcFmt/srcDt) and writing `dst` (dstFmt/dstDt) for the logical
         // NCHW `shape`. Pipelines are built lazily and cached across runs, keyed by the (src,dst) dtype pair.
+        // Throws Error(Status::Unsupported) for a dtype pair boundary_convert has no variant for.
         void record(VkCommandBuffer cmd, vk::VulkanContext &ctx, vk::PipelineCache *cache, vk::Buffer *src, vk::Buffer *dst, const NCHW &shape, TensorFormat srcFmt, DType srcDt, TensorFormat dstFmt, DType dstDt);
 
       private:

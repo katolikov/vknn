@@ -1,12 +1,14 @@
 #include "vk_segment.h"
-#include "backend/cpu/parallel.h" // cpu::threadCount (host boundary pack/unpack partitioning)
-#include "core/boundary_pack.h"   // parallel canonical<->boundary layout/precision conversion
-#include "core/dispatch_tally.h"  // recorded-dispatch counter + per-node attribution
-#include "core/kv_quant.h"        // int8 KV-cache scheme: eligibility rule + host codec (Hint::KvCacheQuant)
-#include "core/matmul_tile.h"     // vec4-load routing + the activation row-pad rule
-#include "core/matmul_view.h"     // kMmView (a view-addressed MatMul reads its own geometry, never a padded stride)
-#include "core/quant_int4.h"      // kWq (a packed-quantized MatMul has its own operand layout)
-#include "import/passes.h"        // readI64Param (raster-core view-eligibility diagnostic)
+#include "backend/cpu/parallel.h"           // cpu::threadCount (host boundary pack/unpack partitioning)
+#include "boundary_rebind_rule.h"           // two-pass boundary rebind + the recording-stale flag rule
+#include "core/boundary_pack.h"             // parallel canonical<->boundary layout/precision conversion
+#include "core/dispatch_tally.h"            // recorded-dispatch counter + per-node attribution
+#include "core/kv_quant.h"                  // int8 KV-cache scheme: eligibility rule + host codec (Hint::KvCacheQuant)
+#include "core/matmul_tile.h"               // vec4-load routing + the activation row-pad rule
+#include "core/matmul_view.h"               // kMmView (a view-addressed MatMul reads its own geometry, never a padded stride)
+#include "core/quant_int4.h"                // kWq (a packed-quantized MatMul has its own operand layout)
+#include "core/segment_constant_operands.h" // constant operands the segment fills into activation buffers
+#include "import/passes.h"                  // readI64Param (raster-core view-eligibility diagnostic)
 #include "ops/boundary_convert.h"
 #include "vk_backend.h"
 #include "vknn/dtype.h"
@@ -1250,11 +1252,13 @@ namespace vknn {
             env_.gpuTag = tag;
         }
         // Const-folding can leave an initializer as a spatial op's ACTIVATION input[0] (e.g. a baked
-        // image constant fed through Cast->Resize). Such ops read input[0] via env.devBuf(), which
-        // returns null for initializers — they are otherwise consumed only as weights via operandBuf.
-        // Materialize any such constant into an activation buffer packed in its assigned layout so every
-        // devBuf-reading op finds a valid buffer. operandBuf consumers are unaffected: they test
-        // isInitializer first and upload their own flat copy, ignoring this entry.
+        // image constant fed through Cast->Resize), and an NC4HW4 Concat reads every part as an
+        // activation. Such ops read those operands via env.devBuf(), which returns null for initializers
+        // — they are otherwise consumed only as weights via operandBuf. Materialize every such constant
+        // (the slots segmentFilledConstantOperandEnd names, plus the fused residual) into an activation
+        // buffer packed in its assigned layout so every devBuf-reading op finds a valid buffer. operandBuf
+        // consumers are unaffected: they test isInitializer first and upload their own flat copy, ignoring
+        // this entry.
         {
             auto materialize = [&](TensorId t) {
                 if (t == kNoTensor || !g.isInitializer(t) || buffers_.count(t))
@@ -1283,10 +1287,11 @@ namespace vknn {
             };
             for (int ni: idx)
             {
-                const Node &nd = g.nodes[ni];
-                if (!nd.inputs.empty())
+                const Node  &nd        = g.nodes[ni];
+                const size_t filledEnd = segmentFilledConstantOperandEnd(g, nd);
+                for (size_t slot = 0; slot < filledEnd; ++slot)
                 {
-                    materialize(nd.inputs[0]);
+                    materialize(nd.inputs[slot]);
                 }
                 materialize(nd.fusedResidual);
             }
@@ -1314,9 +1319,14 @@ namespace vknn {
         };
         // `g` outlives every prepare() below (it is the bucket's owned graph), so the hook can drop
         // uploaded weight payloads as the ops consume them. Session frees whatever survives.
-        env_.releaseInitializer = cfg.freeWeightsAfterUpload ? std::function<void(TensorId)>([&g](TensorId t) {
+        // An initializer this segment reads at both storage precisions keeps its payload: the reader at the
+        // second precision uploads its own copy from it.
+        const std::set<TensorId> payloadKeptInitializers = initializersReadAtBothPrecisions(g, idx, [this](const Node &nd) {
+            return nodeFp32(nd) ? false : useFp16_;
+        });
+        env_.releaseInitializer = cfg.freeWeightsAfterUpload ? std::function<void(TensorId)>([&g, payloadKeptInitializers](TensorId t) {
             auto it = g.initializers.find(t);
-            if (it == g.initializers.end())
+            if (it == g.initializers.end() || payloadKeptInitializers.count(t))
             {
                 return;
             }
@@ -1336,12 +1346,12 @@ namespace vknn {
         // Memo scoped to this segment's graph; the ops themselves own the buffers, so a weak handle
         // keeps the allocation count identical to the pre-memo path.
         flatWeightByTensor_.clear();
-        env_.lookupFlatWeight = [this](TensorId t) -> std::shared_ptr<vk::Buffer> {
-            auto it = flatWeightByTensor_.find(t);
+        env_.lookupFlatWeight = [this](TensorId t, InitializerDeviceStore store) -> std::shared_ptr<vk::Buffer> {
+            auto it = flatWeightByTensor_.find(InitializerDeviceCopyKey {t, store});
             return it == flatWeightByTensor_.end() ? nullptr : it->second.lock();
         };
-        env_.rememberFlatWeight = [this](TensorId t, std::shared_ptr<vk::Buffer> buffer) {
-            flatWeightByTensor_[t] = buffer;
+        env_.rememberFlatWeight = [this](TensorId t, InitializerDeviceStore store, std::shared_ptr<vk::Buffer> buffer) {
+            flatWeightByTensor_[InitializerDeviceCopyKey {t, store}] = buffer;
         };
         for (int ni: idx)
         {
@@ -1889,6 +1899,7 @@ namespace vknn {
         timedChunks_     = timedChunk;
         recorded_        = true;
         recordedConvert_ = convert_;
+        recordingStale_  = false; // the stream encodes the current bindings, conversions, links, epilogue and chain
         // Snapshot the tally into the segment: the tally belongs to the device context, so the next
         // segment (or plan bucket) to record on it restarts the run and overwrites the table. The
         // profile the run reports must be THIS segment's recording.
@@ -1917,15 +1928,47 @@ namespace vknn {
         //     reads/writes it directly. Re-record the command buffer when the bound-buffer set changes;
         //     the imported buffer is cached by fd, so a reused dma-buf re-records once. Import failure
         //     keeps the pooled buffer (the copy path). Boundary I/O buffers are dedicated (not
-        //     pool-aliased), so swapping them is safe.
+        //     pool-aliased), so swapping them is safe. Every declaration is checked before any binding
+        //     changes, and a change marks recordingStale_ until a recording completes
+        //     (boundary_rebind_rule.h), so the run after one that throws midway re-records against its
+        //     own bindings.
         {
-            bool reRecord = false;
             convert_.clear();
+            // The dma-buf fd a boundary tensor binds this run, or -1 for none.
+            auto boundDmaBufFd = [&](TensorId tid) {
+                // An int8 KV cache cannot bind a caller dma-buf: the fd holds fp16 rows, the resident
+                // buffer int8 codes + side scales. The host seed path quantizes instead.
+                return kvqCaches_.count(tid) ? -1 : ctx.t(tid).dmaBufFd;
+            };
+            auto deviceNativeFormat = [&](TensorId tid) {
+                return g_.desc(tid).gpuFlat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
+            };
+            auto deviceNativeDtype = [&](TensorId tid) {
+                return boundaryDeviceDtype(useFp16_, g_.tensors[tid].storeFp32);
+            };
+            // A declared dtype the GPU cannot convert (no boundary_convert variant for the pair, or an
+            // 8-bit variant on a device without 8-bit storage) is refused by name before anything is
+            // imported or rebound: the fd has no host copy to fall back to.
+            auto refuseUnconvertibleDmaBuf = [&](TensorId tid, bool isInput) {
+                if (buffers_.find(tid) == buffers_.end() || boundDmaBufFd(tid) < 0)
+                {
+                    return;
+                }
+                const RtTensor   &rt         = ctx.t(tid);
+                const auto       &deviceCaps = be_->ctx().caps();
+                const std::string reason     = dmaBufRefusalReason(isInput, rt.dmaBufFormat, rt.dmaBufDtype, deviceNativeFormat(tid), deviceNativeDtype(tid),
+                                                                   deviceCaps.storage8bit, deviceCaps.shaderInt8);
+                if (!reason.empty())
+                {
+                    throw Error(Status::Unsupported, "dma-buf " + std::string(isInput ? "input" : "output") + " '" + g_.tensors[tid].name + "': " + reason);
+                }
+            };
+            // Binds the tensor's buffer for this run; true when the bound buffer changed.
             auto rebind = [&](TensorId tid, bool isInput) {
                 auto bit = buffers_.find(tid);
                 if (bit == buffers_.end())
                 {
-                    return;
+                    return false;
                 }
                 if (!origBoundary_.count(tid))
                 {
@@ -1933,21 +1976,14 @@ namespace vknn {
                 }
                 std::shared_ptr<vk::Buffer> want = origBoundary_[tid];
                 RtTensor                   &rt   = ctx.t(tid);
-                int                         fd   = rt.dmaBufFd;
-                if (fd >= 0 && kvqCaches_.count(tid))
-                {
-                    // An int8 KV cache cannot bind a caller dma-buf: the fd holds fp16 rows, the
-                    // resident buffer int8 codes + side scales. The host seed path quantizes instead.
-                    fd = -1;
-                }
+                const int                   fd   = boundDmaBufFd(tid);
                 if (fd >= 0)
                 {
-                    bool         flat    = g_.desc(tid).gpuFlat;
-                    TensorFormat devFmt  = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
-                    DType        devDt   = useFp16_ ? DType::Float16 : DType::Float32;
+                    TensorFormat devFmt  = deviceNativeFormat(tid);
+                    DType        devDt   = deviceNativeDtype(tid);
                     TensorFormat declFmt = rt.dmaBufFormat;
                     DType        declDt  = rt.dmaBufDtype;
-                    bool         direct  = declFmt == TensorFormat::Auto || (declFmt == devFmt && declDt == devDt);
+                    bool         direct  = dmaBufBindsDirectly(declFmt, declDt, devFmt, devDt);
                     NCHW         x       = NCHW::from(rt.shape.empty() ? g_.tensors[tid].shape : rt.shape);
                     // Import sized for what the dma-buf actually holds: the device-native bytes for a
                     // direct bind, the declared-format bytes for a convert. Re-import when this
@@ -1992,26 +2028,21 @@ namespace vknn {
                         }
                     }
                 }
-                if (bit->second != want)
+                if (bit->second == want)
                 {
-                    bit->second = want;
-                    reRecord    = true;
+                    return false;
                 }
+                bit->second = want;
+                return true;
             };
-            for (TensorId tid: boundaryInputs)
-            {
-                rebind(tid, true);
-            }
-            for (TensorId tid: boundaryOutputs)
-            {
-                rebind(tid, false);
-            }
+            rebindBoundaryTensors(boundaryInputs, boundaryOutputs, refuseUnconvertibleDmaBuf, rebind, recordingStale_);
             // Default-path GPU image conversion: for each 8-bit graph input NOT bound to a dma-buf this
             // run (and not already handled by the dma-buf rebind), stand up a persistent staging buffer
             // and a boundary_convert(staging[declared] -> boundary[device-native]) so the raw caller
             // bytes are converted on the GPU. The staging buffer's stable identity keeps this a one-time
             // re-record. Skipped when a dma-buf fd is present (zero-copy wins) or the graph is not
-            // whole-GPU (ioGpuConvert off -> host packToBuffer path).
+            // whole-GPU (ioGpuConvert off -> host packToBuffer path). A raw 8-bit input left unstaged
+            // (a device without 8-bit storage) is decoded by the host upload below.
             if (ioGpuConvert)
             {
                 for (TensorId tid: boundaryInputs)
@@ -2033,10 +2064,12 @@ namespace vknn {
                     // converted input is byte-identical to the host pack. The rank-4 gate keeps the win
                     // on the large image inputs it targets (a [N,C,H,W] feature map) and off the tiny
                     // per-token fp32 boundaries (inputs_embeds [1,S,H], 1-D/2-D masks and index vectors,
-                    // scalars) where it is a no-win; Int8/Int32/Int64 have no boundary_convert variant.
+                    // scalars) where it is a no-win. The raw-byte dtypes are the ones the Session keeps
+                    // undecoded (boundaryStagesRawInputBytes); Int32/Int64 arrive host-decoded or as
+                    // int64 lanes and take the host upload.
                     const std::vector<int64_t> &inShape   = rt.shape.empty() ? g_.tensors[tid].shape : rt.shape;
                     const bool                  fp32Image = rt.dtype == DType::Float32 && inShape.size() == 4;
-                    if (rt.dtype != DType::UInt8 && rt.dtype != DType::Int8 && !fp32Image)
+                    if (!boundaryStagesRawInputBytes(rt.dtype) && !fp32Image)
                     {
                         continue;
                     }
@@ -2054,12 +2087,17 @@ namespace vknn {
                     }
                     bool         flat    = g_.desc(tid).gpuFlat;
                     TensorFormat devFmt  = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
-                    DType        devDt   = (useFp16_ && !g_.tensors[tid].storeFp32) ? DType::Float16 : DType::Float32;
+                    DType        devDt   = boundaryDeviceDtype(useFp16_, g_.tensors[tid].storeFp32);
                     TensorFormat declFmt = TensorFormat::NCHW; // caller image layout
                     DType        declDt  = rt.dtype;
                     NCHW         x       = NCHW::from(rt.shape.empty() ? g_.tensors[tid].shape : rt.shape);
                     auto        &st      = stagingIn_[tid];
                     size_t       need    = (size_t) (formatElems(declFmt, x) * dtypeSize(declDt));
+                    const auto  &caps    = be_->ctx().caps();
+                    if (!boundaryConvertDeviceSupports(declDt, devDt, caps.storage8bit, caps.shaderInt8))
+                    {
+                        continue; // no variant this device runs: the host upload decodes the declared bytes
+                    }
                     if (need == 0)
                     {
                         continue; // a zero-dim boundary input has no bytes to stage; vkCreateBuffer(size=0) is invalid -> keep the host path
@@ -2081,29 +2119,29 @@ namespace vknn {
             }
             if (!sameConvert(convert_, recordedConvert_))
             {
-                reRecord = true;
+                recordingStale_ = true;
             }
             if (linksChanged_)
             {
                 // The resident-link set (or a ranges buffer's identity) changed since the last
                 // recording; the command stream must pick up the new link_copy dispatches.
-                linksChanged_ = false;
-                reRecord      = true;
+                linksChanged_   = false;
+                recordingStale_ = true;
             }
             if (argMaxChanged_)
             {
                 // The registered reduction set changed; the recording must append its epilogue.
-                argMaxChanged_ = false;
-                reRecord       = true;
+                argMaxChanged_  = false;
+                recordingStale_ = true;
             }
             if (chainChanged_)
             {
                 // The decode-chain configuration changed; the recording must carry the chained
                 // iteration sequence (or drop back to the single-iteration stream).
-                chainChanged_ = false;
-                reRecord      = true;
+                chainChanged_   = false;
+                recordingStale_ = true;
             }
-            if (reRecord)
+            if (recordingStale_)
             {
                 if (!cmds_.empty())
                 {
@@ -2146,7 +2184,11 @@ namespace vknn {
                 // GPU image convert: raw memcpy the caller's declared bytes into the staging buffer; the
                 // recorded boundary_convert dispatch turns them into the device-native boundary. No host
                 // uint8->fp32->fp16 pack. The convert writes bit->second (the boundary), read by the ops.
-                std::memcpy(sit->second->host(), rt.host.bytes.data(), std::min(sit->second->bytes(), rt.host.bytes.size()));
+                // A short caller buffer leaves the rest of the staging buffer zero (the bindInput rule), so
+                // no earlier run's bytes survive into this one.
+                const size_t stagedBytes = std::min(sit->second->bytes(), rt.host.bytes.size());
+                std::memcpy(sit->second->host(), rt.host.bytes.data(), stagedBytes);
+                std::memset(static_cast<uint8_t *>(sit->second->host()) + stagedBytes, 0, sit->second->bytes() - stagedBytes);
                 rt.deviceValid  = true;
                 rt.deviceFormat = flat ? TensorFormat::NCHW : TensorFormat::NC4HW4;
             } else if (rt.hostValid && !alreadyHere && kvqCaches_.count(tid))
@@ -2159,33 +2201,26 @@ namespace vknn {
                 rt.deviceFormat = TensorFormat::NCHW;
             } else if (rt.hostValid && !alreadyHere)
             {
-                // The Vulkan device represents an integer tensor as its float value (index/shape ops
-                // upload int64 indices decoded to float), but rt.host for an int64/int32 boundary
-                // tensor holds raw integer bytes. packToBuffer reads host as fp32, so decode the
-                // integer host to fp32 first; a Float32 host packs directly. Without this, an int64
-                // boundary input crossing into a Vulkan segment (e.g. attention_mask when a mid-graph
-                // CPU island splits the graph) is reinterpreted as fp32 and comes out ~0.
-                if (rt.dtype == DType::Int64 || rt.dtype == DType::Int32)
+                // The Vulkan device represents every tensor as float lanes (index/shape ops upload
+                // int64 indices decoded to float), but rt.host for a non-fp32 boundary tensor holds its
+                // own dtype's bytes: int64/int32 lanes, or the raw uint8/int8 bytes the Session keeps for
+                // the staging conversion when that conversion did not run. packToBuffer reads host as
+                // fp32, so decode every non-fp32 host to fp32 first with the bindInput decode; a Float32
+                // host packs directly. Without this, an integer boundary input crossing into a Vulkan
+                // segment (e.g. attention_mask when a mid-graph CPU island splits the graph) is
+                // reinterpreted as fp32 and comes out ~0.
+                if (rt.dtype != DType::Float32)
                 {
-                    RtTensor f32 = rt;
-                    f32.dtype    = DType::Float32;
-                    int64_t n    = numElements(rt.shape);
+                    RtTensor      f32     = rt;
+                    const int64_t n       = numElements(rt.shape);
+                    const int64_t decoded = std::min<int64_t>(n, (int64_t) (rt.host.bytes.size() / boundaryHostLaneBytes(rt.dtype)));
+                    f32.dtype             = DType::Float32;
                     f32.host.resizeElems(n, DType::Float32);
                     float *d = f32.host.f32();
-                    if (rt.dtype == DType::Int64)
+                    decodeHostLanesToFloat32(rt.dtype, rt.host.bytes.data(), decoded, d);
+                    if (decoded < n)
                     {
-                        const int64_t *s = rt.host.i64();
-                        for (int64_t i = 0; i < n; ++i)
-                        {
-                            d[i] = (float) s[i];
-                        }
-                    } else
-                    {
-                        const int32_t *s = reinterpret_cast<const int32_t *>(rt.host.bytes.data());
-                        for (int64_t i = 0; i < n; ++i)
-                        {
-                            d[i] = (float) s[i];
-                        }
+                        std::memset(d + decoded, 0, (size_t) (n - decoded) * sizeof(float));
                     }
                     // A storeFp32 boundary (a pinned Gather index) keeps its 4-byte fp32 buffer, so an
                     // integer index above the fp16 range is not narrowed to +inf at upload.

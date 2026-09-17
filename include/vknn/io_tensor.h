@@ -15,7 +15,10 @@ namespace vknn {
     ///    as the boundary GPU buffer, reading an input from it / writing an output into it directly with
     ///    no host buffer. `dmaBufFormat` / `dmaBufDtype` declare the fd's layout + dtype; when they match
     ///    the device-native boundary (see IOInfo) the fd is bound directly, otherwise the GPU converts.
-    ///    The engine never allocates the fd.
+    ///    The GPU converts a declared Float32 or Float16, and a declared UInt8 or Int8 on a device with
+    ///    8-bit storage buffers; any other declared dtype (Int32, Int64, or 8-bit without that storage)
+    ///    fails run(), with the log naming the tensor and the missing conversion. The engine never
+    ///    allocates the fd.
     struct IOTensor {
         /// Model input/output name this tensor binds to.
         std::string name;
@@ -26,9 +29,12 @@ namespace vknn {
         /// >= 0 selects zero-copy: this fd IS the GPU boundary buffer. -1 = host mode (use `data`).
         int dmaBufFd = -1;
         /// Layout of the dma-buf bytes (when dmaBufFd >= 0). Matching the device-native boundary binds
-        /// the fd directly; otherwise the GPU converts. Auto = bytes are already device-native.
+        /// the fd directly; otherwise the GPU converts from NCHW, NHWC or NC4HW4 when `dmaBufDtype`
+        /// converts. Auto = bytes are already device-native, bound directly whatever `dmaBufDtype` says.
         TensorFormat dmaBufFormat = TensorFormat::NCHW;
-        /// Dtype of the dma-buf bytes (when dmaBufFd >= 0). Paired with dmaBufFormat for the conversion.
+        /// Dtype of the dma-buf bytes (when dmaBufFd >= 0). Paired with dmaBufFormat for the conversion:
+        /// Float32 and Float16 convert on every device, UInt8 and Int8 (integer values, never normalized)
+        /// only with 8-bit storage buffers, and any other dtype fails run() unless the pair binds directly.
         DType dmaBufDtype = DType::Float32;
         /// Host payload in host mode; empty in zero-copy mode. Raw bytes; reinterpret via f32().
         std::vector<uint8_t> data;

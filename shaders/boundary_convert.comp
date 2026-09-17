@@ -3,8 +3,15 @@
 // boundary buffer. One thread per DESTINATION element: decode its (n,c,h,w) from the destination
 // layout, then read the source element from the source layout (or write 0 for an NC4HW4 padding lane),
 // converting dtype on the way. Layouts are push-constant codes (0=NCHW, 1=NHWC, 2=NC4HW4); the dtype of
-// each side is a compile variant (SRC_T/DST_T): the fp32/fp16 pairs plus uint8 source/destination
-// variants (8-bit storage) for image I/O. A uint8 destination truncates+clamps to [0,255] (INT_DST_U8).
+// each side is a compile variant (SRC_T/DST_T): the fp32/fp16 pairs plus uint8 and int8
+// source/destination variants (8-bit storage), the set listed in src/core/boundary_convert_rule.h. An
+// 8-bit source converts its integer value (uint8 zero-extended, int8 sign-extended via INT_SRC_I8; never
+// normalized). A uint8 destination truncates+clamps to [0,255] (INT_DST_U8); an int8 destination
+// truncates and wraps modulo 2^8 into [-128,127] (INT_DST_I8). Both destinations narrow in float and
+// convert to int only once the value is inside [0,255], so every source lane is defined: a NaN stores 0,
+// and a value at or beyond +-2^63 (infinities included) stores what the host's saturated int64 narrows to.
+// Every variant reproduces the host decode/readback in src/core/boundary_convert_rule.h
+// (tests/test_boundary_int8_staging.cpp).
 // Index math matches VulkanBackend::packToBuffer / unpackFromBuffer.
 #ifdef NEED_FP16
 #extension GL_EXT_shader_16bit_storage : require
@@ -26,6 +33,26 @@ layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly buffer S { SRC_T s[]; };
 layout(std430, binding = 1) writeonly buffer D { DST_T d[]; };
 layout(push_constant) uniform PC { int N, C, H, W, srcFmt, dstFmt; uint count; } pc;
+
+#if defined(INT_DST_U8)
+// uint8 saturation bounds of a truncated value.
+const float kUInt8Min = 0.0;
+const float kUInt8Max = 255.0;
+#endif
+#if defined(INT_DST_I8)
+// Two's-complement modulo-2^8 wrap of a truncated integer: keep the low byte, and a byte with its sign
+// bit set stands for that byte minus 2^8.
+const int kInt8LowByteMask = 0xFF;
+const int kInt8SignBit     = 0x80;
+const int kInt8Modulus     = 0x100;
+// 2^8 as a float: the low byte of a truncated fp32 value t is t - 256 * floor(t / 256), exact for every
+// finite fp32 t (each step is exact, and a magnitude of 2^32 or more is a multiple of 256, whose low byte
+// is 0).
+const float kByteModulusFloat = 256.0;
+// 2^63 (exact in fp32): the host saturates a value at or beyond it to INT64_MAX, whose low byte is all
+// ones, and a value at or below -2^63 to INT64_MIN, whose low byte is 0.
+const float kInt64RangeEndFloat = 9223372036854775808.0;
+#endif
 
 int encode(int fmt, int n, int c, int h, int w) {
   int HW = pc.H * pc.W;
@@ -63,9 +90,24 @@ void main() {
   }
   if (c >= pc.C) { d[i] = DST_T(0); return; } // NC4HW4 padding channel
 #if defined(INT_DST_U8)
-  // Integer destination: truncate toward zero then clamp to [0,255], matching the host
-  // readbackOutput contract ((int64_t)value, then clamp). Plain DST_T() would leave out-of-range UB.
-  d[i] = DST_T(clamp(int(float(s[encode(pc.srcFmt, n, c, h, w)])), 0, 255));
+  // Integer destination: truncate toward zero then clamp to [0,255] in float, matching the host
+  // readbackOutput contract (saturated int64 value, then clamp). A NaN stores 0; only an in-range value
+  // reaches int().
+  float value = float(s[encode(pc.srcFmt, n, c, h, w)]);
+  d[i] = DST_T(isnan(value) ? 0 : int(clamp(trunc(value), kUInt8Min, kUInt8Max)));
+#elif defined(INT_DST_I8)
+  // Signed 8-bit destination: truncate toward zero, then wrap modulo 2^8 into [-128,127], matching the
+  // host readbackOutput (int8_t) narrowing of the saturated int64 value. The low byte is taken in float, so
+  // only a value in [0,256) reaches int(); a NaN and a value at or below -2^63 store 0, and a value at or
+  // beyond 2^63 stores the low byte of INT64_MAX.
+  float value = float(s[encode(pc.srcFmt, n, c, h, w)]);
+  float truncated = trunc(value);
+  float lowByteFloat = truncated - kByteModulusFloat * floor(truncated / kByteModulusFloat);
+  int lowByte = (isnan(value) || value <= -kInt64RangeEndFloat) ? 0 : (value >= kInt64RangeEndFloat ? kInt8LowByteMask : int(lowByteFloat));
+  d[i] = DST_T(lowByte >= kInt8SignBit ? lowByte - kInt8Modulus : lowByte);
+#elif defined(INT_SRC_I8)
+  // Signed 8-bit source: sign-extend the byte to int, then convert that integer value.
+  d[i] = DST_T(int(s[encode(pc.srcFmt, n, c, h, w)]));
 #else
   d[i] = DST_T(s[encode(pc.srcFmt, n, c, h, w)]);
 #endif

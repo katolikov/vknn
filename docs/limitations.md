@@ -99,6 +99,43 @@ information at the clamp. Such a model wants fp32 storage — `Precision::High`,
 with its tensors named in `Config::fp32Tensors` — for full accuracy; at `Low` it stays finite but
 approximate on the overflowing tensors.
 
+**The GPU reads a subnormal operand as zero.** A float whose magnitude is below the smallest normal fp32
+value (about 1.18e-38) acts as zero in the GPU kernels at every precision tier, while the CPU oracle
+computes with its exact value. An op whose answer depends on such an operand can differ from the CPU:
+Mod with `fmod` 0 over a = −8.344e-39 and b = 6780.2427 is −0 on the GPU and 6780.2427 on the CPU (the
+floor remainder of a tiny negative dividend), `fmod` 1 over a = 1e-40 and b = 3e-41 is NaN on the GPU (a
+zero divisor) and 9.998e-42 on the CPU, and an Add or Relu drops a subnormal value to zero. The logical
+ops and Cast to BOOL test the bit pattern instead, so a subnormal stays true there.
+
+**Integer values on the GPU ride float lanes, exact only within ±2^24.** The GPU stores every tensor as
+fp16 or fp32 floats. An fp32 lane holds every integer within ±2^24 (fp16: ±2^11, saturating at 65504),
+so the load-time `pinIntegerResultsFp32` pass keeps integer regions at fp32 storage at every precision
+tier — ArgMax/ArgMin indices, BitShift / BitwiseAnd / BitwiseOr / BitwiseXor / BitwiseNot results and
+operands, Mod with `fmod` 0 or integer operands, integer arithmetic and its operands (Add, Sub, Mul,
+Max, Min, the lowered variadic Max/Min/Sum chains, Pow of an integer base with its exponent,
+ReduceSum/Max/Min/Prod, Range, Clip, Neg, Abs), the operands of an integer comparison (Equal, Greater,
+Less and their OrEqual forms), integer TopK and ArgMax/ArgMin data, and the value-preserving hops that
+connect them to graph inputs and outputs (layout converts, reshapes, integer Casts, Where's values and
+the movement ops: Slice, Transpose, Expand, Tile, Split, Gather, Pad, DepthToSpace, ChannelShuffle,
+ScatterND, TopK's values, Concat). A node whose kernel reads a constant operand through the activation
+buffer the segment fills at its own precision — an NC4HW4 channel Concat with a constant part is the
+reachable case — keeps that precision together with every runtime part it reads, so an integer value past
+65504 in any part of such a Concat (the constant, or a runtime part such as an int64 graph input)
+saturates at `Low` and `Normal` there. Past ±2^24 a GPU integer result rounds, and the GPU BitwiseAnd/Or/Xor kernel also clamps its
+operands to the int32 range; the CPU op computes int64 values exactly. Two int64 forms are not computed
+in float at all: a Binary `Div` with an Int64-typed operand (the CPU truncates toward zero, 7 / 2 = 3)
+and a `Pow` with an Int64-typed base (an integer power, 2^−1 = 0) keep the CPU op on a GPU plan, listed
+in the support report as `Binary: integer Div on an int64 operand` / `Binary: integer Pow on an int64
+base` — a CPU segment and its boundary round trip. Whether an operand is int64 is resolved from its
+producers, so a computed int64 operand (an Add of int64 inputs, a bitwise result, a Cast to INT64) keeps
+the CPU op too. Such an operand computed on the GPU crosses into that CPU segment as float lanes, which the
+CPU op divides and raises in float; the integer answer holds when the whole int64 chain runs on the CPU (a
+tiny GPU island folds to the CPU). A Mod whose only integer evidence is an INT32 / INT16 / UINT16
+initializer (imported as Float32) computes the float remainder (a zero divisor under `fmod` 1 is NaN rather
+than 0). Outside the integer regions, a data tensor that stays
+fp16 under `Low` / `Normal` changes ArgMax/ArgMin on near-ties and past 65504, as it changes any other
+consumer.
+
 ---
 
 ## 4. Conv kernels trail a years-tuned engine on the 3×3-heavy nets
@@ -229,10 +266,12 @@ a **fixed** op set (`opTypeFromOnnx` in `src/core/op.cpp`). Anything not in that
 `OpType::Unknown` and will not plan.
 
 The supported set is broad — it covers CNNs, detection, **and** transformer/attention models:
-convolution/pooling, the full elementwise unary/binary families, MatMul (batched N-D), Gemm,
-LayerNorm, Softmax (channel + last-axis), Einsum, RoPE, Gather/Scatter, generator ops
-(Range / ConstantOfShape / EyeLike, const-folded), and the shape/data-movement
-ops. The full table with per-op GPU/CPU coverage is in [op-coverage.md](op-coverage.md).
+convolution/pooling, the full elementwise unary/binary families (variadic Sum / Mean / Max / Min lower
+to 2-input chains at import), the boolean ops (And / Or / Xor / Not / IsNaN and the compare family), the
+integer ops (Mod, BitShift, BitwiseAnd / BitwiseOr / BitwiseXor / BitwiseNot), ArgMax / ArgMin / TopK,
+MatMul (batched N-D), Gemm, LayerNorm, Softmax (channel + last-axis), Einsum, RoPE, Gather/Scatter,
+generator ops (Range / ConstantOfShape / EyeLike, const-folded), and the shape/data-movement ops. The
+full table with per-op GPU/CPU coverage is in [op-coverage.md](op-coverage.md).
 
 **Not** supported: RNN/LSTM/GRU, data-dependent control flow (`Loop` / `If` / `Scan` /
 `NonMaxSuppression` — their output shapes are not known at plan time), training ops, sparse
@@ -270,7 +309,8 @@ with `Status::Unsupported`.
 |------|--------|
 | Batch / shapes | Resolved at plan time. Dynamic shapes supported via **declared plan buckets** (`--bucket` at compile, `Session::prepareShapes()` at run on ONNX sessions); fixed-shape path unchanged and zero-cost (one bucket). A dynamic non-batch axis with no declared shape is a hard error, not a silent `1x1` plan |
 | NPU / accelerator | None; Vulkan + CPU only (pluggable — see adding-a-backend.md) |
-| fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum |
+| fp16 | cosine 0.9995–1.0 across models; fp16 storage + fp32 accum; subnormal operands read as zero on the GPU |
+| Integer values | GPU float lanes, exact within ±2^24 (integer regions pinned to fp32 storage at load); int64 `Div` and int64-base `Pow` keep the exact CPU op |
 | Kernels | Beats MNN-Vulkan everywhere; trails MNN-OpenCL-tuned on ResNet-50 (~15%, CLBlast-autotuned GEMM); tiled-GEMM Winograd F(2,3) is the default; no coopmat path (extension absent on the target driver) |
 | Host overhead | NC4HW4 pack/unpack at the I/O boundary (1–3% of the run wall on the classifier CNNs; 9–15% on large-image I/O such as YOLOv8n); a whole-GPU plan converts 8-bit / rank-4 fp32 inputs on the GPU and downloads flat outputs at declared dtype |
 | Quantized models | Static QDQ / QLinear **and** the canonical dynamic-quant cluster run dequantized to float (static: clamps preserved, rounding dropped — not int-exact; dynamic: folded to float MatMul/Conv, no output clamp); a non-canonical dynamic-quant cluster fails at planning; no int8 compute tier |

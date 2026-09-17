@@ -58,14 +58,20 @@ namespace vknn {
         std::map<TensorId, std::shared_ptr<vk::Buffer>> buffers_;
         std::vector<std::unique_ptr<VulkanOp>>          ops_;
         VkOpEnv                                         env_;
-        // Memo of the flat device buffer uploaded for each initializer of this segment's graph (weak:
-        // the ops own the buffers). A weight feeding several nodes resolves through it instead of
-        // re-digesting host bytes the first upload already released.
-        std::map<TensorId, std::weak_ptr<vk::Buffer>> flatWeightByTensor_;
-        VkCommandBuffer                               cmd_ = VK_NULL_HANDLE;
+        // Memo of the device buffer uploaded for each initializer of this segment's graph, per store it
+        // holds (weak: the ops own the buffers). A weight feeding several nodes at one store resolves
+        // through it instead of re-digesting host bytes the first upload already released.
+        std::map<InitializerDeviceCopyKey, std::weak_ptr<vk::Buffer>> flatWeightByTensor_;
+        VkCommandBuffer                                               cmd_ = VK_NULL_HANDLE;
         std::vector<VkCommandBuffer> cmds_; // chunked submits (one entry unless the segment is split for the GPU watchdog; see Config::maxSubmitNodes)
         VkQueryPool                  queryPool_ = VK_NULL_HANDLE;
         bool                         recorded_  = false;
+        // True while the recorded command stream may not encode the segment's current state. A run sets
+        // it when a boundary binding, the boundary conversion set, the resident links, the argmax
+        // epilogue or the decode chain changes; only a completed record() clears it. A run that throws
+        // between a change and its re-record leaves it set, so the next run re-records even when its
+        // bindings equal the ones the failed run left behind (boundary_rebind_rule.h).
+        bool recordingStale_ = true;
         // Config::timingSummary state: the chunk-timestamp pool, how many chunks carry a query
         // pair, and the lifetime accumulators printed once by the destructor.
         static constexpr uint32_t kMaxTimedChunks = 64;

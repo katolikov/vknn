@@ -2,6 +2,7 @@
 // dtype in one pass; index math matches VulkanBackend::packToBuffer / unpackFromBuffer.
 #include "boundary_convert.h"
 #include "vk_op_common.h"
+#include "vknn/error.h"
 
 namespace vknn {
     namespace {
@@ -20,16 +21,6 @@ namespace vknn {
             return f == TensorFormat::NHWC ? 1 : f == TensorFormat::NC4HW4 ? 2 : 0;
         }
 
-        // Storage-type tag for a boundary dtype: uint8 rides the 8-bit variants, fp16 the 16-bit variants,
-        // everything else the fp32 variant. (The device boundary is only ever fp16/fp32; declared I/O adds
-        // uint8. Int8/Int32/Int64 have no boundary_convert variant — they never reach this path.)
-        const char *dtTag(DType d) {
-            return d == DType::UInt8 ? "u8" : d == DType::Float16 ? "f16" : "f32";
-        }
-        std::string variantName(DType srcDt, DType dstDt) {
-            return std::string("boundary_convert_") + dtTag(srcDt) + "_" + dtTag(dstDt);
-        }
-
     } // namespace
 
     void BoundaryConvert::record(VkCommandBuffer cmd, vk::VulkanContext &ctx, vk::PipelineCache *cache, vk::Buffer *src, vk::Buffer *dst, const NCHW &shape, TensorFormat srcFmt, DType srcDt, TensorFormat dstFmt, DType dstDt) {
@@ -37,7 +28,16 @@ namespace vknn {
         auto &pipe = pipes_[key];
         if (!pipe)
         {
-            pipe = std::make_unique<vk::ComputePipeline>(ctx, variantName(srcDt, dstDt), 2, sizeof(BoundaryPC), std::vector<uint32_t> {}, cache ? cache->handle() : VK_NULL_HANDLE);
+            // The variant is selected by the exact dtype pair (core/boundary_convert_rule.h). A pair with
+            // no compiled variant is refused by name: reading a payload through another dtype's variant
+            // misdecodes every element and walks past the end of a narrower buffer.
+            const std::string variant = boundaryConvertVariantName(srcDt, dstDt);
+            if (variant.empty())
+            {
+                pipes_.erase(key);
+                throw Error(Status::Unsupported, std::string("boundary_convert has no variant converting ") + dtypeStr(srcDt) + " to " + dtypeStr(dstDt));
+            }
+            pipe = std::make_unique<vk::ComputePipeline>(ctx, variant, 2, sizeof(BoundaryPC), std::vector<uint32_t> {}, cache ? cache->handle() : VK_NULL_HANDLE);
         }
         // One thread per DESTINATION element (the shader decodes (n,c,h,w) from the dst layout and reads
         // back through the src layout), so the launch is sized on the destination count. For an NC4HW4

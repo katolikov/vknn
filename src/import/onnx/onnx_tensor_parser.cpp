@@ -74,6 +74,19 @@ namespace vknn { namespace onnx {
                         t.int64Data.push_back((int64_t) r.varint());
                     }
                     break;
+                case kTensorUint64Data: // packed or single: typed payload for UINT32 and UINT64
+                    if (w == kWireBytes)
+                    {
+                        Reader s = r.sub();
+                        while (!s.eof())
+                        {
+                            t.uint64Data.push_back(s.varint());
+                        }
+                    } else
+                    {
+                        t.uint64Data.push_back(r.varint());
+                    }
+                    break;
                 case kTensorName:
                     t.name = r.str();
                     break;
@@ -196,6 +209,24 @@ namespace vknn { namespace onnx {
                 {
                     dst[i] = (float) s[i];
                 }
+            } else if (isType(t.dataType, OnnxType::Int16))
+            { // widen to fp32 (2 bytes/elem, signed; exact)
+                int64_t avail = (int64_t) (t.raw.size() / sizeof(int16_t));
+                for (int64_t i = 0; i < elems && i < avail; ++i)
+                {
+                    int16_t v;
+                    std::memcpy(&v, t.raw.data() + i * sizeof(int16_t), sizeof v);
+                    dst[i] = (float) v;
+                }
+            } else if (isType(t.dataType, OnnxType::Uint16))
+            { // widen to fp32 (2 bytes/elem, unsigned; exact)
+                int64_t avail = (int64_t) (t.raw.size() / sizeof(uint16_t));
+                for (int64_t i = 0; i < elems && i < avail; ++i)
+                {
+                    uint16_t v;
+                    std::memcpy(&v, t.raw.data() + i * sizeof(uint16_t), sizeof v);
+                    dst[i] = (float) v;
+                }
             } else if (isType(t.dataType, OnnxType::Int8))
             { // widen to fp32 (1 byte/elem, signed)
                 const int8_t *s     = reinterpret_cast<const int8_t *>(t.raw.data());
@@ -266,17 +297,40 @@ namespace vknn { namespace onnx {
 
     void TensorProtoParser::fillHostI64(const TensorProto &t, HostBuffer &hb, int64_t elems) {
         hb.resizeElems(elems, DType::Int64);
-        int64_t *dst = hb.i64();
-        if (!t.raw.empty() && isType(t.dataType, OnnxType::Int64))
+        int64_t   *dst      = hb.i64();
+        const bool isUint32 = isType(t.dataType, OnnxType::Uint32);
+        if (!t.raw.empty() && (isType(t.dataType, OnnxType::Int64) || isType(t.dataType, OnnxType::Uint64)))
         {
             // Clamp to the destination byte size (see fillHostFloat): a negative elems must not
-            // widen the copy length past the 0-byte buffer resizeElems produced.
+            // widen the copy length past the 0-byte buffer resizeElems produced. A UINT64 value at or
+            // above 2^63 keeps its bit pattern (the two's-complement int64 of the same bits).
             std::memcpy(dst, t.raw.data(), std::min<size_t>(t.raw.size(), hb.bytes.size()));
+        } else if (!t.raw.empty() && isUint32)
+        { // zero-extend (4 bytes/elem)
+            int64_t avail = (int64_t) (t.raw.size() / sizeof(uint32_t));
+            for (int64_t i = 0; i < elems && i < avail; ++i)
+            {
+                uint32_t v;
+                std::memcpy(&v, t.raw.data() + i * sizeof(uint32_t), sizeof v);
+                dst[i] = (int64_t) v;
+            }
         } else if (!t.int64Data.empty())
         {
             for (int64_t i = 0; i < elems && i < (int64_t) t.int64Data.size(); ++i)
             {
                 dst[i] = t.int64Data[i];
+            }
+        } else if (!t.uint64Data.empty())
+        { // UINT32 / UINT64 values; a UINT64 at or above 2^63 keeps its bit pattern
+            for (int64_t i = 0; i < elems && i < (int64_t) t.uint64Data.size(); ++i)
+            {
+                std::memcpy(&dst[i], &t.uint64Data[i], sizeof(int64_t));
+            }
+        } else if (!t.int32Data.empty() && isUint32)
+        { // a UINT32 written to int32_data arrives as its wrapped int32; zero-extend its bits
+            for (int64_t i = 0; i < elems && i < (int64_t) t.int32Data.size(); ++i)
+            {
+                dst[i] = (int64_t) (uint32_t) t.int32Data[i];
             }
         }
     }

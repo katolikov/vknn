@@ -12,6 +12,8 @@
 //               checks still run per node).
 // pwEpilogue -> op types whose kernel family has an _epi store variant that can host a fused unit.
 #include "vknn/op_descriptor.h"
+#include "vknn/error.h"
+#include <string>
 
 namespace vknn {
 
@@ -19,12 +21,18 @@ namespace vknn {
         using L = LayoutClass;
 
         // The largest enum value with a table entry (the enum is append-only, so this only grows).
-        constexpr int kMaxOp = (int) OpType::Det;
+        constexpr int kMaxOp = (int) OpType::Mean;
 
         struct Table {
             OpDescriptor d[kMaxOp + 1];
             Table() {
                 auto set = [&](OpType t, L layout, bool pwMember, bool pwEpilogue) {
+                    // A row past kMaxOp would write outside the table; it fails the table's construction
+                    // (and so every opDescriptor lookup) by name instead.
+                    if ((int) t < 0 || (int) t > kMaxOp)
+                    {
+                        throw Error(Status::RuntimeError, std::string("opDescriptor: the row for ") + opTypeName(t) + " is past kMaxOp; raise kMaxOp to the last OpType enumerator");
+                    }
                     OpDescriptor &e = d[(int) t];
                     e.layout        = layout;
                     e.pwMember      = pwMember;
@@ -92,10 +100,25 @@ namespace vknn {
                 // convert. Pure data movement; no fusion role.
                 set(OpType::ChannelShuffle, L::ShapeDependent, false, false);
                 set(OpType::Det, L::Flat, false, true);
+                // Boolean OR/XOR/NOT: flat broadcasting kernels like And, no pw step code.
+                set(OpType::Or, L::Flat, false, false);
+                set(OpType::Xor, L::Flat, false, false);
+                set(OpType::Not, L::Flat, false, false);
+                // Per-slice index selection along one axis; int64 output pinned fp32 on the GPU.
+                set(OpType::ArgMax, L::Flat, false, false);
+                set(OpType::ArgMin, L::Flat, false, false);
+                // Integer-valued elementwise ops: own flat kernels, never fusion members (the fused
+                // float registers cannot carry their integer semantics).
+                set(OpType::Mod, L::Flat, false, false);
+                set(OpType::BitShift, L::Flat, false, false);
+                set(OpType::BitwiseAnd, L::Flat, false, false);
+                set(OpType::BitwiseOr, L::Flat, false, false);
+                set(OpType::BitwiseXor, L::Flat, false, false);
+                set(OpType::BitwiseNot, L::Flat, false, false);
                 // Everything not listed keeps the all-default row {Nc4, pwMember=false,
                 // pwEpilogue=false}: CPU-only / structural ops (Reshape, Flatten, Squeeze, Unsqueeze,
                 // Cast, Identity, Constant, Shape, BatchNorm, EyeLike, FusedSE, ConvertLayout,
-                // ConvertDtype, Dropout, InstanceNorm, and the quantized QLinear/dynamic family) —
+                // ConvertDtype, Dropout, InstanceNorm, Mean, and the quantized QLinear/dynamic family) —
                 // none runs on the flat path or takes part in pointwise fusion.
             }
         };

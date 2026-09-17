@@ -1,0 +1,62 @@
+#version 450
+// ArgMax / ArgMin along one axis (ONNX opset 13) on the flat row-major path. One invocation owns one
+// output element: slice (block, innerPos) of an [outer, extent, inner] view, whose axis element j
+// sits at base + j*inner with base = (block*extent)*inner + innerPos. The index is written as fp32
+// to a buffer that is always fp32 (the indices tensor is pinned by pinIntegerResultsFp32), so it is
+// exact for every axis the plan accepts; the data is read at its OWN storage precision (this
+// source compiles to the fp32 variant and, under -DUSE_FP16, to arg_extreme_fp16 reading float16_t).
+//
+// Selection rule (the CPU oracle in src/backend/cpu/arg_extreme.h, bit for bit):
+//     best = x[0]; bestAt = 0;
+//     for j in 1..extent-1: if takesCandidate(x[j], best): best = x[j]; bestAt = j
+// with takesCandidate a strict (>, <) or, under select_last_index, non-strict (>=, <=) comparison.
+// Every comparison with a NaN is false, so a NaN at index 0 stays selected and a NaN elsewhere is
+// never taken; the scan states both facts with explicit isnan tests so the result does not depend
+// on a driver keeping ordered-comparison NaN semantics. -0.0 and +0.0 compare equal and so tie.
+//
+// ArgMax vs ArgMin and the tie policy are specialization constants, so the scan loop carries no
+// runtime mode branch.
+#define VKNN_NO_RTE 1
+#include "precision.glsl"
+layout(local_size_x = 256) in; // == flat::kFlatLocalSize
+layout(constant_id = 0) const int SELECT_LARGEST = 1; // 1 = ArgMax, 0 = ArgMin
+layout(constant_id = 1) const int SELECT_LAST = 0;    // 1 = select_last_index (ties keep the last index)
+layout(std430, binding = 0) readonly buffer Data { STORE data[]; };
+layout(std430, binding = 1) writeonly buffer Indices { float indices[]; };
+layout(push_constant) uniform PC {
+  int outer;  // product of the dims before the axis
+  int extent; // axis length (>= 1: the plan refuses an empty axis)
+  int inner;  // product of the dims after the axis
+  int total;  // output elements = outer * inner
+} pc;
+
+// True when `candidate` replaces the running `best` (both non-NaN).
+bool takesCandidate(float candidate, float best) {
+  if (SELECT_LARGEST != 0) {
+    return (SELECT_LAST != 0) ? (candidate >= best) : (candidate > best);
+  }
+  return (SELECT_LAST != 0) ? (candidate <= best) : (candidate < best);
+}
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (gid >= uint(pc.total)) return;
+  int outputIndex = int(gid);
+  int block = outputIndex / pc.inner;
+  int innerPos = outputIndex % pc.inner;
+  int base = (block * pc.extent) * pc.inner + innerPos;
+
+  float best = float(data[base]);
+  int bestAt = 0;
+  // A NaN at index 0 is never replaced, so its scan ends here with index 0.
+  if (!isnan(best)) {
+    for (int j = 1; j < pc.extent; ++j) {
+      float candidate = float(data[base + j * pc.inner]);
+      if (!isnan(candidate) && takesCandidate(candidate, best)) {
+        best = candidate;
+        bestAt = j;
+      }
+    }
+  }
+  indices[gid] = float(bestAt);
+}

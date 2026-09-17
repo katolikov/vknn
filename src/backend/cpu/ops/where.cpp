@@ -1,10 +1,13 @@
 // ONNX Where (cond ? X : Y) with full NumPy-style broadcasting over all three inputs. cond is bool/
 // uint8 in ONNX but arrives here as fp32 (or int64); it is treated as "true" iff != 0. X and Y are
-// the value operands. Output dtype follows X/Y, and the value operands are read in their native
-// dtype: the dynamic-shape subgraph runs Where on INT64 shape vectors (e.g.
-// Where(Equal(dim,-1), input_shape, target)), where reading int bytes as fp32 would corrupt them.
+// the value operands. The output is int64 when either value operand's runtime dtype is Int64 and fp32
+// otherwise, and the value operands are read in their native dtype: the dynamic-shape subgraph runs
+// Where on INT64 shape vectors (e.g. Where(Equal(dim,-1), input_shape, target)), where reading int bytes
+// as fp32 would corrupt them, and an fp32-carried integer value (an INT32 value) beside an int64 one
+// converts to int64 truncated toward zero, with a NaN reading 0 and out-of-range values saturating.
 #include "backend/cpu/broadcast.h"
 #include "backend/cpu/cpu_backend.h"
+#include "backend/cpu/int64_arithmetic.h"
 #include "backend/cpu/parallel.h"
 #include "vknn/op.h"
 #include <algorithm>
@@ -27,11 +30,9 @@ namespace vknn {
                     size_t off = rank - s.size();
                     return i < off ? 1 : s[i - off];
                 };
-                for (size_t i = 0; i < rank; ++i)
-                {
-                    int64_t dc = dimOf(sc, i), dx = dimOf(sx, i), dy = dimOf(sy, i);
-                    out[i] = (dc == 0 || dx == 0 || dy == 0) ? 0 : std::max(dc, std::max(dx, dy)); // a 0 dim broadcasts to 0 (NumPy), never to 1
-                }
+                // Pairwise NumPy broadcast of all three shapes: a 0 extent broadcasts to 0, and shapes that do
+                // not broadcast throw instead of letting a stride walk read past an operand.
+                out       = cpu::broadcastOutputShape(node, cpu::broadcastOutputShape(node, sc, sx), sy);
                 int64_t n = cpu::elemCount(out); // a rank-0 scalar result carries its one element
                 // Per-axis input strides in row-major (C-contiguous) order, built right to left. A
                 // broadcast axis (input dim 1, output dim > 1) gets stride 0 so every output index
@@ -56,21 +57,32 @@ namespace vknn {
                 // the zero-collapsing strides oc/ox/oy by an odometer carry: offset(0) is cond's,
                 // offset(1) is X's, offset(2) is Y's.
                 // Output type follows the value operands (int64 for the shape-arithmetic Where).
-                bool i64     = X.dtype == DType::Int64 && Yv.dtype == DType::Int64;
+                bool i64     = X.dtype == DType::Int64 || Yv.dtype == DType::Int64;
                 int  threads = cpu::threadCount(ctx.config);
                 // Each output element selects independently, so the sweep partitions across threads and
                 // each chunk seeks its own walker start.
                 if (i64)
                 {
-                    int64_t       *o = cpu::allocOutI64(Out, out);
-                    const int64_t *x = X.host.i64();
-                    const int64_t *y = Yv.host.i64();
+                    // Typed views resolved before the partition; the storage choice reads each operand's dtype,
+                    // never a data pointer (an empty tensor's accessor is null whatever its dtype).
+                    struct ValueView {
+                        bool           int64;
+                        const int64_t *int64Values;
+                        const float   *floatValues;
+                        int64_t        at(int64_t index) const {
+                            return int64 ? int64Values[index] : cpu::int64FromFp32Operand(floatValues[index]);
+                        }
+                    };
+                    int64_t        *o      = cpu::allocOutI64(Out, out);
+                    const bool      xInt64 = X.dtype == DType::Int64, yInt64 = Yv.dtype == DType::Int64;
+                    const ValueView x {xInt64, xInt64 ? X.host.i64() : nullptr, xInt64 ? nullptr : X.host.f32()};
+                    const ValueView y {yInt64, yInt64 ? Yv.host.i64() : nullptr, yInt64 ? nullptr : Yv.host.f32()};
                     cpu::parallelFor(threads, 0, n, cpu::minChunkForWork(1), [&](int64_t lo, int64_t hi) {
                         cpu::BroadcastWalk w(out, {oc.data(), ox.data(), oy.data()});
                         w.seek(lo);
                         for (int64_t lin = lo; lin < hi; ++lin, w.next())
                         {
-                            o[lin] = condTrue(C, w.offset(0)) ? x[w.offset(1)] : y[w.offset(2)];
+                            o[lin] = condTrue(C, w.offset(0)) ? x.at(w.offset(1)) : y.at(w.offset(2));
                         }
                     });
                 } else

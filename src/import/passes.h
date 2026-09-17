@@ -90,6 +90,19 @@ namespace vknn {
     // absent or unconsumed), rewiring consumers to the input. A Dropout that is not provably
     // inference-mode, or whose mask is consumed, stays in place and is unsupported downstream.
     void eliminateDropout(Graph &g);
+    // Rewrite the variadic elementwise ops into the 2-input nodes every kernel implements: a Sum
+    // (OpType::Add) or Max/Min (OpType::Binary) whose operand count is not 2, and every Mean. One
+    // operand becomes an Identity; N operands become a left fold op(op(op(x0, x1), x2), ...) whose last
+    // step writes the original output; Mean folds with Add and then multiplies ONCE by a rank-0 fp32
+    // initializer holding the fp32 reciprocal 1.0f / N (ONNX Runtime's CPU Mean, bit-identical to it).
+    // Runs before the first inferShapes, which reads exactly two operands on Add/Binary.
+    // @throws Error{InvalidArgument} for a node with no operands or a missing operand/output.
+    void lowerVariadicElementwise(Graph &g);
+    // Reject a graph that still carries a node lowerVariadicElementwise rewrites (a .vxm compiled
+    // before the lowering existed): the Add/Binary kernels read only inputs[0] and inputs[1], so such
+    // a node would silently drop its later operands. Run on graphs whose passes are already applied.
+    // @throws Error{InvalidArgument} naming the node and its operand count.
+    void requireLoweredVariadicElementwise(const Graph &g);
     // Remove nodes whose outputs are unused (keeps graph outputs alive).
     void eliminateDeadNodes(Graph &g);
     // Drop initializer payloads no node/output references (folded-chain intermediates, Cast-copied
@@ -299,6 +312,46 @@ namespace vknn {
     // decodes the grid at its storage precision via the GRID_FP32 spec constant. Runs at load, after
     // insertLayoutConverts, before markFp32.
     void pinGridSampleGridFp32(Graph &g);
+
+    // Pin integer tensors to fp32 storage, where consecutive integers are exact up to 2^24 (fp16 is
+    // exact only up to 2^11 and saturates at 65504). An integer value is an Int32/Int64-typed tensor
+    // (initializers included), a result that is an integer whatever its operands hold (a Cast to an integer
+    // type, Shape, ArgMax/ArgMin, TopK's indices, an integer-filled ConstantOfShape, the bitwise ops, an
+    // integer Mod), or a value copied or computed from integer values: movement and selection ops (layout
+    // and dtype converts, Identity, metadata reshapes, Slice, Transpose, Expand, Tile, Split, Gather data,
+    // Pad and its fill value, DepthToSpace, ChannelShuffle, ScatterND data and updates, TopK's values,
+    // Concat, Where values), Add, Binary Add/Sub/Mul/Div/Max/Min, Pow of an integer base,
+    // ReduceSum/Max/Min/Prod, Range, Clip, Neg and Abs. Integer values are pinned where a node needs them
+    // exact. Seeds: the flat outputs of ArgMax, ArgMin, Mod with fmod == 0 or integer operands
+    // (modOperandsAreInteger), BitShift, BitwiseAnd, BitwiseOr, BitwiseXor and BitwiseNot; the runtime
+    // operands of those Mod and bitwise ops; integer ArgMax/ArgMin/TopK data; every arithmetic node above
+    // reading an integer value (its result, its operands, and Pow's exponent); and the operands of an
+    // Equal/Greater/GreaterEqual/Less/LessEqual reading an integer value, with its 0/1 result pinned without
+    // spreading so the comparison runs fp32; and every graph output holding an integer value, so a value
+    // that only movement ops carry to the output (a Gather from an int64 table, a Where or Concat of int64
+    // inputs) stays exact. From every seed the pin floods the region: toward sources
+    // through the movement ops, the arithmetic ops and Cast (so an integer graph input packs at fp32), and
+    // toward consumers through the movement and arithmetic ops and a Cast to an integer type, so an integer
+    // result reaches a graph output or the next integer op without an fp16 narrowing. A Cast's operand is
+    // followed toward its source only, and a TopK's indices never pull its data in. An integer value no
+    // node computes on and no graph output holds (an int64 mask read only through reshapes into a Cast to
+    // float) keeps its storage precision, and a graph with no integer value pins nothing. A tensor is pinned while it can take fp32
+    // storage: flat, or NC4HW4 written by no fp16-only kernel (a graph input, a layout convert, a metadata
+    // reshape, a Cast, Add, Binary, Unary, Concat, Split or ChannelShuffle); the region stops at an NC4HW4
+    // conv-family output, which markFp32 bridges, and at a node whose kernel reads a constant operand
+    // through the activation buffer the segment fills at its own storage precision (an NC4HW4 Concat with a
+    // constant part, an NC4HW4 Split, Reduce, DepthToSpace or TopK of a constant). Last, every node with a
+    // pinned secondary output (from this pass, or a TopK's indices pinned by pinGatherIndexFp32) gets its
+    // outputs[0] pinned, since markFp32 aligns every output of a node to outputs[0]. Runs at load, after
+    // insertLayoutConverts, before markFp32.
+    void pinIntegerResultsFp32(Graph &g);
+
+    // The Vulkan flat-layout load sequence, in its load-bearing order: insertLayoutConverts assigns
+    // every tensor's layout, the pins (pinGatherIndexFp32, pinGridSampleGridFp32,
+    // pinIntegerResultsFp32) read those layouts to choose fp32 storage, and markFp32 then applies the
+    // `fp32Marks` substring marks and bridges every fp16/fp32 frontier the pins created. Ends
+    // topo-sorted. `matchedPatterns` is markFp32's zero-match accounting (null to skip it).
+    void planFlatLayoutAndStorage(Graph &g, const std::string &fp32Marks, std::set<std::string> *matchedPatterns);
 
     // Fold chains of movement ops — a Transpose or Slice fed by another Transpose or Slice — into
     // ONE strided gather: the consumer reads the chain's source through the composed per-axis map

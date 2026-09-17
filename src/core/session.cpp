@@ -1,5 +1,8 @@
 #include "vknn/session.h"
 #include "../import/passes.h"
+#include "backend/cpu/int64_arithmetic.h"
+#include "core/boundary_convert_rule.h"
+#include "core/flat_layout_rule.h"
 #include "core/quant_weights.h"
 #include "vknn/logging.h"
 #include "vknn/version.h"
@@ -42,54 +45,10 @@ namespace vknn {
         rt.dtype = DType::Float32;
         rt.host.resizeElems(elems, DType::Float32);
         float *f = rt.host.f32();
-        // Elements that fit in both the destination (elems) and the caller buffer at bytesPer each.
-        auto fitElems = [&](int64_t bytesPer) {
-            return std::min<int64_t>(elems, (int64_t) (in.size() / bytesPer));
-        };
-        int64_t filled = 0;
-        switch (src)
-        {
-            case DType::Float32: {
-                filled = fitElems(4);
-                std::memcpy(f, in.data(), (size_t) filled * 4);
-                break;
-            }
-            case DType::Float16: {
-                const fp16_t *h = reinterpret_cast<const fp16_t *>(in.data());
-                filled          = fitElems(2);
-                for (int64_t i = 0; i < filled; ++i)
-                {
-                    f[i] = halfToFloat(h[i]);
-                }
-                break;
-            }
-            case DType::UInt8:
-                filled = fitElems(1);
-                for (int64_t i = 0; i < filled; ++i)
-                {
-                    f[i] = (float) reinterpret_cast<const uint8_t *>(in.data())[i];
-                }
-                break;
-            case DType::Int8:
-                filled = fitElems(1);
-                for (int64_t i = 0; i < filled; ++i)
-                {
-                    f[i] = (float) reinterpret_cast<const int8_t *>(in.data())[i];
-                }
-                break;
-            case DType::Int32:
-                filled = fitElems(4);
-                for (int64_t i = 0; i < filled; ++i)
-                {
-                    f[i] = (float) reinterpret_cast<const int32_t *>(in.data())[i];
-                }
-                break;
-            default: {
-                filled = fitElems(4);
-                std::memcpy(f, in.data(), (size_t) filled * 4);
-                break;
-            }
-        }
+        // Elements that fit in both the destination (elems) and the caller buffer, decoded by the
+        // boundary host decode the GPU staging conversion reproduces (core/boundary_convert_rule.h).
+        const int64_t filled = std::min<int64_t>(elems, (int64_t) (in.size() / boundaryHostLaneBytes(src)));
+        decodeHostLanesToFloat32(src, in.data(), filled, f);
         if (filled < elems)
         {
             std::memset(f + filled, 0, (size_t) (elems - filled) * 4);
@@ -99,11 +58,12 @@ namespace vknn {
     // Internal storage (rt.dtype fp32 or int64) -> output bytes in the model's declared dtype `dst`.
     static void readbackOutput(DType dst, RtTensor &rt, int64_t elems, IOTensor &io) {
         io.dtype = dst;
-        if (dst == rt.dtype)
+        if (dst == rt.dtype && rt.host.bytes.size() == (size_t) elems * dtypeSize(dst))
         {
-            // fast path: rt.host already holds the declared dtype (fp32/fp16/uint8/...). MOVE it into the
-            // output instead of copying — rt.host is refilled from the device buffer on the next run before
-            // it is read again, so donating its storage here avoids a full-tensor copy of every output.
+            // fast path: rt.host already holds the declared dtype (fp32/fp16/uint8/...), one lane of its
+            // width per element. MOVE it into the output instead of copying — rt.host is refilled from the
+            // device buffer on the next run before it is read again, so donating its storage here avoids a
+            // full-tensor copy of every output.
             io.data      = rt.host.bytes.release();
             rt.hostValid = false;
             return;
@@ -112,8 +72,11 @@ namespace vknn {
         auto srcF32 = [&](int64_t i) -> float {
             return srcI64 ? (float) rt.host.i64()[i] : rt.host.f32()[i];
         };
+        // An fp32 lane converts to int64 truncated toward zero, a NaN reading 0 and a value outside the
+        // int64 range saturating, so every narrowing below is defined for every lane (the GPU boundary
+        // conversion reproduces the same rule, core/boundary_convert_rule.h).
         auto srcI = [&](int64_t i) -> int64_t {
-            return srcI64 ? rt.host.i64()[i] : (int64_t) rt.host.f32()[i];
+            return srcI64 ? rt.host.i64()[i] : cpu::int64FromFp32Operand(rt.host.f32()[i]);
         };
         io.data.assign((size_t) elems * dtypeSize(dst), 0);
         switch (dst)
@@ -591,13 +554,27 @@ namespace vknn {
             opt.inputShapes = cfg_.inputShapes;
             opt.dimBindings = cfg_.dimBindings;
             runStandardPasses(graph_, opt);
+        } else
+        {
+            requireLoweredVariadicElementwise(graph_); // an unlowered variadic node would drop operands silently
         }
         graph_.topoSort();
 
         // Selective fp32 storage set. Precision::Normal ("normal") uses the built-in geometry-tail
         // preset when fp32Tensors is empty; an explicit fp32Tensors always wins. Resolved before the
         // view fold: a chain tensor markFp32 would pin must keep its materialized form.
-        const bool  vulkanFlat = byKind_.count(BackendKind::Vulkan) && cfg_.flatLayout();
+        // The flat-layout pass is what makes a graph RUNNABLE on the GPU, not an optimization on top
+        // of it: an op whose only kernel reads flat row-major has no plan at all without the layout
+        // assignment and the converts that pass splices. Honouring a request to skip it on a graph
+        // that contains one leaves those nodes indexing NC4HW4 buffers densely -- and the only ways
+        // out of that are a crash or a CPU fallback, and the engine allows neither. So the request is
+        // honoured only on a graph of Nc4-class ops alone (core/flat_layout_rule.h).
+        const bool graphNeedsFlat = graphKeepsFlatLayoutPass(graph_);
+        if (!cfg_.flatLayout() && graphNeedsFlat)
+        {
+            VKNN_INFO << "flat layout: keeping the pass on -- this graph has op(s) whose only GPU kernel reads flat row-major";
+        }
+        const bool  vulkanFlat = byKind_.count(BackendKind::Vulkan) && (cfg_.flatLayout() || graphNeedsFlat);
         std::string fp32Marks  = cfg_.fp32Tensors;
         if (fp32Marks.empty() && cfg_.precision == Precision::Normal)
         {
@@ -659,20 +636,10 @@ namespace vknn {
         //     whole graph runs on the GPU. Must run before the pool + backend assignment (it adds nodes).
         if (vulkanFlat)
         {
-            insertLayoutConverts(graph_);
-            // Integer index tensors (token ids / positions) must survive to the GPU without an fp16 store
-            // that would overflow a value above 65504 to +inf. Pin the Gather index chains to fp32 before
-            // markFp32 so the buffer planner sizes them 4-byte and their producers run in fp32.
-            pinGatherIndexFp32(graph_);
-            // GridSample grids hold normalized sampling coordinates whose fp16 storage quantization
-            // drifts the sample point (~0.5 px at 1920-wide inputs). Pin runtime grid chains to fp32
-            // the same way; the GridSample shader decodes the grid at its storage precision.
-            pinGridSampleGridFp32(graph_);
             // Only a caller-supplied fp32Tensors list takes zero-match accounting; the built-in
             // Precision::Normal preset is engine-owned and exempt from the load-end warning.
-            markFp32(graph_, fp32Marks, cfg_.fp32Tensors.empty() ? nullptr : &matchedFp32Patterns_);
+            planFlatLayoutAndStorage(graph_, fp32Marks, cfg_.fp32Tensors.empty() ? nullptr : &matchedFp32Patterns_);
             fp32PatternsAccounted_ = fp32PatternsAccounted_ || !cfg_.fp32Tensors.empty();
-            graph_.topoSort();
         }
 
         // --- init tensor pool, load initializers ---
@@ -797,12 +764,14 @@ namespace vknn {
                     // Decode the payload to integer-valued fp32 so every CPU op keeps reading host.f32():
                     // an fp16 weight converts per element, and a native int8/uint8 quant initializer (kept
                     // at 1 byte/elem by the importer to bound host memory at import) widens back to fp32
-                    // here. The int8/uint8 dtype LABEL is preserved -- an op that recovers the quant
-                    // saturation range from it still can; only fp16 relabels to fp32.
+                    // here. The pool entry is labeled Float32, the storage it now holds (constFold's pool
+                    // does the same), so a copy of it (Identity) carries fp32 lanes under an fp32 label and
+                    // readbackOutput narrows an 8-bit graph output from them. The graph desc keeps the
+                    // int8/uint8 label, which is where QuantizeLinear reads its saturation range.
                     std::vector<float> f = initFloats(graph_, id);
                     rt.host.bytes.resize(f.size() * 4);
                     std::memcpy(rt.host.bytes.data(), f.data(), f.size() * 4);
-                    rt.dtype = idt == DType::Float16 ? DType::Float32 : idt;
+                    rt.dtype = DType::Float32;
                 } else
                 {
                     rt.host  = graph_.initializers[id];
@@ -2159,14 +2128,17 @@ namespace vknn {
             {
                 rt.dtype     = io.dtype;
                 rt.hostValid = false; // zero-copy: the input comes straight from the fd, no host buffer
-            } else if (ioGpuConvert_ && (io.dtype == DType::UInt8 || io.dtype == DType::Int8) && !linkedInput(bucketIndex, id))
+            } else if (ioGpuConvert_ && boundaryStagesRawInputBytes(io.dtype) && !linkedInput(bucketIndex, id))
             {
                 // (A LINKED input takes the fp32 bindInput path below even for 8-bit data: the raw-
                 // byte staging convert re-runs every submit and would overwrite the resident state.)
                 // Whole-graph GPU run: keep the caller's raw 8-bit bytes (rt.dtype stays the declared 8-bit
-                // type) and let the GPU convert them at the boundary — uint8/int8 -> device fp16 + NC4HW4
-                // gather — skipping the host uint8->fp32->fp16 pack. The Vulkan backend recognizes the 8-bit
-                // rt.dtype, memcpys the raw NCHW bytes into a staging buffer, and dispatches boundary_convert.
+                // type) and let the GPU convert them at the boundary — uint8/int8 -> device fp16/fp32 +
+                // NC4HW4 gather, the integer value zero- or sign-extended — skipping the host
+                // uint8->fp32->fp16 pack. The Vulkan backend recognizes the 8-bit rt.dtype, memcpys the raw
+                // NCHW bytes into a staging buffer, and dispatches the boundary_convert variant for that
+                // dtype; when it cannot stage (no 8-bit storage on the device), its host upload decodes the
+                // raw bytes with the same decodeHostLanesToFloat32 bindInput uses.
                 rt.dtype      = io.dtype;
                 rt.host.bytes = io.data;
                 rt.hostValid  = true;
@@ -2397,10 +2369,11 @@ namespace vknn {
         info.dtype = g.tensors[id].dtype;
         info.elems = numElements(info.shape);
         // Zero-copy boundary buffer the caller provides: the segment's device layout for this tensor at
-        // the compute precision (fp16 -> 2 bytes/elem). Flat boundaries are row-major NCHW; the rest are
-        // NC4HW4 (channels in groups of 4, padded), whose byte size includes the channel padding.
-        int64_t elemSize = (prec == Precision::High) ? 4 : 2;
-        info.deviceDtype = (prec == Precision::High) ? DType::Float32 : DType::Float16;
+        // the compute precision (fp16 -> 2 bytes/elem), or fp32 for a tensor pinned to fp32 storage (the
+        // Vulkan segment's boundaryDeviceDtype). Flat boundaries are row-major NCHW; the rest are NC4HW4
+        // (channels in groups of 4, padded), whose byte size includes the channel padding.
+        info.deviceDtype = boundaryDeviceDtype(prec != Precision::High, g.desc(id).storeFp32);
+        int64_t elemSize = (int64_t) dtypeSize(info.deviceDtype);
         if (g.desc(id).gpuFlat)
         {
             info.deviceBytes  = info.elems * elemSize;

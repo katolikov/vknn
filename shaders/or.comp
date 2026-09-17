@@ -1,0 +1,33 @@
+#version 450
+#include "precision.glsl"
+// Flat broadcasting boolean OR (out = (a != 0 || b != 0) ? 1 : 0), operands read by logicalIsTrue.
+// The per-axis output dims and operand strides live in a geometry SSBO (binding 3), not the push
+// constant, so the decodable rank is unbounded (built by logical::flatBroadcastGeometry and uploaded by
+// flat::uploadFlatGeom). The three rank-length arrays pack back-to-back:
+// outDim = geometry[0..rank), aStride = geometry[rank..2*rank), bStride = geometry[2*rank..3*rank).
+#include "common.glsl"
+#include "logical_truth.glsl"
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer OperandA { STORE operandA[]; };
+layout(std430, binding = 1) readonly  buffer OperandB { STORE operandB[]; };
+layout(std430, binding = 2) writeonly buffer Result { STORE result[]; };
+layout(std430, binding = 3) readonly  buffer Geometry { int geometry[]; };
+layout(push_constant) uniform PC { int rank, total; } pc;
+
+// Index of each operand's stride array inside the geometry SSBO, in units of rank.
+const int kGeomAStrideArray = 1;
+const int kGeomBStrideArray = 2;
+
+void main() {
+  uint elementIndex = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  if (elementIndex >= uint(pc.total)) return;
+  int remainingIndex = int(elementIndex), operandAIndex = 0, operandBIndex = 0;
+  for (int axis = pc.rank - 1; axis >= 0; --axis) {
+    int axisCoordinate = remainingIndex % geometry[axis];
+    remainingIndex /= geometry[axis];
+    operandAIndex += axisCoordinate * geometry[kGeomAStrideArray * pc.rank + axis];
+    operandBIndex += axisCoordinate * geometry[kGeomBStrideArray * pc.rank + axis];
+  }
+  bool combined = logicalIsTrue(float(operandA[operandAIndex])) || logicalIsTrue(float(operandB[operandBIndex]));
+  result[elementIndex] = STORE(combined ? kLogicalTrue : kLogicalFalse);
+}

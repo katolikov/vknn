@@ -1,6 +1,21 @@
+#include "nc4_packing.h"
 #include "passes_internal.h"
 
 namespace vknn {
+
+    namespace {
+        // Whether a layout-agnostic op's output shape reads its data input's NC4HW4 buffer element for
+        // element, so the op can run as an NC4HW4 byte copy (or index remap). Equal channel counts are
+        // not enough: [4,4] (N=4, C=4) and [1,4,4] (N=1, C=4, H=4) both hold 16 elements in 16 slots,
+        // but in transposed order. A node missing its data input or its output copies nothing.
+        bool agnosticKeepsNc4Packing(const Graph &g, const Node &n) {
+            if (n.inputs.empty() || n.inputs[0] == kNoTensor || n.outputs.empty() || n.outputs[0] == kNoTensor)
+            {
+                return true;
+            }
+            return nc4PackingIdentical(g.desc(n.inputs[0]).shape, g.desc(n.outputs[0]).shape);
+        }
+    } // namespace
 
     // Does this op run as a FLAT (row-major) GPU op rather than the NC4HW4 path? Mirrors the cases the
     // Vulkan supportsNode() can't do in NC4HW4: Transpose/Slice always; Softmax on a non-channel axis;
@@ -183,9 +198,14 @@ namespace vknn {
             case OpType::ChannelShuffle:
                 // Kernels exist in BOTH layouts (channel_shuffle_flat / channel_shuffle_nc4), so the
                 // node runs in whatever layout its input carries — globalLayoutAssign resolves it
-                // through the Agnostic arm (channel count is unchanged, so the output simply adopts
-                // the input's layout) and this predicate mirrors that assignment for direct callers.
-                return !n.inputs.empty() && n.inputs[0] != kNoTensor && g.desc(n.inputs[0]).gpuFlat;
+                // through the Agnostic arm (the output shape equals the input shape, so the output
+                // adopts the input's layout) and this predicate mirrors that assignment for direct
+                // callers.
+                if (n.inputs.empty() || n.inputs[0] == kNoTensor)
+                {
+                    return false;
+                }
+                return g.desc(n.inputs[0]).gpuFlat || !agnosticKeepsNc4Packing(g, n);
             default:
                 // A ShapeDependent descriptor with no arm here (a mis-registration): fall back to the
                 // NC4HW4 default, matching a plain Nc4 op.
@@ -203,10 +223,11 @@ namespace vknn {
         enum class LKind { FixedFlat, FixedNC4, Flexible, Agnostic };
 
         bool layoutAgnostic(const Node &n) {
-            // metadata reshape / no-op copy: input and output bytes are identical, so it keeps its
-            // layout. ChannelShuffle is not a byte copy but has a kernel in BOTH layouts (a pure
-            // index remap either way), so it equally adopts its input's layout — the channel count
-            // is unchanged, which keeps the NC4HW4 arm of the agnostic rule valid.
+            // metadata reshape / no-op copy: the output holds the input's elements in the same
+            // row-major order, so a flat input is a valid flat output, and an NC4HW4 input is a valid
+            // NC4HW4 output when the two shapes share the NC4HW4 packing (agnosticKeepsNc4Packing).
+            // ChannelShuffle is not a byte copy but has a kernel in BOTH layouts (a pure index remap
+            // either way) and keeps its input shape, so it equally adopts its input's layout.
             return n.type == OpType::Reshape || n.type == OpType::Flatten || n.type == OpType::Squeeze || n.type == OpType::Unsqueeze || n.type == OpType::Cast || n.type == OpType::ChannelShuffle;
         }
 
@@ -217,6 +238,13 @@ namespace vknn {
             const bool needFlat = n.outputs.empty() || n.outputs[0] == kNoTensor ? false : g.desc(n.outputs[0]).gpuFlat;
             // GridSample's non-warp grid is always a flat [N,Hout,Wout,2] buffer (see convertRead).
             return (n.type == OpType::GridSample && inputIndex == 1 && !n.attr.has("warp")) ? true : needFlat;
+        }
+
+        /// Whether a node runs in its data operand's layout whichever layout that is: a layout-agnostic
+        /// op whose output keeps the operand's NC4HW4 packing runs NC4HW4 on an NC4HW4 operand and flat
+        /// on a flat one, so its own reads decide nothing and the reads of its output decide for it.
+        bool passesLayoutThrough(const Graph &g, const Node &n) {
+            return layoutAgnostic(n) && !n.inputs.empty() && n.inputs[0] != kNoTensor && !n.outputs.empty() && n.outputs[0] != kNoTensor && agnosticKeepsNc4Packing(g, n);
         }
 
         LKind opLayoutKind(const Graph &g, const Node &n) {
@@ -236,9 +264,10 @@ namespace vknn {
     // spliced in below.
     static void globalLayoutAssign(Graph &g) {
         // 1) seed fixed + agnostic layouts in topo order (producers precede consumers). A flat reshape is a
-        //    plain row-major copy (valid for any shape); the NC4HW4 byte-copy is only valid when the channel
-        //    count is unchanged (else the vec4 interleave shifts) — so an agnostic op is flat if its input
-        //    is flat OR it changes the channel count.
+        //    plain row-major copy (valid for any shape); the NC4HW4 byte-copy is only valid when the output
+        //    shape stores its elements at the input's NC4HW4 positions (nc4PackingIdentical) — so an
+        //    agnostic op is flat if its input is flat OR the reshape changes the NC4HW4 packing, and the
+        //    splicer below then converts its NC4HW4 input to flat in front of it.
         auto seedFromProducers = [&g]() {
             for (auto &nd: g.nodes)
             {
@@ -246,10 +275,7 @@ namespace vknn {
                 bool  f;
                 if (k == LKind::Agnostic && !nd.inputs.empty() && nd.inputs[0] != kNoTensor)
                 {
-                    bool    inFlat = g.desc(nd.inputs[0]).gpuFlat;
-                    int64_t cin    = NCHW::from(g.desc(nd.inputs[0]).shape).c;
-                    int64_t cout   = NCHW::from(g.desc(nd.outputs[0]).shape).c;
-                    f              = inFlat || cin != cout;
+                    f = g.desc(nd.inputs[0]).gpuFlat || !agnosticKeepsNc4Packing(g, nd);
                 } else if (k == LKind::FixedNC4)
                 {
                     f = false;
@@ -352,7 +378,15 @@ namespace vknn {
                                 const Node &R = g.nodes[rj];
                                 if (layoutAgnostic(R))
                                 {
-                                    continue; // adopts whatever this node chooses: no convert either way
+                                    // Reading its data operand, an agnostic op adopts this node's layout
+                                    // when its reshape keeps the NC4HW4 packing (no convert either way)
+                                    // and runs flat whatever this node chooses otherwise. A parameter
+                                    // read follows R's data operand, not this node.
+                                    if (R.inputs[0] == o && !agnosticKeepsNc4Packing(g, R))
+                                    {
+                                        voteEdge(o, true);
+                                    }
+                                    continue;
                                 }
                                 voteEdge(o, flexSet.count(rj) ? R.attr.geti("pw_flat", 0) != 0 : gpuFlatNode(g, R));
                             }
@@ -375,31 +409,7 @@ namespace vknn {
                     }
                     // Re-seed every tensor layout with the updated pw_flat facts so the next round's
                     // (and the convert splicer's) view of neighbor layouts is consistent.
-                    for (auto &nd: g.nodes)
-                    {
-                        LKind k = opLayoutKind(g, nd);
-                        bool  f;
-                        if (k == LKind::Agnostic && !nd.inputs.empty() && nd.inputs[0] != kNoTensor)
-                        {
-                            bool    inFlat = g.desc(nd.inputs[0]).gpuFlat;
-                            int64_t cin    = NCHW::from(g.desc(nd.inputs[0]).shape).c;
-                            int64_t cout   = NCHW::from(g.desc(nd.outputs[0]).shape).c;
-                            f              = inFlat || cin != cout;
-                        } else if (k == LKind::FixedNC4)
-                        {
-                            f = false;
-                        } else
-                        {
-                            f = gpuFlatNode(g, nd);
-                        }
-                        for (TensorId o: nd.outputs)
-                        {
-                            if (o != kNoTensor)
-                            {
-                                g.desc(o).gpuFlat = f;
-                            }
-                        }
-                    }
+                    seedFromProducers();
                 }
             }
         }
@@ -412,13 +422,29 @@ namespace vknn {
         //    same-dtype reorder, so the result is byte-identical either way, and the rule is a pure
         //    function of the graph (adoption only ever flips NC4HW4 -> flat, so the loop below is
         //    monotone and its fixed point is unique).
+        //    A reader that passes the layout through (passesLayoutThrough: a reshape keeping the NC4HW4
+        //    packing, a Cast, a ChannelShuffle) reads flat exactly when every read of its output does,
+        //    followed through further such readers, so an input reaching only flat readers through
+        //    those hops is packed flat too. A pass-through reader whose output is also a graph output
+        //    leaves the input at the NC4HW4 default.
         {
-            constexpr int kInputLayoutMaxRounds = 8; // monotone; this only caps pathological churn
+            constexpr int    kInputLayoutMaxRounds = 8; // monotone; this only caps pathological churn
+            constexpr size_t kDataOperand          = 0;
+            // One read of a tensor: an input slot of a node, or a fused residual/bias edge (read in the
+            // node's own layout).
+            struct TensorRead {
+                size_t node      = 0;
+                size_t slot      = 0;
+                bool   fusedEdge = false;
+            };
+            const std::set<TensorId> graphOutputs(g.outputs.begin(), g.outputs.end());
             for (int round = 0; round < kInputLayoutMaxRounds; ++round)
             {
-                std::set<TensorId> produced;
-                for (const Node &nd: g.nodes)
+                std::set<TensorId>                   produced;
+                std::vector<std::vector<TensorRead>> reads(g.tensors.size());
+                for (size_t nodeIndex = 0; nodeIndex < g.nodes.size(); ++nodeIndex)
                 {
+                    const Node &nd = g.nodes[nodeIndex];
                     for (TensorId o: nd.outputs)
                     {
                         if (o != kNoTensor)
@@ -426,38 +452,63 @@ namespace vknn {
                             produced.insert(o);
                         }
                     }
-                }
-                std::map<TensorId, bool> allReadersFlat; // absent => no reader seen yet
-                for (const Node &nd: g.nodes)
-                {
                     for (size_t inIdx = 0; inIdx < nd.inputs.size(); ++inIdx)
                     {
-                        TensorId in = nd.inputs[inIdx];
-                        if (in == kNoTensor || g.isInitializer(in) || produced.count(in))
+                        const TensorId in = nd.inputs[inIdx];
+                        if (in != kNoTensor && in < (TensorId) reads.size())
                         {
-                            continue;
+                            reads[(size_t) in].push_back({nodeIndex, inIdx, false});
                         }
-                        bool &all = allReadersFlat.emplace(in, true).first->second;
-                        all       = all && readerWantsFlat(g, nd, inIdx);
                     }
                     for (TensorId edge: {nd.fusedResidual, nd.fusedBias})
                     {
-                        if (edge == kNoTensor || g.isInitializer(edge) || produced.count(edge))
+                        if (edge != kNoTensor && edge < (TensorId) reads.size())
                         {
-                            continue;
+                            reads[(size_t) edge].push_back({nodeIndex, 0, true});
                         }
-                        bool &all = allReadersFlat.emplace(edge, true).first->second;
-                        all       = all && (!nd.outputs.empty() && nd.outputs[0] != kNoTensor && g.desc(nd.outputs[0]).gpuFlat);
+                    }
+                }
+                // Whether every read of a pass-through reader's output runs flat. Nodes are in
+                // topological order (the seed relies on the same), so walking them backwards resolves
+                // each reader before the node whose output it reads; an entry never resolved stays
+                // false, the NC4HW4 default.
+                std::vector<bool> passThroughOutputReadsFlat(g.tensors.size(), false);
+                auto              readRunsFlat = [&](const TensorRead &read) -> bool {
+                    const Node &reader = g.nodes[read.node];
+                    if (read.fusedEdge)
+                    {
+                        return !reader.outputs.empty() && reader.outputs[0] != kNoTensor && g.desc(reader.outputs[0]).gpuFlat;
+                    }
+                    if (read.slot == kDataOperand && passesLayoutThrough(g, reader))
+                    {
+                        return passThroughOutputReadsFlat[(size_t) reader.outputs[0]];
+                    }
+                    return readerWantsFlat(g, reader, read.slot);
+                };
+                auto allReadsRunFlat = [&](TensorId t) {
+                    const std::vector<TensorRead> &tensorReads = reads[(size_t) t];
+                    return !tensorReads.empty() && std::all_of(tensorReads.begin(), tensorReads.end(), readRunsFlat);
+                };
+                for (size_t nodeIndex = g.nodes.size(); nodeIndex-- > 0;)
+                {
+                    const Node &nd = g.nodes[nodeIndex];
+                    if (passesLayoutThrough(g, nd) && nd.outputs[0] < (TensorId) reads.size() && !graphOutputs.count(nd.outputs[0]))
+                    {
+                        passThroughOutputReadsFlat[(size_t) nd.outputs[0]] = allReadsRunFlat(nd.outputs[0]);
                     }
                 }
                 bool changed = false;
-                for (const auto &entry: allReadersFlat)
+                for (size_t t = 0; t < reads.size(); ++t)
                 {
-                    TensorDesc &d = g.desc(entry.first);
-                    if (entry.second && !d.gpuFlat)
+                    const TensorId input = (TensorId) t;
+                    if (g.isInitializer(input) || produced.count(input) || g.desc(input).gpuFlat)
                     {
-                        d.gpuFlat = true;
-                        changed   = true;
+                        continue;
+                    }
+                    if (allReadsRunFlat(input))
+                    {
+                        g.desc(input).gpuFlat = true;
+                        changed               = true;
                     }
                 }
                 if (!changed)

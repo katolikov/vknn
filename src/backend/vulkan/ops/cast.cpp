@@ -4,9 +4,12 @@
 // fp32/fp16 value, and the graph boundary repacks it to the declared dtype. The narrowing per target
 // matches the CPU Cast op followed by the readback narrowing (session.cpp readbackOutput) bit-for-bit:
 // INT8 wraps modulo 2^8 (ONNX Cast to a smaller int is modulo, not saturation), UINT8 saturates to
-// [0,255], the wide targets (INT32/INT64/UINT32/UINT64) truncate only. supportsNode runs int64 -> the
+// [0,255], the wide targets (INT32/INT64/UINT32/UINT64) truncate only, and BOOL is a truth test (1 for
+// any nonzero value, NaN included; 0 for +0/-0) rather than a truncation. supportsNode runs int64 -> the
 // scalar/narrow targets on the GPU (the int64 lanes decode to compute-precision float at the pack
-// boundary); INT16/UINT16 are not distinct vknn dtypes (they map to fp32 storage) and take the copy path.
+// boundary); INT16/UINT16 are not distinct vknn dtypes (they map to fp32 storage) and saturate here.
+#include "backend/vulkan/ops/cast_modes.h"
+#include "import/onnx/onnx_types.h"
 #include "vk_op_common.h"
 #include "vknn/op.h"
 #include <limits>
@@ -17,31 +20,34 @@ namespace vknn {
         // Local workgroup size along x; matches local_size_x in shaders/cast.comp.
         constexpr uint32_t kCastLocalSize = 256;
 
+        // ONNX TensorProto.DataType code of BOOL.
+        constexpr int64_t kOnnxBool = (int64_t) onnx::OnnxType::Bool;
+
         struct CastOp: VulkanOp {
             struct PC {
                 int   total;
                 float lo, hi;
-                int   mode; // 0 = wide (clamp to fence inf/NaN), 1 = INT8 wrap, 2 = UINT8 saturate
+                int   mode; // one of the kCastMode* values
             } pc {};
-            bool                                 truncate = false;
+            bool                                 truncate = false; // true: dispatch cast.comp; false: byte copy
             std::shared_ptr<vk::ComputePipeline> pipe;
             std::shared_ptr<vk::Buffer>          hold0; // when input is a constant initializer
 
             void prepare(const Node &node, VkOpEnv &env) override {
                 int64_t to = node.attr.geti("to", 1); // ONNX TensorProto dtype
-                pc.mode    = 0;
+                pc.mode    = kCastModeWide;
                 // integer targets that need a value truncation (not a same-precision copy)
                 switch (to)
                 {
                     case 2:
                         truncate = true;
-                        pc.mode  = 2;
+                        pc.mode  = kCastModeUInt8Saturate;
                         pc.lo    = 0.0f;
                         pc.hi    = 255.0f;
                         break; // UINT8: saturate (matches readbackOutput's uint8 clamp)
                     case 3:
                         truncate = true;
-                        pc.mode  = 1;
+                        pc.mode  = kCastModeInt8Wrap;
                         pc.lo    = -128.0f;
                         pc.hi    = 127.0f;
                         break; // INT8: modulo wrap (matches readbackOutput's (int8_t) narrowing)
@@ -55,11 +61,12 @@ namespace vknn {
                         pc.lo    = -32768.0f;
                         pc.hi    = 32767.0f;
                         break; // INT16 (fp32 output tensor: narrows here, saturate)
-                    case 9:
+                    case kOnnxBool:
+                        // BOOL (uint8 output tensor): a truth test over the untruncated value, so 0.5,
+                        // -3 and NaN all store 1. The mode reads neither lo nor hi.
                         truncate = true;
-                        pc.lo    = 0.0f;
-                        pc.hi    = 1.0f;
-                        break; // BOOL (uint8 output tensor: truncate + clamp to [0,1])
+                        pc.mode  = kCastModeBool;
+                        break;
                     case 6:
                     case 7:
                     case 12:
@@ -73,8 +80,7 @@ namespace vknn {
                         pc.hi    = 3.4e38f;
                         break;
                     default:
-                        // FLOAT/FLOAT16/DOUBLE (and INT16/UINT16/BOOL, which map to fp32/uint8 storage,
-                        // not a distinct narrow-int output tensor) -> same-precision copy.
+                        // FLOAT/FLOAT16/DOUBLE (and any other target) -> same-precision copy.
                         truncate = false;
                         break;
                 }

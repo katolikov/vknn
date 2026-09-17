@@ -44,7 +44,7 @@ enum class OpType {
   Relu,
   Add,
   // ...
-  FusedAttention,  // <-- the current last value
+  Mean,            // <-- the current last value
   LeakyRelu,       // <-- new values go at the END: y = x>=0 ? x : alpha*x
 };
 ```
@@ -91,7 +91,7 @@ kernel is mandatory: `tools/check_support_consistency.py` (run by `scripts/ci_ho
 fails when an OpType mapped in `opTypeFromOnnx()` has no `VKNN_REGISTER_CPU_OP` under
 `src/backend/cpu/ops/` — a recognized op with no CPU kernel cannot run even as a
 fallback. (Its `CPU_KERNEL_EXEMPT` list excuses only ops an import pass lowers away
-before planning — the quantized family, `Dropout`, `InstanceNorm`, the ORT contrib
+before planning — the quantized family, `Dropout`, `InstanceNorm`, `Mean`, the ORT contrib
 family.) The Vulkan kernel is the optional half.
 
 ---
@@ -341,7 +341,7 @@ exact gate the device engine runs, with no chance of the two drifting.
 - **`vkKernelDeclared(OpType)`** — a `switch` that mirrors the `VKNN_REGISTER_VK_OP`
   set. It returns `true` by default, and lists (as `return false`) the ops that have
   *no* GPU kernel: the const-folded / import-lowered ops (`Unknown`, `Identity`,
-  `Constant`, `Shape`, `EyeLike`, `Dropout`, `InstanceNorm`), the quantized family
+  `Constant`, `Shape`, `EyeLike`, `Dropout`, `InstanceNorm`, `Mean`), the quantized family
   lowered by the dequantize pass, and the ORT contrib family expanded by
   `lowerOrtContribOps` (`SimplifiedLayerNorm` … `MatMulNBits`). A new op with a Vulkan kernel is already covered by the `default:
   return true` — leave it alone unless the op has no kernel.
@@ -354,7 +354,13 @@ exact gate the device engine runs, with no chance of the two drifting.
   is not listed, so it falls through to the gate's `return true`. Add a case only when
   the kernel cannot handle every shape/attribute the op admits (a non-4D input, a
   runtime operand the kernel can't bind, an unresolved output shape); model it on the
-  `Pad` / `ConstantOfShape` / `TopK` cases.
+  `Pad` / `ConstantOfShape` / `TopK` cases. Refuse there, never throw from `prepare()`: nothing on the
+  load path catches a `prepare()` throw, so a node the gate admits but the kernel cannot run fails the
+  whole session instead of falling back. A limit the gate and the kernel's plan both enforce lives in
+  one Vulkan-free header both call (`src/core/arg_extreme_limits.h` for ArgMax/ArgMin), and an
+  attribute the kernel reads is validated by name in the gate (`BitShift: direction must be LEFT or
+  RIGHT`). A node the GPU kernel would compute with different semantics than the CPU oracle is refused
+  too — `Binary: integer Div on an int64 operand` keeps an exact int64 division on the CPU op.
 
 ### 3d. The capability descriptor: `op_descriptor.cpp`
 
@@ -386,6 +392,17 @@ The OpType-keyed capability facts an op declares — its GPU **layout class** an
 epilogue) — no descriptor edit is needed. `op_descriptor.cpp`'s comment header enumerates which
 OpTypes deviate from the default. The `OpDescriptor.LayoutClassAgreesWithGpuFlatNode` test asserts
 the descriptor and `gpuFlatNode` never disagree.
+
+The table is sized by `kMaxOp`, the last `OpType` enumerator with a row. A new op that takes a row raises
+`kMaxOp` to the new last enumerator: a `set()` row past it throws while the table is built, so every
+`opDescriptor` lookup then fails with a message naming the op, and a lookup past `kMaxOp` reads the
+all-default row. `LayoutClassAgreesWithGpuFlatNode` loops through the last enumerator, so extend its
+bound in `tests/test_support_report.cpp` to the new value as well. A graph containing any `Flat` or
+`ShapeDependent` op keeps the flat-layout pass on even when `Hint::FlatLayout` is Off
+(`graphKeepsFlatLayoutPass`, `core/flat_layout_rule.h`): a `Flat` op's kernel has no NC4HW4 plan, and the
+rule reads the class rather than the node, so a `ShapeDependent` op (Add, Binary, Concat, ...) keeps the
+pass on even where its node runs an NC4HW4 kernel. Only a graph of `Nc4` ops lets `Hint::FlatLayout` Off
+skip the pass.
 
 The Vulkan backend's `supports()` then returns `true` for `LeakyRelu`
 (because `VkOpRegistry::instance().has(LeakyRelu)` is true and `vkKernelDeclared`
@@ -427,6 +444,70 @@ never requests an epilogue variant. That turns what used to be a device-load-tim
 `shader not found` throw into a build diagnostic. `tools/check_shader_contracts.py`
 separately enforces the fp16 store contracts the epilogue relies on (`store16.glsl`
 inclusion, `VKNN_NO_RTE` ordering).
+
+### 3f. Integer results and storage precision
+
+The GPU stores every tensor as fp16 or fp32 float lanes: an fp16 lane holds consecutive integers only up
+to 2^11 and saturates at 65504, an fp32 lane up to 2^24. `pinIntegerResultsFp32`
+(`src/import/mark_fp32.cpp`) keeps integer values at fp32 storage wherever a node needs them exact. It
+reads three tables in that file, and an op with integer semantics registers in the one that matches:
+
+- `producesIntegers`: an output that holds integers whatever the operands hold (Shape, ArgMax/ArgMin,
+  TopK's indices, a Cast to an integer type, the bitwise ops, an integer Mod). The op's seed in the
+  pass's seed `switch` says whether the result is always pinned (ArgMax, the bitwise ops, Mod) and whether
+  its runtime operands or its integer data join the region with it.
+- `integerDataSlots`: how the result relates to the integer values in the op's data operands, with the
+  data slots, the operands read exactly without typing the result, and the outputs holding the data's
+  values. `Moves` copies or selects values (movement ops, Pad and its fill value, ScatterND and its
+  updates, TopK's values, Concat, Where's values); `Computes` is integer arithmetic (Add, Binary, the
+  integer Reduce kinds, Range, Clip, Neg, Abs, and Pow with its exponent read exactly); `Compares` is a
+  0/1 result read from exactly compared integers (Equal, Greater, Less and their OrEqual forms); `Casts`
+  is a Cast. Follow the CPU op: an operand whose int64 input makes an int64 result is a data slot. Keep
+  the `Moves` entries in step with `producerElementType` in `src/import/mod_integer_operands.cpp`; the
+  `MovementOpsCarryTheRegionToTheirIntegerSources` test checks both on every movement op.
+- `storageCanPin` and `uploadsConstantOperandsItself`: an NC4HW4 output takes fp32 storage only when its
+  kernel has an fp32 variant (list the op in `storageCanPin`), and any output only when its kernel reads
+  a constant operand 0 at its own precision (`operandBuf` or a constant buffer of its own; list the op in
+  `uploadsConstantOperandsItself`). A kernel reading a constant through `env.devBuf` gets the buffer the
+  segment fills at its own storage precision, so an fp32 node would read fp16 bytes.
+
+The pass floods `storeFp32` from each seed through the `Moves` and `Computes` ops toward the sources and
+the consumers, stopping where a reader computes a float, so the node selects its fp32 variant
+(`env.useFp16` is false for a pinned output) and `markFp32` bridges the region's float frontier. A kernel
+that reads an input at that input's own storage precision instead of through a bridge takes an exemption
+in `markFp32`'s frontier walk (ArgMax/ArgMin input 0, beside the GridSample and Gather precedents) and
+picks its shader variant from that input's `storeFp32`.
+
+The session runs the layout and precision passes as one function, `planFlatLayoutAndStorage`
+(`insertLayoutConverts` → `pinGatherIndexFp32` → `pinGridSampleGridFp32` → `pinIntegerResultsFp32` →
+`markFp32` → topo sort), because each pin reads the layouts the layout pass assigns and `markFp32` must
+see every pin. A host test of a pin builds a graph with default layouts and calls
+`planFlatLayoutAndStorage`, so it exercises the load order the device runs (see
+`tests/test_logical_bitwise_wiring.cpp`).
+
+### 3g. Proving the shader on the host
+
+Host builds compile the Vulkan backend out, so GLSL never runs in `vknn_tests`. A kernel whose arithmetic
+is not a direct transcription of the CPU op (an exact `fmod`, integer math on float lanes, a NaN rule)
+carries a C++ transcription of its shader functions in the op's test file — same statement order, same
+names and constants — swept against the CPU oracle over the value classes that matter (both zeros, NaN,
+±inf, subnormals, the ±2^24 integer edge, every fp16 bit pattern where the fp16 variant stores).
+
+A transcription alone drifts silently when the `.comp` changes, so a source test ties the two together:
+it reads the shader through `__FILE__` (`tests/*.cpp` are globbed as absolute paths, so the shader sits at
+`../shaders/<stem>.comp` from the test file), normalizes whitespace and comments, and requires the
+transcribed functions to match token for token. It also pins whatever interface the op relies on — the
+push-constant members in order, each binding declaration, specialization-constant ids, the local size
+against `flat::kFlatLocalSize`, the shader's named constants against the test's. It skips only when the
+sources are unreadable (a test binary run on a device). Mode and layout values that the op and the test
+share live in a header free of Vulkan types (`src/backend/vulkan/ops/cast_modes.h`,
+`arg_extreme_plan.h`) so the host test includes the op's own definitions; an interface that stays in an
+op file is read from that file's text. `tests/shader_source_check.h` carries the shared readers (function
+bodies, named constants, push-constant and struct members, bindings, local size). Precedents:
+`ModOps.ShaderTranscriptionMatchesCompSource`, `ArgExtremeShader.SourceMatchesTranscriptionAndInterface`,
+`CastShaderSource.TranscribedLinesAndModeValuesMatchCastComp`,
+`BitwiseShaderSource.TranscriptionAndInterfaceMatchTheShaders`,
+`LogicalShaderSource.TranscriptionAndInterfaceMatchTheShaders`.
 
 ---
 
@@ -597,11 +678,20 @@ Vulkan/CPU segments while keeping the output bit-comparable).
       single place those OpType-keyed facts live; `gpuFlatNode` and the pointwise-fusion pass read
       it. A pure pointwise op keeps the all-default row (no edit). Only a `ShapeDependent` layout
       also needs a per-node arm in `gpuFlatNode` (`src/import/insert_layout_converts.cpp`), kept in
-      sync with its `vkNodeGate` case.
+      sync with its `vkNodeGate` case. A row raises `kMaxOp` to the last enumerator, and the
+      `LayoutClassAgreesWithGpuFlatNode` loop bound in `tests/test_support_report.cpp` follows it.
+- [ ] An op with integer semantics on the GPU: its row in `pinIntegerResultsFp32`'s tables
+      (`src/import/mark_fp32.cpp`, §3f) — `producesIntegers` for an always-integer result,
+      `integerDataSlots` (`Moves` / `Computes` / `Compares`) for values copied or computed from integer
+      operands, and `storageCanPin` / `uploadsConstantOperandsItself` for the kernel's fp32 and constant
+      operand facts — tested through `planFlatLayoutAndStorage`; a node whose float kernel would change
+      the integer answer is refused in `vkNodeGate` by name.
 - [ ] For a **producer** op that should host a fused pointwise-chain epilogue (§3e):
       `#include "pw_epilogue.glsl"` under `#ifdef PW_EPI` in the shader (auto-derives the
       `_epi` variants), `PwEpi` wiring in the op, and set the descriptor row's `pwEpilogue`.
       `tools/check_epi_sync.py` enforces the three agree — no CMake stem list to edit.
+- [ ] A shader whose arithmetic the CPU op does not share line for line: a C++ transcription swept
+      against the CPU oracle plus a source test that pins it to the `.comp` (§3g).
 - [ ] Add a gtest under `tests/` and run it with `./build.sh --test` (builds + runs the host unit
       tests only); diff Vulkan output against the CPU reference (and against `scripts/get_golden.py`
       for an external check). Confirm the node lands on the GPU with

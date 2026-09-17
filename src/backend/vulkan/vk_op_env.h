@@ -1,5 +1,6 @@
 // Vulkan operator surface: op environment, op base class, registry + registration macro.
 #pragma once
+#include "ops/upload_init_rule.h"
 #include "vk_buffer.h"
 #include "vk_command.h"
 #include "vk_context.h"
@@ -47,17 +48,19 @@ namespace vknn {
         // the session keeps its weights (Config::freeWeightsAfterUpload off). Only weights uploaded at
         // prepare() time are released; record-time constant operands stay resident.
         std::function<void(TensorId)> releaseInitializer;
-        // Memo of the flat device buffer already uploaded for an initializer of THIS graph. A weight may
-        // feed several nodes; once its host bytes are released the content digest can no longer be
-        // recomputed, so every consumer after the first resolves through this memo instead.
-        std::function<std::shared_ptr<vk::Buffer>(TensorId)>       lookupFlatWeight;
-        std::function<void(TensorId, std::shared_ptr<vk::Buffer>)> rememberFlatWeight;
-        bool                                                       useFp16  = false;   // per-node: false for a storeFp32 node so it runs its fp32 kernel
-        bool                                                       baseFp16 = false;   // segment-wide precision (what a non-storeFp32 tensor is stored as)
-        WeightCache                                               *weights  = nullptr; // prepacked-weight + tuning cache (may be null)
-        vk::CommandRunner                                         *runner   = nullptr; // for on-device autotuning benchmarks
-        Tuning                                                     tuning   = Tuning::Fast;
-        Mode                                                       winograd = Mode::Auto;
+        // Memo of the device buffer already uploaded for an initializer of THIS graph, per store it holds
+        // (flat fp16, flat fp32, raw bytes: upload_init_rule.h). A weight may feed several nodes; once its
+        // host bytes are released the content digest can no longer be recomputed, so every consumer after
+        // the first at the same store resolves through this memo instead. A consumer at another store
+        // never receives the copy (an fp16 copy read as fp32 misreads every lane and past its end).
+        std::function<std::shared_ptr<vk::Buffer>(TensorId, InitializerDeviceStore)>       lookupFlatWeight;
+        std::function<void(TensorId, InitializerDeviceStore, std::shared_ptr<vk::Buffer>)> rememberFlatWeight;
+        bool               useFp16  = false;   // per-node: false for a storeFp32 node so it runs its fp32 kernel
+        bool               baseFp16 = false;   // segment-wide precision (what a non-storeFp32 tensor is stored as)
+        WeightCache       *weights  = nullptr; // prepacked-weight + tuning cache (may be null)
+        vk::CommandRunner *runner   = nullptr; // for on-device autotuning benchmarks
+        Tuning             tuning   = Tuning::Fast;
+        Mode               winograd = Mode::Auto;
         // Per-model namespace for the weight cache, so reusing one cache directory across different models can't
         // collide on shared node names (e.g. ResNet + Inception both have a node called "/Conv").
         std::string modelTag;

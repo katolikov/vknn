@@ -36,6 +36,8 @@ references source under `include/vknn/` and `src/`.
  ┌───────────────────────────────────────────────────────────────────────┐
  │ GRAPH PASSES   src/import/ (passes.h, one .cpp per pass)                │
  │   runStandardPasses(g, PassOptions)                                     │
+ │   lowerVariadicElementwise (Sum/Mean/Max/Min of N operands → 2-input    │
+ │                       left-fold chains)                                 │
  │   dequantizeGraph    (QDQ/QLinear → float + saturation Clip; default on) │
  │   inferShapes        (resolves dynamic dims from declared shapes;        │
  │                       batch defaults to 1)                               │
@@ -160,13 +162,17 @@ struct Node {
 ```
 
 `OpType` (`include/vknn/op_type.h`, append-only — `.vxm` files store the raw
-integer) enumerates the full supported set (~80 ops, per-op coverage in
+integer) enumerates the full supported set (~90 ops, per-op coverage in
 [op-coverage.md](op-coverage.md)): the conv family (`Conv`, `ConvTranspose`),
 `Gemm`/`MatMul`/`Einsum`, pooling, normalization (`BatchNorm`, `LayerNorm`,
-`Softmax`), the elementwise `Unary`/`Binary` families, data movement
+`Softmax`), the elementwise `Unary`/`Binary` families, the boolean ops (`And`, `Or`, `Xor`,
+`Not`, `IsNaN`, and the `Equal`/`Greater`/`Less` compare family with `Where`), the integer ops
+(`Mod`, `BitShift`, `BitwiseAnd`/`BitwiseOr`/`BitwiseXor`/`BitwiseNot`), index selection
+(`TopK`, `ArgMax`, `ArgMin`), data movement
 (`Reshape`, `Transpose`, `Slice`, `Concat`, `Gather`, `ScatterND`, ...), the
 generator ops `ConstantOfShape` / `Range` (which run on the GPU once their output
-size resolves), the quantized family the dequantize pass lowers (`QuantizeLinear`,
+size resolves), the kernel-less `Mean` that import lowers (with variadic `Sum`/`Max`/`Min`) to
+2-input `Add`/`Binary` chains, the quantized family the dequantize pass lowers (`QuantizeLinear`,
 `DequantizeLinear`, `QLinearConv`, `MatMulInteger`, ...), and the fused ops the
 passes synthesize (`FusedSE`, `FusedDwPw`, `FusedPointwise`), the ORT contrib family lowered at
 import (`SkipLayerNorm`, `RotaryEmbedding`, `GroupQueryAttention`, `MatMulNBits`, ...), and the
@@ -330,6 +336,15 @@ Why pack this way:
   node selects its fp32 kernel variant via a per-node `env.useFp16`, and `ConvertDtype` nodes
   bridge the fp16/fp32 frontier. Empty matches are a no-op, so `normal` == `low` for models
   without the named tensors. `high` is full fp32.
+- **Load-time fp32 pins (every precision).** Before `markFp32`, the flat-layout load sequence
+  (`planFlatLayoutAndStorage`: `insertLayoutConverts` → `pinGatherIndexFp32` →
+  `pinGridSampleGridFp32` → `pinIntegerResultsFp32` → `markFp32`) sets `storeFp32` on tensors whose
+  values fp16 cannot hold: Gather index chains, GridSample grids, and integer regions (the
+  ArgMax/ArgMin indices, the bitwise and integer-Mod results and operands, and the value-preserving
+  hops around them). An integer is exact in an fp32 lane only within ±2^24, so past that a GPU
+  integer result rounds while the CPU op computes int64 exactly; a Binary `Div` with an int64
+  operand and a `Pow` with an int64 base, which the GPU kernels would compute in float, keep the
+  CPU op.
 
 Host data is always plain NCHW fp32; the conversion to/from `NC4HW4` happens only at
 segment boundaries via the `pack` / `unpack` compute shaders (§4.3, §5).
@@ -520,7 +535,10 @@ The Vulkan import primitive `vk::Buffer::importDmaBufFd`
 writes the dma-buf directly. A `layout`/`dtype` declared on `fromDmaBuf`/`toDmaBuf` that matches
 the device-native boundary (or `TensorFormat::Auto`) binds the fd directly as the boundary
 buffer; any other declaration keeps the pooled boundary buffer and a recorded `boundary_convert`
-dispatch converts on the GPU. `Session::inputInfo()`/`outputInfo()` report the exact
+dispatch converts on the GPU. A conversion reads or writes fp32 or fp16, or uint8 or int8 on a device
+with 8-bit storage buffers; any other declared dtype (int32, int64, 8-bit without that storage) fails
+the run. A boundary tensor pinned to fp32 storage reports `deviceDtype` fp32 at every precision.
+`Session::inputInfo()`/`outputInfo()` report the exact
 device-native block to allocate (`deviceBytes`/`deviceFormat`/`deviceDtype`). A failed import
 warns loudly (zero-copy unavailable) rather than reading undefined memory. Because the platform is UMA (all memory types are
 `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`) there are no staging copies, and the path is

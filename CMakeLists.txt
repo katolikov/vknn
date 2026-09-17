@@ -297,6 +297,13 @@ if(VKNN_ENABLE_VULKAN AND SHADERCC)
   bc_variant(f16_u8  float16_t  uint8_t    -DNEED_FP16=1 -DNEED_INT8=1 -DINT_DST_U8=1)
   bc_variant(f32_u8  float      uint8_t    -DNEED_INT8=1 -DINT_DST_U8=1)
   bc_variant(u8_u8   uint8_t    uint8_t    -DNEED_INT8=1 -DINT_DST_U8=1)
+  # int8 I/O (8-bit storage). Source int8 -> fp16/fp32 device sign-extends the value (exact for
+  # -128..127); device fp16/fp32 -> int8 output truncates and wraps modulo 2^8 (INT_DST_I8). The set
+  # matches kBoundaryConvertVariants in src/core/boundary_convert_rule.h.
+  bc_variant(i8_f16  int8_t     float16_t  -DNEED_FP16=1 -DNEED_INT8=1 -DINT_SRC_I8=1)
+  bc_variant(i8_f32  int8_t     float      -DNEED_INT8=1 -DINT_SRC_I8=1)
+  bc_variant(f16_i8  float16_t  int8_t     -DNEED_FP16=1 -DNEED_INT8=1 -DINT_DST_I8=1)
+  bc_variant(f32_i8  float      int8_t     -DNEED_INT8=1 -DINT_DST_I8=1)
 
   add_custom_command(
     OUTPUT ${EMBEDDED_SHADERS_CPP}
