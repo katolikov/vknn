@@ -278,9 +278,13 @@ tabs: **Chat**, **VLM** camera coach, **3D Splat** capture, and a **Library** th
 
 ## Benchmarks
 
-The current release is **v1.5.1**, a cache-persistence fix that changes no kernel and no scheduling
-decision: its outputs are byte-identical to v1.5.0 on the same device and inputs, so every figure
-below carries over unchanged and is reported under the version it was measured on.
+The current release is **v1.5.2**: ONNX `Or`/`Xor`/`Not`, `ArgMax`/`ArgMin`, `Mod`, `BitShift` and
+`BitwiseAnd`/`BitwiseOr`/`BitwiseXor`/`BitwiseNot` on both backends, variadic `Sum`/`Mean`/`Max`/`Min`,
+exact integer values on the GPU (fp32 integer regions), and fixes for wrong answers on square
+reshapes of packed tensors, int8 graph inputs and int64 arithmetic under fp16 storage. It changes no
+kernel the CNN suite runs: MobileNetV2, YOLOv8n, ResNet-50 and ShuffleNetV2 outputs are
+byte-identical to the preceding build with submit+GPU time within noise, so every figure below is
+reported under the version it was measured on.
 
 VKNN v1.5.0, whole CNN suite, fp16, `--tuning fast`, 20-iteration medians with a cooldown before
 every stage. Every number in this section uses the **default compile/run configuration** — the
